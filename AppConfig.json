@@ -1,0 +1,11 @@
+{
+  "module": "Research",
+  "name": "搞研究",
+  "bundle_id": "com.academic-achievement.manager",
+  "executable": "AcademicAchievementManager",
+  "scheme": "gaoyanjiu",
+  "widget_folder": "Widgets",
+  "widget": "ResearchWidgets",
+  "group": "5G96498KGJ.com.academic-achievement.manager",
+  "preferences": "com.academic-achievement.manager.Research"
+}
