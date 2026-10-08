@@ -9,6 +9,8 @@ NUMBER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Info.plist")
 
 xcodebuild -quiet -project "$ROOT/Widgets/ResearchWidgets.xcodeproj" -target ResearchWidgets -configuration Release CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES SYMROOT="$BUILD/widget-products" OBJROOT="$BUILD/widget-objects" CLANG_MODULE_CACHE_PATH="$BUILD/widget-cache" build
 ditto "$BUILD/widget-products/Release/ResearchWidgets.appex" "$BUILD/PlugIns/ResearchWidgets.appex"
-cp "$ROOT/Widgets/Info.plist" "$BUILD/PlugIns/ResearchWidgets.appex/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$BUILD/PlugIns/ResearchWidgets.appex/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NUMBER" "$BUILD/PlugIns/ResearchWidgets.appex/Contents/Info.plist"
+
+# Keep Xcode platform metadata and reject a plain executable disguised as an extension.
+xcrun nm -u "$BUILD/PlugIns/ResearchWidgets.appex/Contents/MacOS/ResearchWidgets" | grep -q "_NSExtensionMain$" || { echo "小组件缺少 NSExtensionMain 入口"; exit 1; }

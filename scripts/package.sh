@@ -20,6 +20,6 @@ codesign --force --sign "$SIGNING_IDENTITY" "$RELEASE_APP/Contents/Frameworks/Re
 codesign --force --sign "$SIGNING_IDENTITY" --entitlements "$ROOT/Widget.entitlements" "$RELEASE_APP/Contents/PlugIns/ResearchWidgets.appex"
 codesign --force --sign "$SIGNING_IDENTITY" --entitlements "$ROOT/App.entitlements" "$RELEASE_APP"
 codesign --verify --deep --strict "$RELEASE_APP"
-ditto -c -k --keepParent --norsrc --noextattr "$RELEASE_APP" "$ROOT/dist/搞研究-$VERSION.zip"
-(cd "$ROOT/dist"; shasum -a 256 "搞研究-$VERSION.zip" > "搞研究-$VERSION.zip.sha256")
-echo "Packaged $ROOT/dist/搞研究-$VERSION.zip"
+ditto -c -k --keepParent --norsrc --noextattr "$RELEASE_APP" "$ROOT/dist/GaoYanJiu-$VERSION.zip"
+(cd "$ROOT/dist"; shasum -a 256 "GaoYanJiu-$VERSION.zip" > "GaoYanJiu-$VERSION.zip.sha256")
+echo "Packaged $ROOT/dist/GaoYanJiu-$VERSION.zip"

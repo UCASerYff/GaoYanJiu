@@ -12,7 +12,7 @@
 
 当前使用用户个人团队的 Apple Development 证书做本机开发测试，不是 Developer ID 公证分发版本，不应把该候选安装包当成正式公开发行版本。
 
-共享组为 `5G96498KGJ.com.academic-achievement.manager.widgets`，主程序和扩展必须由同一团队签名。
+共享组为 `5G96498KGJ.com.academic-achievement.manager`，主程序和扩展必须由同一团队签名。
 更换团队时同时修改 `Sources/WidgetSnapshot.swift`、`Widgets/App.entitlements` 和 `Widgets/Widget.entitlements`。只共享派生统计快照，原始资料库仍在原目录，不需要搬入沙盒。
 
 构建：设置 `GAO_SIGNING_IDENTITY` 为有效代码签名身份，然后运行 `zsh scripts/build.sh`。证书私钥留在本机钥匙串，不随项目或安装包分发。
@@ -20,3 +20,5 @@
 安装及首次启动后，在桌面空白处右键 → 编辑小组件 → 搜索“搞研究”。若尚未产生数据快照，请打开主程序。
 
 构建必须使用随附的 Xcode app-extension 目标，而不是把普通 Swift 可执行文件改后缀为 appex。标准目标提供 NSExtensionMain 入口；脚本校验该符号以防退回“已注册却无法显示”的错误构建方式。已验证系统描述查询和三种尺寸组合的预览渲染成功，真实资料升级和统计合计核验通过。
+
+V4.01 安装流程会注销同一宿主标识下已不存在的旧程序登记，并重新注册启用独立版扩展，避免整合版高版本登记残留使系统忽略新小组件。

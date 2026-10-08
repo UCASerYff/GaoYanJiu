@@ -1,17 +1,17 @@
-# 搞研究 V4.0
+# 搞研究 V4.01
 
 独立 macOS 应用，包含本模块完整业务、游戏场景和 WidgetKit 小组件。运行不依赖搞七廿三或其他六个应用；联动功能需要同时安装相关应用。
 
 ## 下载与安装
 
-从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.0.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
+从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.01.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
 
 1. 支持 macOS 14 或更高版本、Apple Silicon；暂未提供 Intel 版本。
 2. 解压 ZIP，将 `搞研究.app` 拖入“应用程序”文件夹。
 3. 如果 macOS 拦截打开，请先确认软件来源，再进入“系统设置 → 隐私与安全性”，允许该应用打开。发行包使用 Apple Development 签名，未做 Apple 公证。
 4. 安装后运行一次，再从系统小组件列表添加本应用的小组件。整合版的小组件需要重新添加。
 
-下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.0.zip.sha256` 核验安装包。校验文件名包含中文，命令行请给文件名加引号。
+下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.01.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
 
 ## 功能
 
@@ -48,7 +48,13 @@ V4.0 从整合版拆分时保留业务历史、余额、库存、游戏进度、
 ```sh
 ./scripts/build.sh
 ./scripts/package.sh
+# 退出搞研究后，保存输出中的私有 backup 目录
+python3 scripts/upgrade_data.py snapshot --version 4.01
 ./scripts/install.sh
+# 启动新版检查记录、附件、研究城与系统小组件后，退出应用再核验
+python3 scripts/upgrade_data.py verify-live /path/to/private/backup
+# 完整备份/恢复回归（临时资料与内存设置，不接触真实用户设置）
+./scripts/test_backup.sh
 ```
 
 通过环境变量 `GAO_SIGNING_IDENTITY` 可指定签名证书。修改团队后也需调整 `scripts/install.sh` 中的团队检查。`dist/` 存放本地发行 ZIP 和校验文件，不提交到 Git；上传到 GitHub Releases。
@@ -60,6 +66,12 @@ V4.0 从整合版拆分时保留业务历史、余额、库存、游戏进度、
 
 ## 版本更新
 
-版本以 `Info.plist` 为准。后续功能改动仅更新受影响的应用，默认版本 +0.01、构建号 +1；明确要求保持版本号的修订沿用原版本。先核验用户资料，再安装新程序并检查记录、附件和游戏进度，成功后清理旧程序、安装包与中间构建。程序资源与用户资料须分别处理，不能用清理构建目录的方式删除用户数据。
+版本以 `Info.plist` 为准。后续更新仅更新受影响的应用，每次版本 +0.01、构建号 +1。先核验用户资料，再安装新程序并检查记录、附件和游戏进度，成功后清理旧程序、安装包与中间构建。程序资源与用户资料须分别处理，不能用清理构建目录的方式删除用户数据。
 
 第三方组件和资源保留各自许可，详情见 `Resources/` 中的许可、来源说明与补丁记录。
+
+## V4.01 更新
+
+修复从整合版拆分后小组件不出现在列表的问题：系统仍登记已删除的 V4.6 搞研究宿主，导致 WidgetKit 忽略独立版扩展。安装时精确注销本应用已失效的旧宿主登记，再注册、启用新扩展；失败时恢复旧程序与插件登记。构建保留 Xcode 生成的扩展元数据，并核验标准扩展入口、签名、应用与小组件版本一致。
+
+增加私有升级备份与核验工具：逐文件 SHA-256、SQLite WAL 一致快照、业务记录与研究城状态对比、附件引用和文件完整性检查。V4.0 → V4.01 资料格式未变，沿用原数据路径；原系统钥匙串凭据继续使用。私有备份保存在 `~/Library/Application Support/GaoSeries/UpgradeBackups/Research/`，不提交到仓库。核验工具严格报告新增、删除和修改；首次启动产生的每日自动备份也会列为差异，须核实新增备份并保留轮换前的旧备份，不能忽略业务或附件差异。核验成功后清理旧程序、旧安装包与中间构建，保留个人资料及备份。

@@ -35,3 +35,6 @@ preferences.plist
 Backups/
 AutoBackups/
 ReconciliationBackups/
+
+.install-lock.noindex/
+.install.noindex.*/
