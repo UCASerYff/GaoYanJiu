@@ -1,0 +1,19 @@
+{
+  "schemaVersion": 1,
+  "bundleID": "com.academic-achievement.manager",
+  "appVersion": "4.02",
+  "actions": {
+    "research.importDocuments": {
+      "parameters": {
+        "type": "object",
+        "properties": { "targetRecordID": { "type": "string", "maxLength": 256 } },
+        "additionalProperties": false
+      },
+      "inputModes": ["fileCopies"],
+      "requiresUserConfirmation": true,
+      "maximumItems": 256,
+      "maximumPayloadBytes": 2147483648,
+      "requestTTLSeconds": 120
+    }
+  }
+}

@@ -61,6 +61,11 @@ final class PaperStore: ObservableObject {
         trashStore.persist = { [weak self] in self?.save() }
         trashStore.errorHandler = { [weak self] in self?.lastError = $0 }
         documentLibrary.persist = { [weak self] in self?.save() }
+        documentLibrary.persistTransaction = { [weak self] in
+            guard let self else { throw ResearchDocumentImportError.unavailableLibrary }
+            try self.saveThrowing()
+        }
+        documentLibrary.libraryIsWritable = { [weak self] in self?.libraryLoadFailed == false }
         documentLibrary.errorHandler = { [weak self] in self?.lastError = $0 }
         backupService.persist = { [weak self] in self?.save() }
         backupService.reload = { [weak self] in self?.load() }
@@ -1001,7 +1006,24 @@ final class PaperStore: ObservableObject {
             return
         }
         do {
-            try repository.saveLibrary(PersistedLibrary(
+            try saveThrowing()
+            consecutiveSaveFailures = 0
+            persistenceAlert = nil
+        } catch {
+            lastError = "本地资料库保存失败：\(error.localizedDescription)"
+            consecutiveSaveFailures += 1
+            if consecutiveSaveFailures >= 2 {
+                persistenceAlert = AppLocalization.language == .english
+                    ? "Saving the library failed repeatedly: \(error.localizedDescription)\n\nRecent changes may not have been written to disk. Check the free disk space and the permissions of ~/Library/Application Support/AcademicAchievementManager, and export a full backup via the “Backup & Restore” menu as soon as possible."
+                    : "本地资料库连续保存失败：\(error.localizedDescription)\n\n最近的修改可能未写入磁盘。请检查磁盘剩余空间以及 ~/Library/Application Support/AcademicAchievementManager 的读写权限，并尽快通过「备份与恢复」菜单导出一份完整备份。"
+            }
+        }
+    }
+
+    /// Transaction callers must observe persistence failure before committing attachments.
+    func saveThrowing() throws {
+        guard !libraryLoadFailed else { throw ResearchDocumentImportError.unavailableLibrary }
+        try repository.saveLibrary(PersistedLibrary(
                 papers: papers,
                 portals: portals,
                 existingWorks: existingWorks,
@@ -1012,20 +1034,8 @@ final class PaperStore: ObservableObject {
                 managedDocuments: managedDocuments,
                 trashItems: trashItems,
                 rewardCity: rewardCity
-            ))
-            exportWidgetSnapshot()
-            consecutiveSaveFailures = 0
-            persistenceAlert = nil
-        } catch {
-            lastError = "本地资料库保存失败：\(error.localizedDescription)"
-            consecutiveSaveFailures += 1
-            // 第 2 次连续失败起升级为弹窗告警，避免单次抖动轰炸用户。
-            if consecutiveSaveFailures >= 2 {
-                persistenceAlert = AppLocalization.language == .english
-                    ? "Saving the library failed repeatedly: \(error.localizedDescription)\n\nRecent changes may not have been written to disk. Check the free disk space and the permissions of ~/Library/Application Support/AcademicAchievementManager, and export a full backup via the “Backup & Restore” menu as soon as possible."
-                    : "本地资料库连续保存失败：\(error.localizedDescription)\n\n最近的修改可能未写入磁盘。请检查磁盘剩余空间以及 ~/Library/Application Support/AcademicAchievementManager 的读写权限，并尽快通过「备份与恢复」菜单导出一份完整备份。"
-            }
-        }
+        ))
+        exportWidgetSnapshot()
     }
 
     // MARK: - 启动一致性扫描（只报告，不自动删除）

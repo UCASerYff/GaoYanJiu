@@ -1,17 +1,17 @@
-# 搞研究 V4.01
+# 搞研究 V4.02
 
 独立 macOS 应用，包含本模块完整业务、游戏场景和 WidgetKit 小组件。运行不依赖搞七廿三或其他六个应用；联动功能需要同时安装相关应用。
 
 ## 下载与安装
 
-从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.01.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
+从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.02.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
 
 1. 支持 macOS 14 或更高版本、Apple Silicon；暂未提供 Intel 版本。
 2. 解压 ZIP，将 `搞研究.app` 拖入“应用程序”文件夹。
 3. 如果 macOS 拦截打开，请先确认软件来源，再进入“系统设置 → 隐私与安全性”，允许该应用打开。发行包使用 Apple Development 签名，未做 Apple 公证。
 4. 安装后运行一次，再从系统小组件列表添加本应用的小组件。整合版的小组件需要重新添加。
 
-下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.01.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
+下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.02.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
 
 ## 功能
 
@@ -49,11 +49,14 @@ V4.0 从整合版拆分时保留业务历史、余额、库存、游戏进度、
 ./scripts/build.sh
 ./scripts/package.sh
 # 退出搞研究后，保存输出中的私有 backup 目录
-python3 scripts/upgrade_data.py snapshot --version 4.01
+python3 scripts/upgrade_data.py snapshot --version 4.02
 ./scripts/install.sh
 # 启动新版检查记录、附件、研究城与系统小组件后，退出应用再核验
 python3 scripts/upgrade_data.py verify-live /path/to/private/backup
-# 完整备份/恢复回归（临时资料与内存设置，不接触真实用户设置）
+# 完整回归测试套件
+./scripts/test_import.sh
+./scripts/test_exchange.sh
+./scripts/test_exchange_clients.sh
 ./scripts/test_backup.sh
 ```
 
@@ -69,6 +72,20 @@ python3 scripts/upgrade_data.py verify-live /path/to/private/backup
 版本以 `Info.plist` 为准。后续更新仅更新受影响的应用，每次版本 +0.01、构建号 +1。先核验用户资料，再安装新程序并检查记录、附件和游戏进度，成功后清理旧程序、安装包与中间构建。程序资源与用户资料须分别处理，不能用清理构建目录的方式删除用户数据。
 
 第三方组件和资源保留各自许可，详情见 `Resources/` 中的许可、来源说明与补丁记录。
+
+## V4.02 更新
+
+1. **跨 App 资料交接协议（GaoAction V1）与包格式接入**：
+   - 对外提供安全的 `research.importDocuments` 白名单动作，带有交互审核弹窗及目标文件夹选择，支持 `.gaoaction` 外部包导入。
+   - 随应用发布能力声明 `GaoCapabilities.json`，严格限制输入载荷和参数白名单。
+2. **联动「搞整理」（`files.choose`）**：
+   - 支持从资料库文件夹工具栏的“资料交接 → 从搞整理选择资料…”发起选定导入，按用户在搞整理中实际选定的文件复制入库并去重、生成摘要与索引，不盲目全量静默导入。
+3. **联动「搞截图」（`ocr.files`）**：
+   - 支持对扫描 PDF 或图片资料一键送搞截图进行文字识别（OCR）。原附件完整保留，OCR 识别产物通过 `DocumentProvenance` 和衍生版本记录关联，全文索引同步更新并标明来源与置信度。
+4. **联动「搞文件」（`documents.open`）**：
+   - 支持在搞文件中外部打开和编辑研究资料。编辑完成后支持“替换为新版本（保留历史摘要）”或“另存为新附件”，严密校验 SHA-256 和版本历史。
+5. **事务性导入日志与恢复机制（`ResearchImportJournal`）**：
+   - 采用 staging 安全隔离与原子性校验，支持 SHA-256 去重与幂等处理，实现崩溃及进程中断后的安全恢复与附件/数据库补偿，杜绝孤立附件与脏数据。
 
 ## V4.01 更新
 

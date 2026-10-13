@@ -48,11 +48,15 @@ public struct ResearchModuleView: View {
             }
     }
     private func handleRoute() {
-        guard routeRevision > handledRevision, let route, route.scheme == "gaoyanjiu" else { return }
+        guard routeRevision > handledRevision, let route else { return }
         handledRevision = routeRevision
-        let target = route.host ?? ""
-        if target == "submissions" || target == "works" {
-            NotificationCenter.default.post(name: .appOpenWidgetDeepLink, object: target)
+        if route.scheme == "gaoyanjiu" {
+            let target = route.host ?? ""
+            if target == "submissions" || target == "works" {
+                NotificationCenter.default.post(name: .appOpenWidgetDeepLink, object: target)
+            }
+        } else if route.isFileURL && route.pathExtension.lowercased() == "gaoaction" {
+            store.handleIncomingPackage(at: route)
         }
     }
 }

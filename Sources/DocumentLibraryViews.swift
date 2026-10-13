@@ -168,7 +168,20 @@ struct DocumentLibraryDashboard: View {
         .sheet(item: $previewDocument) { document in
             QuickLookPreviewSheet(
                 url: store.managedDocumentURL(document),
-                title: document.displayName
+                title: document.displayName,
+                provenance: store.documentProvenance(for: document.id)
+            )
+        }
+        .sheet(item: $store.pendingPackageReview) { context in
+            ActionPackageReviewSheet(context: context)
+        }
+        .alert(isPresented: Binding(get: { store.exchangeFeedbackMessage != nil }, set: { if !$0 { store.exchangeFeedbackMessage = nil } })) {
+            Alert(
+                title: Text(AppLocalization.text("资料交接反馈")),
+                message: Text(store.exchangeFeedbackMessage ?? ""),
+                dismissButton: .default(Text(AppLocalization.text("知道了"))) {
+                    store.exchangeFeedbackMessage = nil
+                }
             )
         }
     }
@@ -358,6 +371,18 @@ struct DocumentLibraryDashboard: View {
                 }
                 .menuStyle(.borderlessButton)
 
+                Menu {
+                    Button(AppLocalization.text("从搞整理选择资料…"), systemImage: "magnifyingglass") {
+                        chooseFromZhengLi(folderID: folder.id)
+                    }
+                    Button(AppLocalization.text("打开外部交接包…"), systemImage: "shippingbox") {
+                        openActionPackageDialog()
+                    }
+                } label: {
+                    Label(AppLocalization.text("资料交接"), systemImage: "arrow.triangle.swap")
+                }
+                .menuStyle(.borderedButton)
+
                 Button {
                     store.chooseDocuments(for: folder.id)
                 } label: {
@@ -444,6 +469,34 @@ struct DocumentLibraryDashboard: View {
                                 }
                             }
                         }
+                        let prov = store.documentProvenance(for: document.id)
+                        let rev = store.documentRevision(for: document.id)
+                        if (prov != nil && (!prov!.pages.isEmpty || prov!.ocrEngine != nil)) || rev != nil {
+                            HStack(spacing: 6) {
+                                if let prov, !prov.pages.isEmpty || prov.ocrEngine != nil {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "text.viewfinder")
+                                        Text(AppLocalization.format("已OCR（%d页）", max(1, prov.pages.count)))
+                                    }
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(AppTheme.teal)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(AppTheme.teal.opacity(0.10), in: Capsule())
+                                }
+                                if let rev {
+                                    HStack(spacing: 3) {
+                                        Image(systemName: "arrow.triangle.branch")
+                                        Text(rev.kind == "editedVersion" ? "编辑新版本" : "衍生件")
+                                    }
+                                    .font(.caption2.weight(.medium))
+                                    .foregroundStyle(Color.purple)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 2)
+                                    .background(Color.purple.opacity(0.10), in: Capsule())
+                                }
+                            }
+                        }
                     }
                     Spacer()
                 }
@@ -486,6 +539,18 @@ struct DocumentLibraryDashboard: View {
         Button(AppLocalization.text("用默认应用打开"), systemImage: "arrow.up.forward.app") { store.openDocument(document) }
         Button(AppLocalization.text("在访达中显示"), systemImage: "folder") { store.revealDocument(document) }
         Button(AppLocalization.text("重命名与标签"), systemImage: "pencil") { editDocumentAction(document) }
+        Divider()
+        if ["pdf", "png", "jpg", "jpeg", "heic", "tif", "tiff"].contains(document.fileExtension.lowercased()) {
+            Button(AppLocalization.text("送搞截图识别文字（OCR）…"), systemImage: "text.viewfinder") {
+                sendToJieTuOCR(document)
+            }
+        }
+        Button(AppLocalization.text("在搞文件中编辑…"), systemImage: "square.and.pencil") {
+            sendToWenJianEdit(document)
+        }
+        Button(AppLocalization.text("导入编辑新版本…"), systemImage: "arrow.triangle.merge") {
+            importEditedCopy(for: document)
+        }
         Divider()
         Button(AppLocalization.text("删除文件"), systemImage: "trash", role: .destructive) {
             deleteRequest = DeleteRequest(id: document.id, name: document.displayName, isFolder: false)
@@ -546,6 +611,129 @@ struct DocumentLibraryDashboard: View {
         default: "doc.fill"
         }
     }
+
+    private func chooseFromZhengLi(folderID: String) {
+        do {
+            try store.requestChooseFilesFromZhengLi(targetFolderID: folderID) { prepared, provider in
+                Task { @MainActor in
+                    if provider.isAvailable {
+                        do {
+                            try await store.documentLibrary.exchangeClient.openInProvider(prepared)
+                            store.exchangeFeedbackMessage = AppLocalization.text("已向搞整理发起文件选择请求，请在搞整理中选择要导入的文件并发送结果。")
+                        } catch {
+                            store.documentLibrary.exchangeClient.revealFallback(prepared)
+                            store.exchangeFeedbackMessage = AppLocalization.format("启动搞整理失败（%@），已在访达中定位交接包。", error.localizedDescription)
+                        }
+                    } else {
+                        store.documentLibrary.exchangeClient.revealFallback(prepared)
+                        store.exchangeFeedbackMessage = AppLocalization.format("搞整理未就绪（%@）。已在访达中显示交接包，可手动发送。", provider.reason)
+                    }
+                }
+            }
+        } catch {
+            store.exchangeFeedbackMessage = AppLocalization.format("发起文件选择失败：%@", error.localizedDescription)
+        }
+    }
+
+    private func sendToJieTuOCR(_ document: ManagedDocument) {
+        do {
+            try store.requestOCRViaJieTu(for: document) { prepared, provider in
+                Task { @MainActor in
+                    if provider.isAvailable {
+                        do {
+                            try await store.documentLibrary.exchangeClient.openInProvider(prepared)
+                            store.exchangeFeedbackMessage = AppLocalization.format("已将“%@”发送至搞截图进行文字识别（OCR），请在搞截图完成识别后发送结果。", document.displayName)
+                        } catch {
+                            store.documentLibrary.exchangeClient.revealFallback(prepared)
+                            store.exchangeFeedbackMessage = AppLocalization.format("启动搞截图失败（%@），已在访达中定位交接包。", error.localizedDescription)
+                        }
+                    } else {
+                        store.documentLibrary.exchangeClient.revealFallback(prepared)
+                        store.exchangeFeedbackMessage = AppLocalization.format("搞截图未就绪（%@）。已在访达中显示交接包，可手动发送。", provider.reason)
+                    }
+                }
+            }
+        } catch {
+            store.exchangeFeedbackMessage = AppLocalization.format("发起 OCR 识别失败：%@", error.localizedDescription)
+        }
+    }
+
+    private func sendToWenJianEdit(_ document: ManagedDocument) {
+        do {
+            try store.requestEditViaWenJian(for: document) { prepared, provider in
+                Task { @MainActor in
+                    if provider.isAvailable {
+                        do {
+                            try await store.documentLibrary.exchangeClient.openInProvider(prepared)
+                            store.exchangeFeedbackMessage = AppLocalization.format("已在搞文件中打开“%@”。编辑保存后，请在“导入编辑新版本…”中导入修改后的文件。", document.displayName)
+                        } catch {
+                            store.documentLibrary.exchangeClient.revealFallback(prepared)
+                            store.exchangeFeedbackMessage = AppLocalization.format("启动搞文件失败（%@），已在访达中定位交接副本。", error.localizedDescription)
+                        }
+                    } else {
+                        store.documentLibrary.exchangeClient.revealFallback(prepared)
+                        store.exchangeFeedbackMessage = AppLocalization.format("搞文件未就绪（%@）。已在访达中显示副本，可手动打开。", provider.reason)
+                    }
+                }
+            }
+        } catch {
+            store.exchangeFeedbackMessage = AppLocalization.format("发起外部编辑失败：%@", error.localizedDescription)
+        }
+    }
+
+    private func importEditedCopy(for document: ManagedDocument) {
+        let panel = NSOpenPanel()
+        panel.title = AppLocalization.text("选择编辑后的文件")
+        panel.message = AppLocalization.format("请选择“%@”经搞文件或其他应用编辑后的副本。", document.displayName)
+        panel.prompt = AppLocalization.text("导入")
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        panel.canChooseFiles = true
+        if let uti = UTType(filenameExtension: document.fileExtension) {
+            panel.allowedContentTypes = [uti]
+        }
+        if panel.runModal() == .OK, let url = panel.url {
+            let alert = NSAlert()
+            alert.messageText = AppLocalization.text("导入编辑后的文件")
+            alert.informativeText = AppLocalization.format("已选择：%@\n\n请选择导入方式：", url.lastPathComponent)
+            alert.addButton(withTitle: AppLocalization.text("替换为新版本（保留历史摘要）"))
+            alert.addButton(withTitle: AppLocalization.text("另存为新附件（关联原件）"))
+            alert.addButton(withTitle: AppLocalization.text("取消"))
+            let response = alert.runModal()
+            if response == .alertFirstButtonReturn {
+                performEditedImport(document: document, from: url, asNewVersion: true)
+            } else if response == .alertSecondButtonReturn {
+                performEditedImport(document: document, from: url, asNewVersion: false)
+            }
+        }
+    }
+
+    private func performEditedImport(document: ManagedDocument, from url: URL, asNewVersion: Bool) {
+        Task { @MainActor in
+            do {
+                try await store.importEditedDocumentCopy(for: document, from: url, asNewVersion: asNewVersion)
+                store.exchangeFeedbackMessage = asNewVersion
+                    ? AppLocalization.format("已成功将“%@”替换为新版本。", document.displayName)
+                    : AppLocalization.text("已将编辑副本作为新附件导入。")
+            } catch {
+                store.exchangeFeedbackMessage = AppLocalization.format("导入编辑副本失败：%@", error.localizedDescription)
+            }
+        }
+    }
+
+    private func openActionPackageDialog() {
+        let panel = NSOpenPanel()
+        panel.title = AppLocalization.text("打开外部交接包")
+        panel.prompt = AppLocalization.text("打开")
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = true
+        let uti = UTType(exportedAs: "com.gaoseries.action-package", conformingTo: .package)
+        panel.allowedContentTypes = [uti]
+        if panel.runModal() == .OK, let url = panel.url {
+            store.handleIncomingPackage(at: url)
+        }
+    }
 }
 
 private struct DeleteRequest: Identifiable {
@@ -554,5 +742,116 @@ private struct DeleteRequest: Identifiable {
     let isFolder: Bool
 }
 
-// V4.6 batch-Q2：DocumentFolderReorderDropDelegate 已泛型化到 SharedListComponents.swift，
-// 文件夹网格改用 ReorderDropDelegate.documentFolder 工厂。
+struct ActionPackageReviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: PaperStore
+    let context: PendingPackageReviewContext
+    @State private var selectedFolderID: String
+    @State private var isProcessing = false
+    @State private var errorMessage: String?
+
+    init(context: PendingPackageReviewContext) {
+        self.context = context
+        _selectedFolderID = State(initialValue: context.targetFolderID)
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            HStack(spacing: 12) {
+                Image(systemName: "shippingbox.fill")
+                    .font(.system(size: 28))
+                    .foregroundStyle(AppTheme.blue)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(AppLocalization.text("审核外部资料交接请求"))
+                        .font(.title3.weight(.semibold))
+                    Text(AppLocalization.format("来源声明：%@（声明未认证）", context.validatedPackage.manifest.sourceBundleID))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+            }
+            Divider()
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(AppLocalization.text("目标文件夹")).font(.headline)
+                Picker("", selection: $selectedFolderID) {
+                    ForEach(store.documentFolders) { folder in
+                        Text("\(folder.name) (\(folder.libraryKind.title))").tag(folder.id)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text(AppLocalization.format("拟导入文件列表 (%d 项)", context.validatedPackage.stagedItems.count))
+                    .font(.headline)
+                ScrollView {
+                    VStack(spacing: 6) {
+                        ForEach(context.validatedPackage.stagedItems, id: \.item.id) { staged in
+                            HStack {
+                                Image(systemName: "doc.fill")
+                                    .foregroundStyle(.secondary)
+                                Text(staged.originalFilename)
+                                    .font(.body)
+                                Spacer()
+                                Text(ByteCountFormatter.string(fromByteCount: staged.item.byteCount, countStyle: .file))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                Text(String(staged.item.sha256.prefix(8)))
+                                    .font(.caption.monospaced())
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 6))
+                        }
+                    }
+                }
+                .frame(maxHeight: 180)
+            }
+
+            if let errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+
+            HStack {
+                Spacer()
+                Button(AppLocalization.text("拒绝并取消")) {
+                    store.pendingPackageReview = nil
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+
+                Button(AppLocalization.text("确认导入")) {
+                    confirmImport()
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(selectedFolderID.isEmpty || isProcessing)
+            }
+        }
+        .padding(24)
+        .frame(width: 540)
+    }
+
+    private func confirmImport() {
+        guard let folder = store.documentFolders.first(where: { $0.id == selectedFolderID }) else {
+            errorMessage = AppLocalization.text("请选择有效的目标文件夹")
+            return
+        }
+        isProcessing = true
+        Task { @MainActor in
+            do {
+                let outcome = try await store.documentLibrary.importStagedDocuments(context.validatedPackage, into: folder)
+                store.exchangeFeedbackMessage = AppLocalization.format("已成功导入 %d 项文件，%d 项内容已存在去重保留。", outcome.importedCount, outcome.duplicateCount)
+                store.pendingPackageReview = nil
+                dismiss()
+            } catch {
+                isProcessing = false
+                errorMessage = AppLocalization.format("导入失败：%@", error.localizedDescription)
+            }
+        }
+    }
+}

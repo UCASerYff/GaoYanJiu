@@ -16,7 +16,15 @@ final class DocumentLibraryStore: ObservableObject {
     @Published var indexingMessage = ""
 
     var persist: () -> Void = {}
+    var persistTransaction: (() throws -> Void)?
+    var libraryIsWritable: () -> Bool = { false }
     var errorHandler: (String) -> Void = { _ in }
+    @Published var isImportingDocuments = false
+    @Published var importProgress = ""
+    @Published var pendingPackageReview: PendingPackageReviewContext?
+    @Published var exchangeFeedbackMessage: String?
+    var activeImportRequestID: UUID?
+    var importJournal: ResearchImportJournal?
 
     static let supportedExtensions: Set<String> = [
         "doc", "docx", "xls", "xlsx", "csv", "tsv", "ppt", "pptx",
@@ -212,72 +220,10 @@ final class DocumentLibraryStore: ObservableObject {
         }
     }
 
-    /// 复制与正文抽取（PDFKit / 解压 / mdls 子进程）移到后台执行，避免阻塞主线程；
-    /// 任一步失败时删除已复制文件，维持原有的回滚语义；完成后回 MainActor 更新并落盘。
+    /// Local uploads and handoffs use one recoverable attachment/library transaction.
     @discardableResult
     func importDocuments(from sourceURLs: [URL], into folderID: String) async throws -> Int {
-        guard let folder = folders.first(where: { $0.id == folderID }) else { return 0 }
-        let sources = sourceURLs.filter {
-            Self.supportedExtensions.contains($0.pathExtension.lowercased())
-        }
-        guard !sources.isEmpty else { return 0 }
-
-        let destinationDirectory = folderURL(for: folder)
-        try FileManager.default.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
-
-        let additions = try await Task.detached(priority: .userInitiated) { () -> [ManagedDocument] in
-            var prepared: [ManagedDocument] = []
-            var copiedURLs: [URL] = []
-            do {
-                for sourceURL in sources {
-                    let accessed = sourceURL.startAccessingSecurityScopedResource()
-                    defer { if accessed { sourceURL.stopAccessingSecurityScopedResource() } }
-                    let ext = sourceURL.pathExtension.lowercased()
-                    let storedName = "\(UUID().uuidString).\(ext)"
-                    let destinationURL = destinationDirectory.appendingPathComponent(storedName)
-                    try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
-                    copiedURLs.append(destinationURL)
-                    let values = try? destinationURL.resourceValues(forKeys: [.fileSizeKey])
-                    let now = Date()
-                    prepared.append(ManagedDocument(
-                        id: UUID().uuidString,
-                        folderID: folderID,
-                        originalName: sourceURL.lastPathComponent,
-                        displayName: sourceURL.lastPathComponent,
-                        storedName: storedName,
-                        fileExtension: ext,
-                        tags: [],
-                        byteCount: Int64(values?.fileSize ?? 0),
-                        uploadedAt: now,
-                        updatedAt: now,
-                        contentText: DocumentTextExtractor.extractText(from: destinationURL),
-                        contentIndexedAt: now
-                    ))
-                }
-            } catch {
-                for url in copiedURLs { try? FileManager.default.removeItem(at: url) }
-                throw error
-            }
-            return prepared
-        }.value
-
-        // 新上传的文件排在该文件夹手动序的最前（与上传时间降序的默认观感一致）。
-        var orderedAdditions = additions
-        var nextOrder = (documents
-            .filter { $0.folderID == folderID }
-            .compactMap(\.sortOrder)
-            .min() ?? 0) - 1
-        for index in orderedAdditions.indices {
-            orderedAdditions[index].sortOrder = nextOrder
-            nextOrder -= 1
-        }
-        documents.append(contentsOf: orderedAdditions)
-        Self.applyDocumentOrdering(Self.sortedDocuments(documents, in: folderID), folderID: folderID, to: &documents)
-        if let index = folders.firstIndex(where: { $0.id == folderID }) {
-            folders[index].updatedAt = Date()
-        }
-        persist()
-        return additions.count
+        try await importLocalDocuments(from: sourceURLs, into: folderID)
     }
 
     func updateDocument(id: String, displayName: String, tags: [String]) -> Bool {
@@ -549,4 +495,118 @@ extension PaperStore {
     func managedDocumentURL(_ document: ManagedDocument) -> URL {
         documentLibrary.managedDocumentURL(document)
     }
+
+    var pendingPackageReview: PendingPackageReviewContext? {
+        get { documentLibrary.pendingPackageReview }
+        set { documentLibrary.pendingPackageReview = newValue }
+    }
+
+    var exchangeFeedbackMessage: String? {
+        get { documentLibrary.exchangeFeedbackMessage }
+        set { documentLibrary.exchangeFeedbackMessage = newValue }
+    }
+
+    func handleIncomingPackage(at url: URL) {
+        documentLibrary.handleIncomingPackage(at: url)
+    }
+
+    func documentProvenance(for documentID: String) -> DocumentProvenance? {
+        documentLibrary.provenance(for: documentID)
+    }
+
+    func documentRevision(for documentID: String) -> AttachmentRevision? {
+        documentLibrary.revision(for: documentID)
+    }
+
+    func requestChooseFilesFromZhengLi(targetFolderID: String, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
+        try documentLibrary.requestChooseFilesFromZhengLi(targetFolderID: targetFolderID, onPrepared: onPrepared)
+    }
+
+    func requestOCRViaJieTu(for document: ManagedDocument, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
+        try documentLibrary.requestOCRViaJieTu(for: document, onPrepared: onPrepared)
+    }
+
+    func requestEditViaWenJian(for document: ManagedDocument, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
+        try documentLibrary.requestEditViaWenJian(for: document, onPrepared: onPrepared)
+    }
+
+    func importEditedDocumentCopy(for document: ManagedDocument, from editedURL: URL, asNewVersion: Bool) async throws {
+        try await documentLibrary.importEditedDocumentCopy(for: document, from: editedURL, asNewVersion: asNewVersion)
+    }
 }
+
+struct PendingPackageReviewContext: Identifiable {
+    let id = UUID()
+    let packageURL: URL
+    let validatedPackage: GaoValidatedActionPackage
+    var targetFolderID: String
+}
+
+@MainActor
+extension DocumentLibraryStore {
+    func handleIncomingPackage(at url: URL) {
+        do {
+            let bundleID = ResearchExchangePaths.bundleID
+            let stagingRoot = ResearchExchangePaths.root.appendingPathComponent("Incoming", isDirectory: true)
+            let validator = GaoActionPackageValidator(expectedTargetBundleID: bundleID)
+            let package = try validator.stagePackage(at: url, stagingRoot: stagingRoot)
+            if package.manifest.kind == "request" && package.manifest.action == "research.importDocuments" {
+                let defaultFolderID = folders.first?.id ?? ""
+                pendingPackageReview = PendingPackageReviewContext(packageURL: url, validatedPackage: package, targetFolderID: defaultFolderID)
+            } else if package.manifest.kind == "result" {
+                let result = try exchangeClient.receiveResult(at: url)
+                handleExchangeResult(result)
+            } else {
+                exchangeFeedbackMessage = "不受支持的动作或交接类型：\(package.manifest.action)"
+            }
+        } catch {
+            exchangeFeedbackMessage = "交接包解析失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func handleExchangeResult(_ result: ResearchValidatedExternalResult) {
+        switch result.session.action {
+        case .chooseFiles:
+            if result.selectedReferences.isEmpty {
+                exchangeFeedbackMessage = "搞整理未选择任何文件。"
+                return
+            }
+            Task { @MainActor in
+                var copiedURLs: [URL] = []
+                for ref in result.selectedReferences {
+                    if let selection = try? self.exchangeClient.verifySelectedReference(ref) {
+                        copiedURLs.append(selection.localCopy)
+                    }
+                }
+                guard !copiedURLs.isEmpty, let targetFolderID = self.folders.first?.id else {
+                    self.exchangeFeedbackMessage = "未能从搞整理复制选定的文件或缺少目标文件夹。"
+                    return
+                }
+                do {
+                    let count = try await self.importDocuments(from: copiedURLs, into: targetFolderID)
+                    self.exchangeFeedbackMessage = "已从搞整理成功导入 \(count) 个文件。"
+                } catch {
+                    self.exchangeFeedbackMessage = "导入选定文件失败：\(error.localizedDescription)"
+                }
+            }
+        case .ocrFiles:
+            Task { @MainActor in
+                var appliedCount = 0
+                for ocr in result.ocrOutputs {
+                    if let docID = ocr.sourceDocumentID, let doc = self.documents.first(where: { $0.id == docID }) {
+                        do {
+                            try await self.applyOCRResult(ocr, to: doc)
+                            appliedCount += 1
+                        } catch {
+                            self.errorHandler("应用 OCR 结果失败：\(error.localizedDescription)")
+                        }
+                    }
+                }
+                self.exchangeFeedbackMessage = "已应用 \(appliedCount) 个文档的 OCR 识别结果，全文索引已更新。"
+            }
+        case .openDocument:
+            exchangeFeedbackMessage = "文档已在搞文件中打开。完成编辑并保存后，可在文件菜单中选择“导入编辑新版本”。"
+        }
+    }
+}
+

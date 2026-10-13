@@ -97,13 +97,14 @@ enum AppDataLocations {
             throw Failure(description: "Missing isolated test root; use scripts/test_backup.sh")
         }
         let root = URL(fileURLWithPath: testRoot, isDirectory: true)
-        let temporary = fm.temporaryDirectory.resolvingSymlinksInPath()
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? fm.removeItem(at: root) }
+        let tmpPath = ProcessInfo.processInfo.environment["TMPDIR"] ?? fm.temporaryDirectory.path
+        let temporary = URL(fileURLWithPath: tmpPath, isDirectory: true).resolvingSymlinksInPath()
         try expect(root.resolvingSymlinksInPath().deletingLastPathComponent() == temporary.deletingLastPathComponent(),
                    "Fixtures must remain beside the isolated TMPDIR")
         try expect(Bundle.main.bundleIdentifier == "com.gao.research.tests.backup-safety",
                    "Missing isolated test app bundle")
-        try fm.createDirectory(at: root, withIntermediateDirectories: true)
-        defer { try? fm.removeItem(at: root) }
         let app = root.appendingPathComponent("App"), group = root.appendingPathComponent("Group")
         let jobs = root.appendingPathComponent("Jobs")
         for directory in [app, group] { try fm.createDirectory(at: directory, withIntermediateDirectories: true) }
@@ -207,7 +208,7 @@ enum AppDataLocations {
         try JSONEncoder().encode(repairedManifest).write(to: badDatabase.appendingPathComponent("gqns-manifest.json"))
         try rejects("Accepted corrupt database after manifest checksum repair") { _ = try BackupIntegrity.verify(badDatabase) }
 
-        let leftovers = try fm.contentsOfDirectory(at: fm.temporaryDirectory, includingPropertiesForKeys: nil)
+        let leftovers = try fm.contentsOfDirectory(at: temporary, includingPropertiesForKeys: nil)
             .filter { $0.lastPathComponent.hasPrefix("gqns-export-") }
         try expect(leftovers.isEmpty, "Export temporary files were not cleaned")
         print("PASS Backup: committed WAL records; PDF/Word/photo SHA-256; export/preview/restore; memory-only settings; safety copies; missing/corrupt sources preserve archive; attachment/database tampering rejected; isolated temp cleanup")

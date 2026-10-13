@@ -24,6 +24,7 @@ MACROS="$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/pl
 swiftc -swift-version 5 -parse-as-library -O -sdk "$SDK" -target arm64-apple-macosx14.0 -module-cache-path "$BUILD/cache" -load-plugin-library "$MACROS" -F "$BUILD/Frameworks" -framework Research -framework AppKit -framework SwiftUI -framework UserNotifications -framework CryptoKit -lsqlite3 -Xlinker -rpath -Xlinker @executable_path/../Frameworks "$ROOT/Host/"*.swift -o "$APP/Contents/MacOS/AcademicAchievementManager"
 cp "$ROOT/Info.plist" "$APP/Contents/Info.plist"
 cp "$ROOT/Resources/AcademicAchievementManagerIcon.png" "$APP/Contents/Resources/"
+cp "$ROOT/Resources/GaoCapabilities.json" "$APP/Contents/Resources/"
 ditto "$BUILD/Frameworks/Research.framework" "$APP/Contents/Frameworks/Research.framework"
 for helper in "$APP"/Contents/Frameworks/Research.framework/Versions/A/Resources/UsageEngine/tokscale(N); do codesign --force --sign "$SIGNING_IDENTITY" --options runtime "$helper"; done
 codesign --force --sign "$SIGNING_IDENTITY" "$APP/Contents/Frameworks/Research.framework"

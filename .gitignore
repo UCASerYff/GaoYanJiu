@@ -38,3 +38,4 @@ ReconciliationBackups/
 
 .install-lock.noindex/
 .install.noindex.*/
+TestResults/
