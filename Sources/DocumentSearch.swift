@@ -4,6 +4,19 @@ import PDFKit
 enum DocumentTextExtractor {
     private static let maximumCharacters = 200_000
 
+    static func indexedText(extracted: String?, ocrText: String?) -> String? {
+        let parts = [extracted, ocrText].compactMap { value -> String? in
+            let text = value?.replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+            return text.isEmpty ? nil : text
+        }
+        guard let first = parts.first else { return nil }
+        let text = parts.dropFirst().reduce(first) { current, next in
+            current.contains(next) ? current : current + "\n\n" + next
+        }
+        return String(text.prefix(maximumCharacters))
+    }
+
     static func extractText(from url: URL) -> String? {
         let ext = url.pathExtension.lowercased()
         let text: String?
@@ -98,9 +111,10 @@ extension DocumentLibraryStore {
 
     private func rebuildDocumentSearchIndex(documentIDs: Set<String>, userInitiated: Bool) {
         guard !isIndexing else { return }
-        let targets = documents.compactMap { document -> (String, URL)? in
+        let targets = documents.compactMap { document -> (String, URL, Date, String, String)? in
             guard documentIDs.contains(document.id) else { return nil }
-            return (document.id, managedDocumentURL(document))
+            let ocrText = provenance(for: document.id)?.pages.compactMap(\.text).joined(separator: "\n\n") ?? ""
+            return (document.id, managedDocumentURL(document), document.updatedAt, document.storedName, ocrText)
         }
         guard !targets.isEmpty else {
             if userInitiated { indexingMessage = AppLocalization.text("没有需要建立索引的文件。") }
@@ -110,12 +124,16 @@ extension DocumentLibraryStore {
         indexingMessage = AppLocalization.format("正在为 %d 个文件建立全文索引…", targets.count)
         Task {
             let results = await Task.detached(priority: .utility) {
-                targets.map { id, url in (id, DocumentTextExtractor.extractText(from: url)) }
+                targets.map { id, url, version, storedName, ocrText in
+                    (id, version, storedName, DocumentTextExtractor.indexedText(
+                        extracted: DocumentTextExtractor.extractText(from: url), ocrText: ocrText))
+                }
             }.value
             let now = Date()
             var indexed = 0
-            for (id, text) in results {
-                guard let index = documents.firstIndex(where: { $0.id == id }) else { continue }
+            for (id, version, storedName, text) in results {
+                guard let index = documents.firstIndex(where: { $0.id == id }),
+                      documents[index].updatedAt == version, documents[index].storedName == storedName else { continue }
                 documents[index].contentText = text
                 documents[index].contentIndexedAt = now
                 if text?.isEmpty == false { indexed += 1 }

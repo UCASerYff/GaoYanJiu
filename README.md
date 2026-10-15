@@ -1,17 +1,17 @@
-# 搞研究 V4.02
+# 搞研究 V4.03
 
 独立 macOS 应用，包含本模块完整业务、游戏场景和 WidgetKit 小组件。运行不依赖搞七廿三或其他六个应用；联动功能需要同时安装相关应用。
 
 ## 下载与安装
 
-从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.02.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
+从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.03.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
 
 1. 支持 macOS 14 或更高版本、Apple Silicon；暂未提供 Intel 版本。
 2. 解压 ZIP，将 `搞研究.app` 拖入“应用程序”文件夹。
 3. 如果 macOS 拦截打开，请先确认软件来源，再进入“系统设置 → 隐私与安全性”，允许该应用打开。发行包使用 Apple Development 签名，未做 Apple 公证。
 4. 安装后运行一次，再从系统小组件列表添加本应用的小组件。整合版的小组件需要重新添加。
 
-下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.02.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
+下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.03.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
 
 ## 功能
 
@@ -49,15 +49,17 @@ V4.0 从整合版拆分时保留业务历史、余额、库存、游戏进度、
 ./scripts/build.sh
 ./scripts/package.sh
 # 退出搞研究后，保存输出中的私有 backup 目录
-python3 scripts/upgrade_data.py snapshot --version 4.02
+python3 scripts/upgrade_data.py snapshot --version 4.03
 ./scripts/install.sh
-# 启动新版检查记录、附件、研究城与系统小组件后，退出应用再核验
+# 安装后核验原数据、附件、设置与研究城；本命令不启动应用
 python3 scripts/upgrade_data.py verify-live /path/to/private/backup
-# 完整回归测试套件
+# 不启动 GUI 的定向测试
 ./scripts/test_import.sh
 ./scripts/test_exchange.sh
 ./scripts/test_exchange_clients.sh
 ./scripts/test_backup.sh
+./scripts/test_product.sh
+python3 Tests/InstallSafetyRegression.py
 ```
 
 通过环境变量 `GAO_SIGNING_IDENTITY` 可指定签名证书。修改团队后也需调整 `scripts/install.sh` 中的团队检查。`dist/` 存放本地发行 ZIP 和校验文件，不提交到 Git；上传到 GitHub Releases。
@@ -72,6 +74,15 @@ python3 scripts/upgrade_data.py verify-live /path/to/private/backup
 版本以 `Info.plist` 为准。后续更新仅更新受影响的应用，每次版本 +0.01、构建号 +1。先核验用户资料，再安装新程序并检查记录、附件和游戏进度，成功后清理旧程序、安装包与中间构建。程序资源与用户资料须分别处理，不能用清理构建目录的方式删除用户数据。
 
 第三方组件和资源保留各自许可，详情见 `Resources/` 中的许可、来源说明与补丁记录。
+
+## V4.03 更新
+
+- 应用、框架及小组件统一为 V4.03 / build 4，安装时核验标准扩展入口、签名与共享组，连续核对同一记录的版本、启用状态和路径。旧注销事件晚到时仅重登记本应用，待登记稳定后完成安装；修复 zsh 错误退出可能跳过回滚的问题，不重启小组件或通知中心进程。
+- 外部编辑采用明确的新增/更新/派生事务及原版本校验，避免同一附件重复插入；保留原文件、原记录与导入前资料库快照，支持中断恢复。
+- 对齐搞截图实际 OCR 返回格式，将返回的 TXT/PDF 保存为受管派生附件，记录源摘要、引擎与页码。缺失置信度或语言维持未知；不完整结果需审核。
+- 接收交接结果后先审核，再提交资料；接收记录与业务完成凭据分别保存，重复发送不会重复导入。文件选择沿用发起时的目标，目标失效时要求明确选择。
+- 重建全文索引保留 OCR 页文本；搜索命中页可在摘要核验后的原 PDF 字节副本中跳转。原件改变、不可读或超过 128 MiB 页码预览上限时明确说明，避免错误定位。
+- 沿用 schema32 与原数据目录，无需搬移用户资料或更换钥匙串凭据。本版执行静态、编译与隔离资料上的定向检查；未运行冒烟测试，实际系统小组件显示和跨应用 GUI 流程仍需用户确认。
 
 ## V4.02 更新
 

@@ -125,6 +125,7 @@ struct DocumentLibraryDashboard: View {
     @State private var draggedFolderID: String?
     @State private var draggedDocumentID: String?
     @State private var previewDocument: ManagedDocument?
+    @State private var previewPage: Int?
     // V4.6 batch-T：文件拖动排序已接入后端 ManagedDocument.sortOrder
     // （store.documents(in:sort:.uploadTime) 手动序优先，moveManagedDocument 归一化并落盘）。
 
@@ -169,19 +170,9 @@ struct DocumentLibraryDashboard: View {
             QuickLookPreviewSheet(
                 url: store.managedDocumentURL(document),
                 title: document.displayName,
-                provenance: store.documentProvenance(for: document.id)
-            )
-        }
-        .sheet(item: $store.pendingPackageReview) { context in
-            ActionPackageReviewSheet(context: context)
-        }
-        .alert(isPresented: Binding(get: { store.exchangeFeedbackMessage != nil }, set: { if !$0 { store.exchangeFeedbackMessage = nil } })) {
-            Alert(
-                title: Text(AppLocalization.text("资料交接反馈")),
-                message: Text(store.exchangeFeedbackMessage ?? ""),
-                dismissButton: .default(Text(AppLocalization.text("知道了"))) {
-                    store.exchangeFeedbackMessage = nil
-                }
+                provenance: store.documentProvenance(for: document.id),
+                originalPDFURL: sourcePDFURL(for: document),
+                initialPage: previewPage
             )
         }
     }
@@ -433,8 +424,9 @@ struct DocumentLibraryDashboard: View {
     }
 
     private func documentRow(_ document: ManagedDocument) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
         HStack(spacing: 14) {
-            Button { previewDocument = document } label: {
+            Button { previewPage = nil; previewDocument = document } label: {
                 HStack(spacing: 14) {
                     Image(systemName: fileSymbol(for: document.fileExtension))
                         .font(.body.weight(.semibold))
@@ -476,7 +468,7 @@ struct DocumentLibraryDashboard: View {
                                 if let prov, !prov.pages.isEmpty || prov.ocrEngine != nil {
                                     HStack(spacing: 3) {
                                         Image(systemName: "text.viewfinder")
-                                        Text(AppLocalization.format("已OCR（%d页）", max(1, prov.pages.count)))
+                                        Text(prov.pages.isEmpty ? "OCR 页码待核对" : AppLocalization.format("已OCR（%d页）", prov.pages.count))
                                     }
                                     .font(.caption2.weight(.medium))
                                     .foregroundStyle(AppTheme.teal)
@@ -512,6 +504,21 @@ struct DocumentLibraryDashboard: View {
             }
             .menuStyle(.borderlessButton)
         }
+            let pages = matchingOCRPages(for: document)
+            if !pages.isEmpty {
+                HStack(spacing: 8) {
+                    Text("OCR 正文命中页：").font(.caption).foregroundStyle(.secondary)
+                    ForEach(Array(pages.prefix(5).enumerated()), id: \.offset) { _, page in
+                        Button(page.pageNumber > 0 ? "第 \(page.pageNumber) 页" : "页码未知") {
+                            previewPage = page.pageNumber > 0 ? page.pageNumber : nil
+                            previewDocument = document
+                        }
+                        .buttonStyle(.link)
+                        .font(.caption)
+                    }
+                }
+            }
+        }
         .padding(15)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
@@ -533,9 +540,26 @@ struct DocumentLibraryDashboard: View {
         .help(AppLocalization.text("上下拖动调整顺序"))
     }
 
+    private func matchingOCRPages(for document: ManagedDocument) -> [DocumentProvenance.Page] {
+        let query = search.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return [] }
+        return store.documentProvenance(for: document.id)?.pages.filter {
+            $0.text?.range(of: query, options: [.caseInsensitive, .diacriticInsensitive]) != nil
+        } ?? []
+    }
+
+    private func sourcePDFURL(for document: ManagedDocument) -> URL? {
+        if let revision = store.documentRevision(for: document.id),
+           let original = store.managedDocuments.first(where: { $0.id == revision.originalDocumentID }),
+           original.fileExtension.lowercased() == "pdf" {
+            return store.managedDocumentURL(original)
+        }
+        return document.fileExtension.lowercased() == "pdf" ? store.managedDocumentURL(document) : nil
+    }
+
     @ViewBuilder
     private func documentMenuContent(_ document: ManagedDocument) -> some View {
-        Button(AppLocalization.text("快速预览"), systemImage: "eye") { previewDocument = document }
+        Button(AppLocalization.text("快速预览"), systemImage: "eye") { previewPage = nil; previewDocument = document }
         Button(AppLocalization.text("用默认应用打开"), systemImage: "arrow.up.forward.app") { store.openDocument(document) }
         Button(AppLocalization.text("在访达中显示"), systemImage: "folder") { store.revealDocument(document) }
         Button(AppLocalization.text("重命名与标签"), systemImage: "pencil") { editDocumentAction(document) }
@@ -775,6 +799,7 @@ struct ActionPackageReviewSheet: View {
             VStack(alignment: .leading, spacing: 8) {
                 Text(AppLocalization.text("目标文件夹")).font(.headline)
                 Picker("", selection: $selectedFolderID) {
+                    Text(AppLocalization.text("请选择文件夹")).tag("")
                     ForEach(store.documentFolders) { folder in
                         Text("\(folder.name) (\(folder.libraryKind.title))").tag(folder.id)
                     }
@@ -824,6 +849,7 @@ struct ActionPackageReviewSheet: View {
                     dismiss()
                 }
                 .keyboardShortcut(.cancelAction)
+                .disabled(isProcessing)
 
                 Button(AppLocalization.text("确认导入")) {
                     confirmImport()
@@ -834,6 +860,7 @@ struct ActionPackageReviewSheet: View {
         }
         .padding(24)
         .frame(width: 540)
+        .interactiveDismissDisabled(isProcessing)
     }
 
     private func confirmImport() {
@@ -851,6 +878,124 @@ struct ActionPackageReviewSheet: View {
             } catch {
                 isProcessing = false
                 errorMessage = AppLocalization.format("导入失败：%@", error.localizedDescription)
+            }
+        }
+    }
+}
+
+struct ExchangeResultReviewSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    @EnvironmentObject private var store: PaperStore
+    let review: PendingExchangeResultReview
+    @State private var targetFolderID: String
+    @State private var reselectedReferences: [String: URL] = [:]
+    @State private var acknowledgedWarnings = false
+    @State private var isProcessing = false
+    @State private var errorMessage: String?
+
+    init(review: PendingExchangeResultReview) {
+        self.review = review
+        _targetFolderID = State(initialValue: review.targetFolderID ?? "")
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("审核资料交接结果").font(.title2.weight(.semibold))
+            Text(review.summary).font(.callout)
+            Text("来源声明：\(review.result.package.manifest.sourceBundleID)（声明未认证）")
+                .font(.caption).foregroundStyle(.secondary)
+            Divider()
+            if review.result.session.action == .chooseFiles {
+                Picker("导入文件夹", selection: $targetFolderID) {
+                    Text("请选择文件夹").tag("")
+                    ForEach(store.documentFolders) { folder in
+                        Text("\(folder.name)（\(folder.libraryKind.title)）").tag(folder.id)
+                    }
+                }
+            }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(review.result.selectedReferences) { reference in
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(reference.displayName)
+                                if let selected = reselectedReferences[reference.id] {
+                                    Text("本次选择：\(selected.lastPathComponent)").font(.caption).foregroundStyle(.secondary)
+                                }
+                            }
+                            Spacer()
+                            Button("重新选择文件…") { selectFile(for: reference) }
+                                .disabled(isProcessing)
+                        }
+                    }
+                    ForEach(review.result.ocrOutputs, id: \.itemID) { output in
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(output.localCopy.lastPathComponent).font(.headline)
+                            Text("\(ByteCountFormatter.string(fromByteCount: output.byteCount, countStyle: .file)) · \(output.pages.count) 个页来源")
+                                .font(.caption).foregroundStyle(.secondary)
+                            ForEach(Array(output.warnings.enumerated()), id: \.offset) { _, warning in
+                                Text(warning).font(.caption).foregroundStyle(.orange)
+                            }
+                            if output.pages.contains(where: { $0.confidence == nil }) {
+                                Text("部分或全部页未提供置信度。").font(.caption).foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(maxHeight: 260)
+            if review.requiresExplicitReview && review.canApply {
+                Toggle("我已核对结果中的不完整信息，确认按当前结果导入", isOn: $acknowledgedWarnings)
+                    .toggleStyle(.checkbox)
+            }
+            if let errorMessage {
+                Text(errorMessage).font(.callout).foregroundStyle(.red)
+            }
+            HStack {
+                if isProcessing { ProgressView().controlSize(.small) }
+                Spacer()
+                Button("关闭") {
+                    store.documentLibrary.pendingExchangeResultReview = nil
+                    dismiss()
+                }
+                .keyboardShortcut(.cancelAction)
+                .disabled(isProcessing)
+                if review.canApply {
+                    Button("确认导入", action: apply)
+                        .buttonStyle(.borderedProminent)
+                        .disabled(isProcessing || (review.requiresExplicitReview && !acknowledgedWarnings)
+                                  || (review.result.session.action == .chooseFiles && targetFolderID.isEmpty))
+                }
+            }
+        }
+        .padding(24)
+        .frame(width: 640)
+        .interactiveDismissDisabled(isProcessing)
+    }
+
+    private func selectFile(for reference: GaoActionReference) {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = true
+        panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false
+        panel.title = "重新选择：\(reference.displayName)"
+        if panel.runModal() == .OK, let url = panel.url { reselectedReferences[reference.id] = url }
+    }
+
+    private func apply() {
+        isProcessing = true
+        errorMessage = nil
+        Task { @MainActor in
+            do {
+                let outcome = try await store.documentLibrary.applyExchangeResult(
+                    review, userApproved: true,
+                    targetFolderID: targetFolderID.isEmpty ? nil : targetFolderID,
+                    reselectedReferences: reselectedReferences)
+                store.documentLibrary.pendingExchangeResultReview = nil
+                store.exchangeFeedbackMessage = AppLocalization.format("已导入 %d 项文件，%d 项内容已存在。", outcome.importedCount, outcome.duplicateCount)
+                dismiss()
+            } catch {
+                isProcessing = false
+                errorMessage = error.localizedDescription
             }
         }
     }

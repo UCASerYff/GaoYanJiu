@@ -17,6 +17,8 @@ final class DocumentLibraryStore: ObservableObject {
 
     var persist: () -> Void = {}
     var persistTransaction: (() throws -> Void)?
+    var readDurableDocuments: (() throws -> [ManagedDocument])?
+    var readDurableLibraryData: (() throws -> Data)?
     var libraryIsWritable: () -> Bool = { false }
     var errorHandler: (String) -> Void = { _ in }
     @Published var isImportingDocuments = false
@@ -25,6 +27,8 @@ final class DocumentLibraryStore: ObservableObject {
     @Published var exchangeFeedbackMessage: String?
     var activeImportRequestID: UUID?
     var importJournal: ResearchImportJournal?
+    var importFailureInjector: ((ResearchImportJournal.FaultPoint) throws -> Void)?
+    @Published var pendingExchangeResultReview: PendingExchangeResultReview?
 
     static let supportedExtensions: Set<String> = [
         "doc", "docx", "xls", "xlsx", "csv", "tsv", "ppt", "pptx",
@@ -542,71 +546,50 @@ struct PendingPackageReviewContext: Identifiable {
     var targetFolderID: String
 }
 
+struct PendingExchangeResultReview: Identifiable {
+    var id: String { result.package.manifest.requestID }
+    var result: ResearchValidatedExternalResult
+    var targetFolderID: String?
+    var requiresExplicitReview: Bool
+    var canApply: Bool
+    var summary: String
+    var references: [GaoActionReference] { result.selectedReferences }
+    var warnings: [String] { Array(Set(result.ocrOutputs.flatMap(\.warnings))).sorted() }
+    var itemCount: Int { result.package.stagedItems.count + references.count }
+}
+
 @MainActor
 extension DocumentLibraryStore {
     func handleIncomingPackage(at url: URL) {
         do {
-            let bundleID = ResearchExchangePaths.bundleID
-            let stagingRoot = ResearchExchangePaths.root.appendingPathComponent("Incoming", isDirectory: true)
-            let validator = GaoActionPackageValidator(expectedTargetBundleID: bundleID)
-            let package = try validator.stagePackage(at: url, stagingRoot: stagingRoot)
-            if package.manifest.kind == "request" && package.manifest.action == "research.importDocuments" {
-                let defaultFolderID = folders.first?.id ?? ""
-                pendingPackageReview = PendingPackageReviewContext(packageURL: url, validatedPackage: package, targetFolderID: defaultFolderID)
-            } else if package.manifest.kind == "result" {
-                let result = try exchangeClient.receiveResult(at: url)
-                handleExchangeResult(result)
+            let validator = GaoActionPackageValidator(expectedTargetBundleID: ResearchExchangePaths.bundleID)
+            let header = try validator.validateManifestData(GaoActionFileAccess.readPrivateData(at: url.appendingPathComponent("manifest.json")))
+            if header.kind == "request" && header.action == "research.importDocuments" {
+                let package = try validator.stagePackage(at: url, stagingRoot: ResearchExchangePaths.root.appendingPathComponent("Incoming"))
+                // An external request does not choose a business destination.
+                pendingPackageReview = PendingPackageReviewContext(packageURL: url, validatedPackage: package, targetFolderID: "")
+            } else if header.kind == "result" {
+                pendingExchangeResultReview = try receiveExchangeResultForReview(at: url)
             } else {
-                exchangeFeedbackMessage = "不受支持的动作或交接类型：\(package.manifest.action)"
+                exchangeFeedbackMessage = "不受支持的动作或交接类型。"
             }
-        } catch {
-            exchangeFeedbackMessage = "交接包解析失败：\(error.localizedDescription)"
-        }
+        } catch { exchangeFeedbackMessage = "交接包解析失败：\(error.localizedDescription)" }
     }
 
-    private func handleExchangeResult(_ result: ResearchValidatedExternalResult) {
-        switch result.session.action {
-        case .chooseFiles:
-            if result.selectedReferences.isEmpty {
-                exchangeFeedbackMessage = "搞整理未选择任何文件。"
-                return
-            }
-            Task { @MainActor in
-                var copiedURLs: [URL] = []
-                for ref in result.selectedReferences {
-                    if let selection = try? self.exchangeClient.verifySelectedReference(ref) {
-                        copiedURLs.append(selection.localCopy)
-                    }
-                }
-                guard !copiedURLs.isEmpty, let targetFolderID = self.folders.first?.id else {
-                    self.exchangeFeedbackMessage = "未能从搞整理复制选定的文件或缺少目标文件夹。"
-                    return
-                }
-                do {
-                    let count = try await self.importDocuments(from: copiedURLs, into: targetFolderID)
-                    self.exchangeFeedbackMessage = "已从搞整理成功导入 \(count) 个文件。"
-                } catch {
-                    self.exchangeFeedbackMessage = "导入选定文件失败：\(error.localizedDescription)"
-                }
-            }
-        case .ocrFiles:
-            Task { @MainActor in
-                var appliedCount = 0
-                for ocr in result.ocrOutputs {
-                    if let docID = ocr.sourceDocumentID, let doc = self.documents.first(where: { $0.id == docID }) {
-                        do {
-                            try await self.applyOCRResult(ocr, to: doc)
-                            appliedCount += 1
-                        } catch {
-                            self.errorHandler("应用 OCR 结果失败：\(error.localizedDescription)")
-                        }
-                    }
-                }
-                self.exchangeFeedbackMessage = "已应用 \(appliedCount) 个文档的 OCR 识别结果，全文索引已更新。"
-            }
-        case .openDocument:
-            exchangeFeedbackMessage = "文档已在搞文件中打开。完成编辑并保存后，可在文件菜单中选择“导入编辑新版本”。"
-        }
+    @discardableResult
+    func receiveExchangeResultForReview(at url: URL) throws -> PendingExchangeResultReview {
+        let result = try exchangeClient.receiveResult(at: url)
+        let status = result.package.manifest.status ?? "failed"
+        let canApply = ["completed", "partial"].contains(status) && result.session.action != .openDocument
+            && (!result.package.stagedItems.isEmpty || !result.selectedReferences.isEmpty)
+        let summary: String
+        if result.businessApplied { summary = "此结果已完成业务导入；再次接收不会重复添加。" }
+        else if result.session.action == .openDocument { summary = "提供方仅报告打开状态；保存后请重新选择编辑副本并明确导入。" }
+        else if !canApply { summary = "提供方状态：\(status)。本次不会应用附件或覆盖资料，可等待后续结果。" }
+        else { summary = "发送方仅声明来源身份；请核对输入、目标和逐页状态后批准导入。" }
+        let review = PendingExchangeResultReview(result: result, targetFolderID: result.session.targetFolderID,
+                                                requiresExplicitReview: true, canApply: canApply, summary: summary)
+        pendingExchangeResultReview = review
+        return review
     }
 }
-

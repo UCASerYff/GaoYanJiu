@@ -1,6 +1,8 @@
 # 搞研究 后续发布规则
 
-此项目是 V4.01 独立应用。每次后续更新版本号增加 0.01、构建号增加 1，版本以 Info.plist 为准。
+此项目是独立应用。每次后续更新版本号增加 0.01、构建号增加 1，版本以 Info.plist 为准。
+
+- 默认不运行冒烟测试，也不为测试自动启动应用、浏览器、模拟器或测试窗口。可执行必要静态检查、编译与非 GUI 定向测试；实际桌面显示未经用户验证时须如实说明。
 
 - 使用 scripts/build.sh 构建本模块、小组件及应用，并以已授权 Apple Development 团队 5G96498KGJ 签名。
 - 用户数据位于 ~/Library/Application Support/GaoSeries/Research/ 与 App Group 5G96498KGJ.com.academic-achievement.manager；凭据保留原系统钥匙串服务。

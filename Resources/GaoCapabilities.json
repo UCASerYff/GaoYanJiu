@@ -1,7 +1,7 @@
 {
   "schemaVersion": 1,
   "bundleID": "com.academic-achievement.manager",
-  "appVersion": "4.02",
+  "appVersion": "4.03",
   "actions": {
     "research.importDocuments": {
       "parameters": {

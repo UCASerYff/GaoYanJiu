@@ -589,18 +589,39 @@ private enum GaoSecureFD {
     }
     static func openDirectory(_ url: URL, requireOwnedFinal: Bool, create: Bool = false) throws -> Int32 {
         guard url.isFileURL, url.path.hasPrefix("/"), !url.path.utf8.contains(0) else { throw GaoActionError.unsafePath }
-        let components = url.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        var components = url.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard !components.contains(".."), !components.contains(".") else { throw GaoActionError.unsafePath }
-        let fm = FileManager.default
-        if create, !fm.fileExists(atPath: url.path) {
-            try fm.createDirectory(at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        // These are fixed macOS root aliases, not permission to resolve arbitrary
+        // links. Leave every user-controlled component intact for O_NOFOLLOW.
+        // Do not use standardized/resolvingSymlinksInPath here: canonicalFileURL
+        // already preserves the lexical spelling, including /private prefixes.
+        if let first = components.first, ["tmp", "var", "etc"].contains(first) {
+            components.insert("private", at: 0)
         }
-        let fd = Darwin.open(url.path, flags | O_DIRECTORY)
-        guard fd >= 0 else { throw errno == ELOOP ? GaoActionError.unsafePath : GaoActionError.permissionDenied }
+        var current = Darwin.open("/", flags | O_DIRECTORY)
+        guard current >= 0 else { throw GaoActionError.permissionDenied }
         do {
-            try checkDirectory(fd, owned: requireOwnedFinal)
-            return fd
-        } catch { close(fd); throw error }
+            for (index, component) in components.enumerated() {
+                var next = openat(current, component, flags | O_DIRECTORY)
+                if next < 0, create, errno == ENOENT {
+                    // Both creation and the subsequent open use the pinned
+                    // parent FD, so an ancestor rename cannot redirect them.
+                    if mkdirat(current, component, 0o700) != 0, errno != EEXIST {
+                        throw GaoActionError.permissionDenied
+                    }
+                    next = openat(current, component, flags | O_DIRECTORY)
+                }
+                guard next >= 0 else {
+                    throw errno == ELOOP || errno == ENOTDIR ? GaoActionError.unsafePath : GaoActionError.permissionDenied
+                }
+                do { try checkDirectory(next, owned: requireOwnedFinal && index == components.count - 1) }
+                catch { close(next); throw error }
+                close(current)
+                current = next
+            }
+            if components.isEmpty { try checkDirectory(current, owned: requireOwnedFinal) }
+            return current
+        } catch { close(current); throw error }
     }
     static func openChildDirectory(at parent: Int32, name: String, owned: Bool) throws -> Int32 {
         let fd = openat(parent, name, flags | O_DIRECTORY)

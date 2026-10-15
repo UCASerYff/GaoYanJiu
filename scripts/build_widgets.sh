@@ -13,4 +13,4 @@ ditto "$BUILD/widget-products/Release/ResearchWidgets.appex" "$BUILD/PlugIns/Res
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NUMBER" "$BUILD/PlugIns/ResearchWidgets.appex/Contents/Info.plist"
 
 # Keep Xcode platform metadata and reject a plain executable disguised as an extension.
-xcrun nm -u "$BUILD/PlugIns/ResearchWidgets.appex/Contents/MacOS/ResearchWidgets" | grep -q "_NSExtensionMain$" || { echo "小组件缺少 NSExtensionMain 入口"; exit 1; }
+xcrun nm -u "$BUILD/PlugIns/ResearchWidgets.appex/Contents/MacOS/ResearchWidgets" | grep "_NSExtensionMain$" >/dev/null || { echo "小组件缺少 NSExtensionMain 入口"; exit 1; }

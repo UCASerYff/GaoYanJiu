@@ -69,6 +69,7 @@ struct ImportJob: Codable, Identifiable {
 /// repeatable: a crash after indexing can require indexing the same IDs again.
 @MainActor
 final class ResearchImportJournal {
+    enum Operation: String, Codable { case insert, update, revision }
     struct Input {
         var id: String
         var sourceURL: URL
@@ -80,12 +81,17 @@ final class ResearchImportJournal {
         var recordData: Data
         var provenance: DocumentProvenance
         var revision: AttachmentRevision? = nil
+        var operation: Operation? = nil
+        var expectedOriginal: RecordState? = nil
+        var recordVersion: String? = nil
+        var originalRecordData: Data? = nil
     }
     struct RecordState: Codable, Equatable {
         var documentID: String
         var scopeID: String
         var sha256: String
         var destinationRelativePath: String
+        var version: String? = nil
     }
     struct CommittedItem: Codable {
         var id: String
@@ -101,6 +107,19 @@ final class ResearchImportJournal {
         var duplicateOfDocumentID: String?
         var stagedRelativePath: String
         var destinationInitiallyAbsent = false
+        // Optional fields keep journals written before explicit update support
+        // decodable. A missing operation retains the original strict insert.
+        var operation: Operation? = nil
+        var expectedOriginal: RecordState? = nil
+        var recordVersion: String? = nil
+        var originalRecordData: Data? = nil
+        var previousProvenance: DocumentProvenance? = nil
+        var previousRevision: AttachmentRevision? = nil
+        var effectiveOperation: Operation { operation ?? .insert }
+        var newState: RecordState {
+            RecordState(documentID: documentID, scopeID: scopeID, sha256: sha256,
+                        destinationRelativePath: destinationRelativePath, version: recordVersion)
+        }
     }
     struct Adapter {
         var currentRecords: @MainActor () throws -> [RecordState]
@@ -191,8 +210,11 @@ final class ResearchImportJournal {
         for (offset, item) in value.items.enumerated() {
             guard item.stagedRelativePath == "payload/\(offset).data", Self.isDigest(item.sha256),
                   item.byteCount >= 0, item.byteCount <= 2_147_483_648,
-                  item.recordData.count <= 16 * 1_048_576 else { throw JournalError.corruptJournal }
+                  item.recordData.count <= 16 * 1_048_576,
+                  (item.originalRecordData?.count ?? 0) <= 16 * 1_048_576 else { throw JournalError.corruptJournal }
             _ = try Self.safeRelative(item.destinationRelativePath)
+            try Self.validateOperation(item.effectiveOperation, documentID: item.documentID, scopeID: item.scopeID,
+                                       destination: item.destinationRelativePath, expected: item.expectedOriginal, revision: item.revision)
         }
         return value
     }
@@ -254,7 +276,9 @@ final class ResearchImportJournal {
                               destinationRelativePath: input.destinationRelativePath, sha256: input.sha256.lowercased(),
                               byteCount: input.byteCount, recordData: input.recordData,
                               provenance: input.provenance, revision: input.revision,
-                              duplicateOfDocumentID: nil, stagedRelativePath: "payload/\(offset).data")
+                              duplicateOfDocumentID: nil, stagedRelativePath: "payload/\(offset).data",
+                              operation: input.operation, expectedOriginal: input.expectedOriginal,
+                              recordVersion: input.recordVersion, originalRecordData: input.originalRecordData)
             }, createdAt: now, updatedAt: now)
             try persist(&value)
         }
@@ -276,9 +300,17 @@ final class ResearchImportJournal {
         var results: [RecoveryResult] = []
         for original in jobs where original.stage != .completed && original.stage != .cancelled {
             var value = original
+            do { try begin(value.requestID) }
+            catch {
+                results.append(RecoveryResult(requestID: value.requestID, errorCode: errorCode(error)))
+                continue
+            }
             do {
-                try begin(value.requestID)
-                defer { end() }
+                // The file lock covers both execution and compensation. Reload
+                // after taking it: another process may have finished this job.
+                guard let latest = try job(requestID: value.requestID) else { throw JournalError.corruptJournal }
+                value = latest
+                if value.stage == .completed || value.stage == .cancelled { end(); continue }
                 let outcome = try await execute(&value)
                 results.append(RecoveryResult(requestID: value.requestID, outcome: outcome))
             } catch is SimulatedCrash {
@@ -287,6 +319,7 @@ final class ResearchImportJournal {
                 do { try await recordFailure(&value, error: error) } catch { }
                 results.append(RecoveryResult(requestID: value.requestID, errorCode: errorCode(error)))
             }
+            end()
         }
         return results
     }
@@ -312,9 +345,11 @@ final class ResearchImportJournal {
         let existing = try states()
         let committed = try matchingCommitted(newItems, records: existing)
         if committed != 0 && committed != newItems.count { throw JournalError.partialRecordCommit }
+        if value.recordsCommitted && committed != newItems.count { throw JournalError.recordConflict }
         if committed == newItems.count && !newItems.isEmpty { value.recordsCommitted = true }
-        try validateRelations(value.items, records: existing)
+        try validateRelations(value.items, records: existing, recordsCommitted: value.recordsCommitted)
         try validateDuplicates(value.items, records: existing)
+        for item in newItems where item.effectiveOperation == .update { try archiveOriginalMetadata(item) }
 
         try transition(&value, to: .attachments)
         for (offset, item) in newItems.enumerated() {
@@ -347,11 +382,16 @@ final class ResearchImportJournal {
             if already != 0 { throw JournalError.recordConflict }
             // A concurrent import cannot silently turn this plan into a second
             // record for identical content in the same target scope.
-            for item in newItems where current.contains(where: {
+            for item in newItems where item.effectiveOperation == .insert && current.contains(where: {
                 $0.scopeID == item.scopeID && $0.sha256.lowercased() == item.sha256 && $0.documentID != item.documentID
             }) { throw JournalError.recordConflict }
             try transition(&value, to: .database)
             try failureInjector?(.beforeDatabaseCommit)
+            // Compare immediately before the synchronous atomic adapter call,
+            // including any edits made while files were being staged/copied.
+            let beforeCommit = try states()
+            try validateRelations(value.items, records: beforeCommit)
+            try validatePending(newItems, records: beforeCommit)
             if !newItems.isEmpty { try adapter.commitRecords(newItems) }
             guard try matchingCommitted(newItems, records: states()) == newItems.count else { throw JournalError.partialRecordCommit }
             value.recordsCommitted = true
@@ -365,9 +405,19 @@ final class ResearchImportJournal {
         if !newItems.isEmpty { try await adapter.indexDocuments(newItems.map(\.documentID)) }
         try failureInjector?(.afterIndex)
         for item in newItems {
-            try writeMetadata(item.provenance, documentID: item.documentID, directory: "DocumentProvenance")
+            if item.effectiveOperation == .update {
+                try writeUpdatedMetadata(item.provenance, previous: item.previousProvenance,
+                                         documentID: item.documentID, directory: "DocumentProvenance")
+            } else {
+                try writeMetadata(item.provenance, documentID: item.documentID, directory: "DocumentProvenance")
+            }
             if let revision = item.revision {
-                try writeMetadata(revision, documentID: item.documentID, directory: "AttachmentRevisions")
+                if item.effectiveOperation == .update {
+                    try writeUpdatedMetadata(revision, previous: item.previousRevision,
+                                             documentID: item.documentID, directory: "AttachmentRevisions")
+                } else {
+                    try writeMetadata(revision, documentID: item.documentID, directory: "AttachmentRevisions")
+                }
             }
         }
         let ids = value.items.map { $0.duplicateOfDocumentID ?? $0.documentID }
@@ -414,6 +464,25 @@ final class ResearchImportJournal {
         for state in current { digestTargets[state.scopeID + "\0" + state.sha256.lowercased()] = state.documentID }
         for offset in value.items.indices {
             var item = value.items[offset]
+            if item.effectiveOperation == .update || item.effectiveOperation == .revision {
+                if item.effectiveOperation == .update {
+                    guard let expected = item.expectedOriginal,
+                          let state = current.first(where: { $0.documentID == item.documentID }),
+                          matchesState(state, expected: expected) else { throw JournalError.recordConflict }
+                } else if current.contains(where: { $0.documentID == item.documentID }) {
+                    throw JournalError.recordConflict
+                }
+                let destination = try destinationURL(item.destinationRelativePath)
+                guard !FileManager.default.fileExists(atPath: destination.path) else { throw JournalError.destinationConflict }
+                item.destinationInitiallyAbsent = true
+                if item.effectiveOperation == .update {
+                    item.previousProvenance = try provenance(documentID: item.documentID)
+                    item.previousRevision = try revision(documentID: item.documentID)
+                }
+                digestTargets[item.scopeID + "\0" + item.sha256] = item.documentID
+                value.items[offset] = item
+                continue
+            }
             if let state = current.first(where: { $0.documentID == item.documentID }),
                !matches(item, state) { throw JournalError.recordConflict }
             let key = item.scopeID + "\0" + item.sha256
@@ -436,17 +505,33 @@ final class ResearchImportJournal {
         return result
     }
 
-    private func validateRelations(_ items: [CommittedItem], records: [RecordState]) throws {
+    private func validateRelations(_ items: [CommittedItem], records: [RecordState], recordsCommitted: Bool = false) throws {
         for item in items {
             guard item.provenance.documentID == item.documentID else { throw JournalError.invalidPlan }
+            var original: RecordState?
+            if let expected = item.expectedOriginal {
+                if recordsCommitted {
+                    // A committed update has replaced the same logical ID.
+                    // The durable job preserves the old state; requiring the
+                    // old SHA on the new record would prevent index recovery.
+                    original = expected
+                } else {
+                    guard let current = records.first(where: { $0.documentID == expected.documentID }),
+                          matchesState(current, expected: expected) else { throw JournalError.recordConflict }
+                    original = current
+                }
+            }
             if let revision = item.revision {
+                let source = original ?? records.first(where: { $0.documentID == revision.originalDocumentID })
                 guard revision.documentID == item.documentID, revision.derivedSHA256.lowercased() == item.sha256,
-                      let original = records.first(where: { $0.documentID == revision.originalDocumentID }),
-                      original.sha256.lowercased() == revision.originalSHA256.lowercased(),
+                      let source, source.documentID == revision.originalDocumentID,
+                      source.sha256.lowercased() == revision.originalSHA256.lowercased(),
                       item.provenance.originalSHA256.lowercased() == revision.originalSHA256.lowercased() else {
                     throw JournalError.revisionConflict
                 }
-            } else if item.provenance.originalSHA256.lowercased() != item.sha256 { throw JournalError.revisionConflict }
+            } else if item.provenance.originalSHA256.lowercased() != (original?.sha256.lowercased() ?? item.sha256) {
+                throw JournalError.revisionConflict
+            }
         }
     }
 
@@ -463,16 +548,36 @@ final class ResearchImportJournal {
         var count = 0
         for item in items {
             if let state = records.first(where: { $0.documentID == item.documentID }) {
-                guard matches(item, state) else { throw JournalError.recordConflict }
-                count += 1
+                if matches(item, state) { count += 1 }
+                else if item.effectiveOperation == .update, let expected = item.expectedOriginal,
+                        matchesState(state, expected: expected) { continue }
+                else { throw JournalError.recordConflict }
+            } else if item.effectiveOperation == .update {
+                throw JournalError.recordConflict
             }
         }
         return count
     }
 
     private func matches(_ item: CommittedItem, _ state: RecordState) -> Bool {
-        state.scopeID == item.scopeID && state.sha256.lowercased() == item.sha256 &&
-        state.destinationRelativePath == item.destinationRelativePath
+        matchesState(state, expected: item.newState)
+    }
+
+    private func matchesState(_ actual: RecordState, expected: RecordState) -> Bool {
+        actual.documentID == expected.documentID && actual.scopeID == expected.scopeID &&
+        actual.sha256.lowercased() == expected.sha256.lowercased() &&
+        actual.destinationRelativePath == expected.destinationRelativePath &&
+        (expected.version == nil || actual.version == expected.version)
+    }
+
+    private func validatePending(_ items: [CommittedItem], records: [RecordState]) throws {
+        for item in items {
+            let current = records.first { $0.documentID == item.documentID }
+            if item.effectiveOperation == .update {
+                guard let current, let expected = item.expectedOriginal,
+                      matchesState(current, expected: expected) else { throw JournalError.recordConflict }
+            } else if current != nil { throw JournalError.recordConflict }
+        }
     }
 
     private func checkCancellation(_ value: ImportJob) async throws {
@@ -485,28 +590,46 @@ final class ResearchImportJournal {
     private func recordFailure(_ value: inout ImportJob, error: Swift.Error) async throws {
         let newItems = value.items.filter { $0.duplicateOfDocumentID == nil }
         let current = try states() // An unreadable library never permits compensation.
-        let committed = try matchingCommitted(newItems, records: current)
+        let committed: Int
+        do { committed = try matchingCommitted(newItems, records: current) }
+        catch {
+            // A changed target is not evidence of a successful update. Only
+            // remove this job's verified new files which no durable record
+            // references; retain originals, staging, and the failed journal.
+            if !value.recordsCommitted && value.validationCompleted {
+                try await compensateUnreferenced(newItems, records: current, requestID: value.requestID)
+            }
+            value.errorCode = errorCode(error)
+            value.resumeStage = value.recordsCommitted ? .indexing : .commitJournal
+            value.stage = .failed
+            try persist(&value)
+            return
+        }
         if committed > 0 || value.recordsCommitted {
             value.recordsCommitted = true
         } else if value.validationCompleted {
-            for item in newItems where item.destinationInitiallyAbsent {
-                let destination = try destinationURL(item.destinationRelativePath)
-                let temporary = temporaryDestination(item, requestID: value.requestID)
-                try await Task.detached(priority: .utility) {
-                    if FileManager.default.fileExists(atPath: temporary.path) { try FileManager.default.removeItem(at: temporary) }
-                    if FileManager.default.fileExists(atPath: destination.path) {
-                        // Never remove a pre-existing or subsequently modified file.
-                        try Self.verifyFileSync(destination, sha256: item.sha256, byteCount: item.byteCount)
-                        try FileManager.default.removeItem(at: destination)
-                    }
-                }.value
-            }
+            try await compensateUnreferenced(newItems, records: current, requestID: value.requestID)
         }
         value.resumeStage = value.recordsCommitted ? .indexing : (value.validationCompleted ? .commitJournal : .staging)
         value.errorCode = errorCode(error)
         let cancelled = error is CancellationError || (error as? JournalError) == .cancelled
         value.stage = cancelled && !value.recordsCommitted ? .cancelled : .failed
         try persist(&value)
+    }
+
+    private func compensateUnreferenced(_ items: [CommittedItem], records: [RecordState], requestID: UUID) async throws {
+        for item in items where item.destinationInitiallyAbsent {
+            if records.contains(where: { $0.destinationRelativePath == item.destinationRelativePath }) { continue }
+            let destination = try destinationURL(item.destinationRelativePath)
+            let temporary = temporaryDestination(item, requestID: requestID)
+            try await Task.detached(priority: .utility) {
+                if FileManager.default.fileExists(atPath: temporary.path) { try FileManager.default.removeItem(at: temporary) }
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    try Self.verifyFileSync(destination, sha256: item.sha256, byteCount: item.byteCount)
+                    try FileManager.default.removeItem(at: destination)
+                }
+            }.value
+        }
     }
 
     private func makeFingerprint(_ items: [Input]) throws -> String {
@@ -520,16 +643,32 @@ final class ResearchImportJournal {
                   Self.isDigest(item.sha256), Self.isDigest(item.provenance.originalSHA256),
                   item.byteCount >= 0, item.byteCount <= 2_147_483_648,
                   item.recordData.count <= 16 * 1_048_576,
+                  (item.originalRecordData?.count ?? 0) <= 16 * 1_048_576,
                   destinations.insert(item.destinationRelativePath).inserted else { throw JournalError.invalidPlan }
             _ = try Self.safeRelative(item.destinationRelativePath)
+            let operation = item.operation ?? .insert
+            try Self.validateOperation(operation, documentID: item.documentID, scopeID: item.scopeID,
+                                       destination: item.destinationRelativePath, expected: item.expectedOriginal, revision: item.revision)
             total += item.byteCount
             guard total <= 2_147_483_648 else { throw JournalError.invalidPlan }
-            rows.append(["id": item.id, "scope": item.scopeID, "sha256": item.sha256.lowercased(),
+            var row = ["id": item.id, "scope": item.scopeID, "sha256": item.sha256.lowercased(),
                          "bytes": String(item.byteCount), "sourceSHA256": item.provenance.originalSHA256.lowercased(),
                          "targetRecordID": item.provenance.targetRecordID ?? "",
                          "revisionSource": item.revision?.originalDocumentID ?? "",
                          "revisionSHA256": item.revision?.originalSHA256.lowercased() ?? "",
-                         "revisionKind": item.revision?.kind ?? ""])
+                         "revisionKind": item.revision?.kind ?? ""]
+            // nil and explicit insert have identical semantics, retaining the
+            // fingerprints of legacy jobs. New update/revision intent and CAS
+            // are bound to the request; generated result times are not.
+            if operation != .insert {
+                row["operation"] = operation.rawValue
+                if operation == .update { row["documentID"] = item.documentID }
+                if var expected = item.expectedOriginal {
+                    expected.sha256 = expected.sha256.lowercased()
+                    row["expectedOriginal"] = String(data: try encoder.encode(expected), encoding: .utf8)!
+                }
+            }
+            rows.append(row)
         }
         let data = try JSONSerialization.data(withJSONObject: rows.sorted { $0["id"]! < $1["id"]! }, options: [.sortedKeys])
         return Self.hash(data)
@@ -620,6 +759,46 @@ final class ResearchImportJournal {
         try write(value, to: url)
     }
 
+    private func archiveOriginalMetadata(_ item: CommittedItem) throws {
+        guard let original = item.expectedOriginal else { throw JournalError.invalidPlan }
+        let directory = metadata.appendingPathComponent("DocumentHistory", isDirectory: true)
+            .appendingPathComponent(Self.hash(Data(item.documentID.utf8)), isDirectory: true)
+            .appendingPathComponent(Self.hash(try encoder.encode(original)), isDirectory: true)
+        try writeFrozen(original, to: directory.appendingPathComponent("state.json"))
+        if let value = item.previousProvenance { try writeFrozen(value, to: directory.appendingPathComponent("provenance.json")) }
+        if let value = item.previousRevision { try writeFrozen(value, to: directory.appendingPathComponent("revision.json")) }
+        if let value = item.originalRecordData { try writeFrozenData(value, to: directory.appendingPathComponent("original-record.data")) }
+        // The original attachment deliberately stays at original's path. The
+        // immutable history state and optional record snapshot retain its link.
+    }
+
+    private func writeFrozen<T: Encodable>(_ value: T, to url: URL) throws {
+        try writeFrozenData(encoder.encode(value), to: url)
+    }
+
+    private func writeFrozenData(_ data: Data, to url: URL) throws {
+        if FileManager.default.fileExists(atPath: url.path) {
+            let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+            guard attributes[.type] as? FileAttributeType == .typeRegular,
+                  try Data(contentsOf: url) == data else { throw JournalError.recordConflict }
+            return
+        }
+        try Self.ensureDirectory(url.deletingLastPathComponent())
+        try data.write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
+    private func writeUpdatedMetadata<T: Codable>(_ value: T, previous: T?, documentID: String, directory: String) throws {
+        let url = metadata.appendingPathComponent(directory).appendingPathComponent(Self.hash(Data(documentID.utf8)) + ".json")
+        if FileManager.default.fileExists(atPath: url.path) {
+            let current: T = try decode(url)
+            let encoded = try encoder.encode(current)
+            if encoded == (try encoder.encode(value)) { return } // Interrupted after this write.
+            guard let previous, encoded == (try encoder.encode(previous)) else { throw JournalError.recordConflict }
+        } else if previous != nil { throw JournalError.recordConflict }
+        try write(value, to: url)
+    }
+
     private func decode<T: Decodable>(_ url: URL) throws -> T {
         do {
             let metadata = try FileManager.default.attributesOfItem(atPath: url.path)
@@ -639,6 +818,25 @@ final class ResearchImportJournal {
         guard !value.hasPrefix("/"), !value.contains("\\"), !value.contains("\0"),
               !parts.isEmpty, parts.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { throw JournalError.invalidPath }
         return parts
+    }
+
+    private nonisolated static func validateOperation(_ operation: Operation, documentID: String, scopeID: String,
+                                                      destination: String, expected: RecordState?, revision: AttachmentRevision?) throws {
+        if operation == .insert {
+            guard expected == nil else { throw JournalError.invalidPlan }
+            return
+        }
+        guard let expected, !expected.documentID.isEmpty, !expected.scopeID.isEmpty,
+              isDigest(expected.sha256), let revision,
+              revision.originalDocumentID == expected.documentID,
+              revision.originalSHA256.lowercased() == expected.sha256.lowercased() else { throw JournalError.invalidPlan }
+        _ = try safeRelative(expected.destinationRelativePath)
+        if operation == .update {
+            guard expected.documentID == documentID, expected.scopeID == scopeID,
+                  expected.destinationRelativePath != destination else { throw JournalError.invalidPlan }
+        } else {
+            guard expected.documentID != documentID else { throw JournalError.invalidPlan }
+        }
     }
 
     private nonisolated static func ensureDirectory(_ url: URL) throws {

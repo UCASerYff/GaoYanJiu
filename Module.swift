@@ -39,6 +39,23 @@ public struct ResearchModuleView: View {
             .onAppear { ResearchRuntime.exportInitialSnapshotIfNeeded() }
             .onAppear(perform: handleRoute)
             .onChange(of: routeRevision) { _, _ in handleRoute() }
+            .sheet(item: $store.pendingPackageReview) { context in
+                ActionPackageReviewSheet(context: context)
+                    .environmentObject(store)
+            }
+            .sheet(item: Binding(get: { store.documentLibrary.pendingExchangeResultReview },
+                                 set: { store.documentLibrary.pendingExchangeResultReview = $0 })) { review in
+                ExchangeResultReviewSheet(review: review)
+                    .environmentObject(store)
+            }
+            .alert(isPresented: Binding(get: { store.exchangeFeedbackMessage != nil },
+                                        set: { if !$0 { store.exchangeFeedbackMessage = nil } })) {
+                Alert(title: Text(AppLocalization.text("资料交接反馈")),
+                      message: Text(store.exchangeFeedbackMessage ?? ""),
+                      dismissButton: .default(Text(AppLocalization.text("知道了"))) {
+                    store.exchangeFeedbackMessage = nil
+                })
+            }
             // 备份导出/恢复收拢到 app 级「数据」页：模块内入口已移除，能力经通知触发。
             .onReceive(NotificationCenter.default.publisher(for: Notification.Name("GaoSeries.research.export"))) { _ in
                 store.exportFullBackup()

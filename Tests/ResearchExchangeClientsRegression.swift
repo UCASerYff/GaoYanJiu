@@ -51,10 +51,11 @@ struct ResearchExchangeClientsRegression {
 
     static func result(root: URL, request: ResearchPreparedExchange, action: ResearchExternalAction,
                        status: String, outputFiles: [URL] = [], references: [GaoActionReference] = [],
-                       provenance: [String: GaoJSONValue], sourceID: String? = nil) throws -> URL {
+                       provenance: [String: GaoJSONValue], sourceID: String? = nil,
+                       outputUTIs: [String]? = nil) throws -> URL {
         let items = outputFiles.enumerated().map { index, url in
             GaoActionItem(id: "output-\(index)", relativePath: "payload/output-\(index).\(url.pathExtension)",
-                          uti: "public.plain-text", byteCount: 0, sha256: String(repeating: "0", count: 64))
+                          uti: outputUTIs?[index] ?? "public.plain-text", byteCount: 0, sha256: String(repeating: "0", count: 64))
         }
         let template = GaoActionManifest(kind: "result", sourceBundleID: sourceID ?? action.providerBundleID,
                                          targetBundleID: researchID, action: action.rawValue,
@@ -112,6 +113,17 @@ struct ResearchExchangeClientsRegression {
                                       status: "completed", references: [reference], provenance: ["workflowState": .string("selected")])
         let receivedSelection = try client.receiveResult(at: chooseResult)
         try expect(receivedSelection.selectedReferences.count == 1 && !receivedSelection.sourceIsAuthenticated, "selection declarations are not authenticated")
+        try expect(!receivedSelection.businessApplied, "received files.choose is not a committed import")
+        let selectionReceipt = try client.markResultApplied(requestID: choose.requestID, resultID: receivedSelection.package.manifest.requestID,
+                                                           importedDocumentIDs: ["imported-selection"], receiptID: "journal-receipt-selection")
+        let repeatedReceipt = try client.markResultApplied(requestID: choose.requestID, resultID: receivedSelection.package.manifest.requestID,
+                                                          importedDocumentIDs: ["imported-selection"], receiptID: "journal-receipt-selection")
+        try expect(selectionReceipt == repeatedReceipt, "business commit receipt is idempotent")
+        try expect(try client.receiveResult(at: chooseResult).businessApplied, "committed result is distinct from duplicate receipt")
+        try fails("business receipt cannot change documents", expected: .resultMismatch) {
+            _ = try client.markResultApplied(requestID: choose.requestID, resultID: receivedSelection.package.manifest.requestID,
+                                            importedDocumentIDs: ["other-document"], receiptID: "journal-receipt-selection")
+        }
         let verified = try client.verifySelectedReference(reference)
         try expect(try Data(contentsOf: verified.localCopy) == Data("hello\n".utf8), "selected reference copied after local verification")
         var unknown = reference; unknown.declaredIdentity = .init(); unknown.sha256 = nil
@@ -123,6 +135,26 @@ struct ResearchExchangeClientsRegression {
         try fm.createSymbolicLink(at: link, withDestinationURL: selected)
         unknown.fileURL = link.absoluteString
         try fails("linked reference rejected", expected: .requiresLocalSelection) { _ = try client.verifySelectedReference(unknown, userSelectedURL: link) }
+
+        let scope = try GaoActionReference.capture(at: root, kind: "directory")
+        let scopedChoose = try client.prepareFileSelection(targetFolderID: "folder-A", sourceScope: scope)
+        let scopedSession = try client.loadSession(scopedChoose.requestID)
+        try expect(scopedSession.targetFolderID == "folder-A" && scopedSession.sourceScope == scope, "files.choose persists local target and source context")
+        let scopedManifest = try JSONDecoder().decode(GaoActionManifest.self, from: Data(contentsOf: scopedChoose.packageURL.appendingPathComponent("manifest.json")))
+        try expect(scopedManifest.parameters["targetFolderID"] == nil && scopedManifest.references == [scope], "routing target remains local and source scope is explicit context")
+        try expect(try client.resolveFileSelectionTarget(requestID: scopedChoose.requestID, existingFolderIDs: ["folder-A"]) == "folder-A", "result uses requested folder")
+        try fails("deleted target never chooses first folder", expected: .requiresTargetReview) {
+            _ = try client.resolveFileSelectionTarget(requestID: scopedChoose.requestID, existingFolderIDs: ["folder-B"])
+        }
+        try expect(try client.resolveFileSelectionTarget(requestID: scopedChoose.requestID, existingFolderIDs: ["folder-B"], userConfirmedFolderID: "folder-B") == "folder-B", "explicit re-target is persisted")
+        let oldSessionURL = client.exchangeRoot.appendingPathComponent("Sessions/\(scopedChoose.requestID).json")
+        var oldSessionObject = try JSONSerialization.jsonObject(with: Data(contentsOf: oldSessionURL)) as! [String: Any]
+        for key in ["targetFolderID", "sourceScope", "selectionIntentVersion", "appliedResults", "resultStatuses"] { oldSessionObject.removeValue(forKey: key) }
+        try write(JSONSerialization.data(withJSONObject: oldSessionObject), to: oldSessionURL)
+        try expect(try client.loadSession(scopedChoose.requestID).targetFolderID == nil, "old sessions decode without inventing routing scope")
+        try fails("legacy target requires review", expected: .requiresTargetReview) {
+            _ = try client.resolveFileSelectionTarget(requestID: scopedChoose.requestID, existingFolderIDs: ["folder-A", "folder-B"])
+        }
 
         let pdf = root.appendingPathComponent("input.pdf")
         try write(Data("%PDF-1.4\nfixture scanned pages\n".utf8), to: pdf)
@@ -144,7 +176,8 @@ struct ResearchExchangeClientsRegression {
         let partialResult = try client.receiveResult(at: partial)
         try expect(partialResult.workflowState == "partial" && partialResult.ocrOutputs[0].pages.count == 2, "v1-ocr-partial page mapping")
         try expect(partialResult.ocrOutputs[0].sourceDocumentID == "doc-ocr", "OCR maps to original library document")
-        try expect(try client.receiveResult(at: partial).duplicate, "v1-duplicate-request does not repeat import")
+        let receivedAgain = try client.receiveResult(at: partial)
+        try expect(receivedAgain.duplicate && !receivedAgain.businessApplied, "received-only duplicate remains available for approval/resume")
         let partialManifestURL = partial.appendingPathComponent("manifest.json")
         var mutated = try JSONDecoder().decode(GaoActionManifest.self, from: Data(contentsOf: partialManifestURL))
         mutated.provenance?["engineVersion"] = .string("fixture-2")
@@ -166,6 +199,7 @@ struct ResearchExchangeClientsRegression {
         let impersonated = try result(root: root.appendingPathComponent("ProviderOutgoing"), request: ocr, action: .ocrFiles,
                                      status: "partial", outputFiles: [output], provenance: minimal, sourceID: "com.example.other")
         try fails("source claim mismatch", expected: .resultMismatch) { _ = try client.receiveResult(at: impersonated) }
+        try productionOCRFixtures(root: root, client: client, originalPDF: pdf, firstOutput: output)
         try write(Data("%PDF-1.4 changed\n".utf8), to: pdf)
         try fails("changed original blocks result import", expected: .sourceChanged) { _ = try client.receiveResult(at: incomplete) }
 
@@ -195,5 +229,104 @@ struct ResearchExchangeClientsRegression {
                                                    currentVersion: version.addingTimeInterval(1), userSelectedEditedCopy: edited, mode: .newVersion)
         }
         print("Research exchange client contract fixtures passed: \(checks) checks; no installed-provider or GUI end-to-end claim")
+    }
+
+    // Shapes below are copied from the public fields emitted by the read-only
+    // GaoJieTu Sources/UI/ExchangeController.swift producer, not a new V1 schema.
+    // No OCR engine, installed app or GUI is started by these codec fixtures.
+    static func productionOCRFixtures(root: URL, client: ResearchExchangeClient,
+                                       originalPDF: URL, firstOutput: URL) throws {
+        let image = root.appendingPathComponent("second-input.png")
+        let json = root.appendingPathComponent("ocr.json")
+        let emptyText = root.appendingPathComponent("failed-source.txt")
+        try write(Data("synthetic image bytes; this test does not recognize images".utf8), to: image)
+        try write(Data("{\"schemaVersion\":1,\"fixture\":true}".utf8), to: json)
+        try write(Data(), to: emptyText)
+        let request = try client.prepareOCR(userSelectedFiles: [.init(url: originalPDF, documentID: "pdf-original"),
+                                                                .init(url: image, documentID: "image-original")])
+        let session = try client.loadSession(request.requestID)
+        let first = session.sources[0], second = session.sources[1]
+        func source(_ binding: ResearchExchangeSourceBinding, providerID: String, outputIDs: [String], status: String) -> GaoJSONValue {
+            .object(["sourceID": .string(providerID), "sourceItemID": .string(binding.itemID), "sourceSHA256": .string(binding.sha256),
+                     "outputItemIDs": .array(outputIDs.map(GaoJSONValue.string)),
+                     "pages": .array([.object(["pageNumber": .number(1), "status": .string(status), "elapsedSeconds": .number(0.1),
+                                                "lineCount": .number(status == "completed" ? 3 : 0),
+                                                "failureReason": status == "completed" ? .null : .string("recognitionFailed")])])])
+        }
+        func mapping(_ binding: ResearchExchangeSourceBinding, providerID: String, outputID: String, format: String,
+                     key: String = "resultItemID") -> GaoJSONValue {
+            .object(["sourceID": .string(providerID), "sourceItemID": .string(binding.itemID), "sourceSHA256": .string(binding.sha256),
+                     key: .string(outputID), "format": .string(format)])
+        }
+        let firstProviderID = UUID().uuidString, secondProviderID = UUID().uuidString
+        let provenance: [String: GaoJSONValue] = [
+            "engine": .string("Apple Vision VNRecognizeTextRequest"), "engineRevision": .number(3), "networkUsed": .bool(false),
+            "sources": .array([source(first, providerID: firstProviderID, outputIDs: ["output-0", "output-1"], status: "completed"),
+                                source(second, providerID: secondProviderID, outputIDs: ["output-2"], status: "failed")]),
+            "outputs": .array([mapping(first, providerID: firstProviderID, outputID: "output-0", format: "text"),
+                                mapping(first, providerID: firstProviderID, outputID: "output-1", format: "json"),
+                                mapping(second, providerID: secondProviderID, outputID: "output-2", format: "text")]),
+            "exportFailures": .array([])
+        ]
+        let outgoing = root.appendingPathComponent("ProviderProductionShape")
+        let partial = try result(root: outgoing, request: request, action: .ocrFiles, status: "partial",
+                                 outputFiles: [firstOutput, json, emptyText], provenance: provenance,
+                                 outputUTIs: ["public.utf8-plain-text", "public.json", "public.utf8-plain-text"])
+        let checked = try client.receiveResult(at: partial)
+        try expect(checked.ocrOutputs.count == 3 && checked.package.manifest.status == "partial", "production resultItemID supports multiple inputs and formats")
+        try expect(checked.ocrOutputs[0].sourceDocumentID == "pdf-original" && checked.ocrOutputs[1].sourceDocumentID == "pdf-original"
+                   && checked.ocrOutputs[2].sourceDocumentID == "image-original", "each production output binds its own source")
+        for output in checked.ocrOutputs {
+            let actual = try GaoActionFileAccess.fingerprint(at: output.localCopy)
+            try expect(output.localCopy.deletingLastPathComponent() == checked.package.stagingDirectory
+                       && actual.sha256 == output.sha256 && actual.byteCount == output.byteCount,
+                       "business importer receives a verified staged output descriptor")
+            try expect(output.engine == "Apple Vision VNRecognizeTextRequest" && output.engineRevision == 3 && output.engineVersion == "revision 3",
+                       "top-level engine revision is preserved")
+            try expect(output.pages.count == 1 && output.pages[0].confidence == nil && output.languages.isEmpty && !output.metadataComplete,
+                       "absent confidence and language remain absent")
+        }
+        try expect(!checked.businessApplied && checked.workflowState == "needsReview", "partial receipt waits for explicit business approval")
+        let repeated = try client.receiveResult(at: partial)
+        try expect(repeated.duplicate && !repeated.businessApplied, "partial retry is still recoverable before import")
+        _ = try client.markResultApplied(requestID: request.requestID, resultID: checked.package.manifest.requestID,
+                                        importedDocumentIDs: ["derivative-0", "derivative-1"], receiptID: "real-journal-fixture")
+        try expect(try client.receiveResult(at: partial).businessApplied, "partial business commit is explicitly marked")
+        let falseComplete = try result(root: outgoing, request: request, action: .ocrFiles, status: "completed",
+                                       outputFiles: [firstOutput, json, emptyText], provenance: provenance,
+                                       outputUTIs: ["public.utf8-plain-text", "public.json", "public.utf8-plain-text"])
+        try fails("production failed page cannot be complete", expected: .invalidOCRCompletion) { _ = try client.receiveResult(at: falseComplete) }
+        var hiddenFailure = provenance
+        hiddenFailure["outputs"] = .array([mapping(first, providerID: firstProviderID, outputID: "output-0", format: "text")])
+        hiddenFailure["sources"] = .array([source(first, providerID: firstProviderID, outputIDs: ["output-0"], status: "completed"),
+                                            source(second, providerID: secondProviderID, outputIDs: [], status: "failed")])
+        let noFailedOutput = try result(root: outgoing, request: request, action: .ocrFiles, status: "completed", outputFiles: [firstOutput], provenance: hiddenFailure)
+        try fails("failed input without output cannot disappear", expected: .invalidOCRCompletion) { _ = try client.receiveResult(at: noFailedOutput) }
+        for state in ["failed", "pending"] {
+            let package = try result(root: outgoing, request: request, action: .ocrFiles, status: state,
+                                     outputFiles: [firstOutput, json, emptyText], provenance: provenance,
+                                     outputUTIs: ["public.utf8-plain-text", "public.json", "public.utf8-plain-text"])
+            let received = try client.receiveResult(at: package)
+            try expect(received.workflowState == state && !received.businessApplied, "failed/pending state is not promoted by metadata review")
+            try fails("failed/pending cannot be business complete", expected: .invalidSession) {
+                _ = try client.markResultApplied(requestID: request.requestID, resultID: received.package.manifest.requestID,
+                                                importedDocumentIDs: ["not-imported"], receiptID: "invalid-receipt")
+            }
+        }
+        let single = try client.prepareOCR(userSelectedFiles: [.init(url: originalPDF, documentID: "single-original")])
+        let singleSource = try client.loadSession(single.requestID).sources[0]
+        for state in ["lowConfidence", "pending"] {
+            let metadata: [String: GaoJSONValue] = ["sourceItemID": .string(singleSource.itemID), "sourceSHA256": .string(singleSource.sha256),
+                                                   "pages": .array([.object(["pageNumber": .number(1), "status": .string(state)])])]
+            let package = try result(root: outgoing, request: single, action: .ocrFiles, status: "completed", outputFiles: [firstOutput], provenance: metadata)
+            try fails("unfinished page cannot be complete", expected: .invalidOCRCompletion) { _ = try client.receiveResult(at: package) }
+        }
+        let legacyProvenance: [String: GaoJSONValue] = [
+            "outputs": .array([mapping(singleSource, providerID: firstProviderID, outputID: "output-0", format: "text", key: "itemID")]),
+            "engine": .string("LegacyFixtureEngine"), "engineVersion": .string("1"), "languages": .array([.string("en-US")]),
+            "pages": .array([.object(["pageNumber": .number(1), "status": .string("completed")])])
+        ]
+        let legacy = try result(root: outgoing, request: single, action: .ocrFiles, status: "completed", outputFiles: [firstOutput], provenance: legacyProvenance)
+        try expect(try client.receiveResult(at: legacy).ocrOutputs[0].metadataComplete, "legacy itemID output mapping remains supported")
     }
 }

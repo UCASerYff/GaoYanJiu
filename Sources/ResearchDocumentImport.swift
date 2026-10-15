@@ -4,7 +4,7 @@ import Foundation
 import UniformTypeIdentifiers
 
 enum ResearchDocumentImportError: LocalizedError {
-    case unavailableLibrary, busy, invalidTarget, unsupportedFile, missingDocument, versionConflict
+    case unavailableLibrary, busy, invalidTarget, unsupportedFile, missingDocument, versionConflict, approvalRequired, resultNotApplicable
     var errorDescription: String? {
         switch self {
         case .unavailableLibrary: return "资料库未成功加载或无法提交，原资料未修改。"
@@ -13,6 +13,8 @@ enum ResearchDocumentImportError: LocalizedError {
         case .unsupportedFile: return "存在不受支持的文件，已停止本批导入，请分批或另选文件。"
         case .missingDocument: return "原研究附件缺失，不能把缺失当作新版本覆盖。"
         case .versionConflict: return "原研究附件或版本已改变，请重新核对后再导入。"
+        case .approvalRequired: return "请先明确核对并批准本次交接。"
+        case .resultNotApplicable: return "此结果尚未完成或没有可导入附件；原资料未修改。"
         }
     }
 }
@@ -40,7 +42,7 @@ struct ResearchDocumentImportContext {
     var references: [String] = []
 }
 
-private struct ResearchImportRecordEnvelope: Codable {
+struct ResearchImportRecordEnvelope: Codable {
     var document: ManagedDocument
     var folder: DocumentFolder?
 }
@@ -53,12 +55,14 @@ extension DocumentLibraryStore {
         let adapter = ResearchImportJournal.Adapter(
             currentRecords: { [weak self] in
                 guard let self, self.libraryIsWritable() else { throw ResearchDocumentImportError.unavailableLibrary }
-                return try self.documents.map { document in
+                let records = try self.readDurableDocuments?() ?? self.documents
+                return try records.map { document in
                     let url = self.managedDocumentURL(document)
                     let fingerprint = try GaoActionFileAccess.fingerprint(at: url)
                     let relative = String(url.path.dropFirst(LibraryPaths.managedDocuments.path.count + 1))
                     return .init(documentID: document.id, scopeID: document.folderID,
-                                 sha256: fingerprint.sha256, destinationRelativePath: relative)
+                                 sha256: fingerprint.sha256, destinationRelativePath: relative,
+                                 version: Self.importRecordVersion(document.updatedAt))
                 }
             },
             commitRecords: { [weak self] items in
@@ -66,9 +70,10 @@ extension DocumentLibraryStore {
                     throw ResearchDocumentImportError.unavailableLibrary
                 }
                 let beforeDocuments = self.documents, beforeFolders = self.folders
+                let durableDocuments = try self.readDurableDocuments?() ?? self.documents
                 do {
                     for item in items {
-                        let record = try JSONDecoder().decode(ResearchImportRecordEnvelope.self, from: item.recordData)
+                        let record = try Self.decodeImportRecord(item.recordData)
                         guard record.document.id == item.documentID, record.document.folderID == item.scopeID else {
                             throw ResearchDocumentImportError.invalidTarget
                         }
@@ -76,7 +81,31 @@ extension DocumentLibraryStore {
                             guard let folder = record.folder, folder.id == item.scopeID else { throw ResearchDocumentImportError.invalidTarget }
                             self.folders.append(folder)
                         }
-                        if !self.documents.contains(where: { $0.id == item.documentID }) { self.documents.append(record.document) }
+                        let indices = self.documents.indices.filter { self.documents[$0].id == item.documentID }
+                        guard indices.count <= 1 else { throw ResearchDocumentImportError.versionConflict }
+                        switch item.effectiveOperation {
+                        case .insert, .revision:
+                            guard indices.isEmpty else { throw ResearchDocumentImportError.versionConflict }
+                            if item.effectiveOperation == .revision, let data = item.originalRecordData {
+                                let original = try Self.decodeImportRecord(data).document
+                                guard let memory = self.documents.first(where: { $0.id == original.id }),
+                                      let durable = durableDocuments.first(where: { $0.id == original.id }),
+                                      try Self.canonicalDocument(memory) == Self.canonicalDocument(original),
+                                      try Self.canonicalDocument(durable) == Self.canonicalDocument(original) else { throw ResearchDocumentImportError.versionConflict }
+                            }
+                            self.documents.append(record.document)
+                        case .update:
+                            guard let index = indices.first, let originalData = item.originalRecordData else {
+                                throw ResearchDocumentImportError.versionConflict
+                            }
+                            let original = try Self.decodeImportRecord(originalData)
+                            guard try Self.canonicalDocument(self.documents[index]) == Self.canonicalDocument(original.document) else {
+                                throw ResearchDocumentImportError.versionConflict
+                            }
+                            guard let durable = durableDocuments.first(where: { $0.id == original.document.id }),
+                                  try Self.canonicalDocument(durable) == Self.canonicalDocument(original.document) else { throw ResearchDocumentImportError.versionConflict }
+                            self.documents[index] = record.document
+                        }
                     }
                     try persist()
                 } catch {
@@ -90,11 +119,34 @@ extension DocumentLibraryStore {
             })
         let journal = try ResearchImportJournal(exchangeRoot: ResearchExchangePaths.root,
                                                 attachmentsRoot: LibraryPaths.managedDocuments, adapter: adapter,
+                                                failureInjector: importFailureInjector,
                                                 progress: { [weak self] stage, done, total in
             self?.importProgress = "资料交接：\(stage.rawValue)，\(done)/\(total) 项"
         })
         importJournal = journal
         return journal
+    }
+
+    static func importRecordVersion(_ date: Date) -> String {
+        // library.json uses ISO8601 to whole seconds. Compare its durable precision.
+        GaoActionISO8601.string(Date(timeIntervalSince1970: floor(date.timeIntervalSince1970)))
+    }
+
+    static func canonicalDocument(_ document: ManagedDocument) throws -> ManagedDocument {
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(ManagedDocument.self, from: encoder.encode(document))
+    }
+
+    static func encodeImportRecord(_ record: ResearchImportRecordEnvelope) throws -> Data {
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        return try encoder.encode(record)
+    }
+
+    static func decodeImportRecord(_ data: Data) throws -> ResearchImportRecordEnvelope {
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        if let record = try? decoder.decode(ResearchImportRecordEnvelope.self, from: data) { return record }
+        return try JSONDecoder().decode(ResearchImportRecordEnvelope.self, from: data)
     }
 
     func recoverDocumentImportsIfNeeded() async {
@@ -178,7 +230,7 @@ extension DocumentLibraryStore {
             inputs.append(.init(id: staged.item.id, sourceURL: staged.url, documentID: id, scopeID: folder.id,
                                 destinationRelativePath: "\(folder.libraryKind.rawValue)/\(URL(fileURLWithPath: folder.id).lastPathComponent)/\(stored)",
                                 sha256: staged.item.sha256, byteCount: staged.item.byteCount,
-                                recordData: try JSONEncoder().encode(record), provenance: provenance, revision: revision))
+                                recordData: try Self.encodeImportRecord(record), provenance: provenance, revision: revision))
         }
         let outcome = try await journal.submit(requestID: requestID, items: inputs)
         importProgress = "已导入 \(outcome.importedCount) 项，\(outcome.duplicateCount) 项内容已存在；全文索引已检查。"
@@ -193,11 +245,20 @@ extension DocumentLibraryStore {
             targets.map { ($0.0, DocumentTextExtractor.extractText(from: $0.1)) }
         }.value
         let before = documents
+        let journal = try transactionJournal()
+        let planned = try journal.recentJobs(limit: Int.max).filter { $0.stage == .indexing }.flatMap(\.items)
+        do {
         for (id, text) in results {
             guard let index = documents.firstIndex(where: { $0.id == id }) else { throw ResearchDocumentImportError.missingDocument }
-            documents[index].contentText = text; documents[index].contentIndexedAt = Date()
+            let metadata = try planned.first(where: { $0.documentID == id })?.provenance ?? journal.provenance(documentID: id)
+            let pageText = metadata?.pages.compactMap(\.text).joined(separator: "\n\n") ?? ""
+            let existing = documents[index].contentText ?? ""
+            documents[index].contentText = DocumentTextExtractor.indexedText(extracted: text, ocrText: pageText)
+                ?? (existing.isEmpty ? nil : existing)
+            documents[index].contentIndexedAt = Date()
         }
-        do { try commit() } catch { documents = before; throw error }
+        try commit()
+        } catch { documents = before; throw error }
     }
 
     func provenance(for documentID: String) -> DocumentProvenance? {
@@ -218,8 +279,8 @@ extension DocumentLibraryStore {
     /// 向「搞整理」发起文件选择请求
     func requestChooseFilesFromZhengLi(targetFolderID: String, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
         guard folders.contains(where: { $0.id == targetFolderID }) else { throw ResearchDocumentImportError.invalidTarget }
-        let allowed = Array(Self.supportedExtensions)
-        let prepared = try exchangeClient.prepareFileSelection(allowedUTIs: allowed, multiple: true)
+        let allowed = Self.supportedExtensions.compactMap { UTType(filenameExtension: $0)?.identifier }
+        let prepared = try exchangeClient.prepareFileSelection(allowedUTIs: allowed, multiple: true, targetFolderID: targetFolderID)
         let provider = exchangeClient.availability(for: .chooseFiles, parameters: prepared.parameters)
         onPrepared(prepared, provider)
     }
@@ -228,7 +289,7 @@ extension DocumentLibraryStore {
     func requestOCRViaJieTu(for document: ManagedDocument, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
         let url = managedDocumentURL(document)
         let sourceFile = ResearchExchangeSourceFile(url: url, documentID: document.id)
-        let prepared = try exchangeClient.prepareOCR(userSelectedFiles: [sourceFile], languages: ["zh-Hans", "en"], outputs: ["text", "searchablePDF"])
+        let prepared = try exchangeClient.prepareOCR(userSelectedFiles: [sourceFile], languages: ["zh-Hans", "en-US"], outputs: ["text", "json", "searchablePDF"])
         let provider = exchangeClient.availability(for: .ocrFiles, parameters: prepared.parameters)
         onPrepared(prepared, provider)
     }
@@ -236,107 +297,307 @@ extension DocumentLibraryStore {
     /// 向「搞文件」发起外部编辑
     func requestEditViaWenJian(for document: ManagedDocument, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
         let url = managedDocumentURL(document)
-        let prepared = try exchangeClient.prepareExternalEdit(documentID: document.id, originalURL: url, originalVersion: document.updatedAt)
+        let prepared = try exchangeClient.prepareExternalEdit(documentID: document.id, originalURL: url, originalVersion: Date(timeIntervalSince1970: floor(document.updatedAt.timeIntervalSince1970)))
         let provider = exchangeClient.availability(for: .openDocument, parameters: prepared.parameters)
         onPrepared(prepared, provider)
     }
 
-    /// 导入外部编辑后的副本，明确区分“替换为新版本”或“另存为新附件”
+    /// Explicit editing import; the journal is the only attachment/record writer.
     func importEditedDocumentCopy(for document: ManagedDocument, from editedURL: URL, asNewVersion: Bool) async throws {
-        guard let folder = folders.first(where: { $0.id == document.folderID }) else { throw ResearchDocumentImportError.invalidTarget }
+        guard libraryIsWritable(), !isImportingDocuments else { throw ResearchDocumentImportError.busy }
+        guard Self.supportedExtensions.contains(editedURL.pathExtension.lowercased()) else { throw ResearchDocumentImportError.unsupportedFile }
+        let accessed = editedURL.startAccessingSecurityScopedResource()
+        defer { if accessed { editedURL.stopAccessingSecurityScopedResource() } }
         let client = exchangeClient
-        let sessions = try client.recentSessions(limit: 50).filter { $0.action == .openDocument && $0.sources.first?.documentID == document.id }
-        guard let session = sessions.first else {
-            throw ResearchExchangeClientError.invalidSession
-        }
-        let originalURL = managedDocumentURL(document)
+        let sessions = try client.recentSessions(limit: 100).filter { $0.action == .openDocument && $0.sources.first?.documentID == document.id }
+        guard let session = sessions.first else { throw ResearchExchangeClientError.invalidSession }
+        let selected = try GaoActionFileAccess.fingerprint(at: editedURL)
         let mode: ResearchEditedCopyMode = asNewVersion ? .newVersion : .newAttachment
-        let prepared = try client.prepareEditedCopyImport(requestID: session.requestID, currentDocumentID: document.id,
-                                                         currentOriginalURL: originalURL, currentVersion: document.updatedAt,
-                                                         userSelectedEditedCopy: editedURL, mode: mode)
-        let ext = editedURL.pathExtension.lowercased()
-        let now = Date()
-        if asNewVersion {
-            // 替换为新版本：保留原件 SHA256 溯源，更新文件内容与全文索引
-            let journal = try transactionJournal()
-            let stored = UUID().uuidString + "." + ext
-            var updated = document
-            updated.storedName = stored
-            updated.fileExtension = ext
-            updated.byteCount = prepared.byteCount
-            updated.updatedAt = now
-            let provenance = DocumentProvenance(documentID: document.id, originalSHA256: prepared.originalSHA256,
-                                               sourceBundleID: session.providerBundleID, sourceDeclaration: "搞文件编辑返回；用户核验导入新版本",
-                                               importedAt: now)
-            let revision = AttachmentRevision(documentID: document.id, originalDocumentID: document.id,
-                                              originalSHA256: prepared.originalSHA256, derivedSHA256: prepared.editedSHA256,
-                                              kind: "editedVersion", createdAt: now)
-            let record = ResearchImportRecordEnvelope(document: updated, folder: folder)
-            let input = ResearchImportJournal.Input(id: UUID().uuidString, sourceURL: prepared.localCopy, documentID: document.id,
-                                                   scopeID: folder.id,
-                                                   destinationRelativePath: "\(folder.libraryKind.rawValue)/\(URL(fileURLWithPath: folder.id).lastPathComponent)/\(stored)",
-                                                   sha256: prepared.editedSHA256, byteCount: prepared.byteCount,
-                                                   recordData: try JSONEncoder().encode(record), provenance: provenance, revision: revision)
-            _ = try await journal.submit(requestID: UUID(), items: [input])
-            try client.markEditedCopyImported(prepared)
-            if let index = documents.firstIndex(where: { $0.id == document.id }) {
-                documents[index] = updated
-            }
-            try await indexImportedDocuments(documentIDs: [document.id])
-        } else {
-            // 另存为新附件：保留原文档不动，新增一份受管衍生文档
-            let newDocID = UUID().uuidString
-            let stored = UUID().uuidString + "." + ext
-            let displayName = document.displayName + " (编辑版)"
-            let newDoc = ManagedDocument(id: newDocID, folderID: folder.id, originalName: editedURL.lastPathComponent,
-                                         displayName: displayName, storedName: stored, fileExtension: ext,
-                                         tags: document.tags + ["编辑版"], byteCount: prepared.byteCount,
-                                         uploadedAt: now, updatedAt: now)
-            let provenance = DocumentProvenance(documentID: newDocID, originalSHA256: prepared.originalSHA256,
-                                               sourceBundleID: session.providerBundleID, sourceDeclaration: "搞文件编辑衍生件",
-                                               importedAt: now)
-            let revision = AttachmentRevision(documentID: newDocID, originalDocumentID: document.id,
-                                              originalSHA256: prepared.originalSHA256, derivedSHA256: prepared.editedSHA256,
-                                              kind: "derivedAttachment", createdAt: now)
-            let record = ResearchImportRecordEnvelope(document: newDoc, folder: folder)
-            let input = ResearchImportJournal.Input(id: UUID().uuidString, sourceURL: prepared.localCopy, documentID: newDocID,
-                                                   scopeID: folder.id,
-                                                   destinationRelativePath: "\(folder.libraryKind.rawValue)/\(URL(fileURLWithPath: folder.id).lastPathComponent)/\(stored)",
-                                                   sha256: prepared.editedSHA256, byteCount: prepared.byteCount,
-                                                   recordData: try JSONEncoder().encode(record), provenance: provenance, revision: revision)
-            _ = try await transactionJournal().submit(requestID: UUID(), items: [input])
-            try client.markEditedCopyImported(prepared)
-            documents.append(newDoc)
-            try await indexImportedDocuments(documentIDs: [newDocID])
+        let jobID = Self.stableImportID("edit:\(session.requestID):\(selected.sha256):\(mode.rawValue)")
+        let journal = try transactionJournal()
+        isImportingDocuments = true; activeImportRequestID = jobID
+        defer { isImportingDocuments = false; activeImportRequestID = nil }
+        if let previous = try journal.job(requestID: jobID) {
+            let inputs = previous.items.map { Self.restoredInput($0, source: editedURL) }
+            _ = try await journal.submit(requestID: jobID, items: inputs)
+            guard let original = previous.items.first?.expectedOriginal,
+                  let version = original.version.flatMap(GaoActionISO8601.date) else { throw ResearchDocumentImportError.versionConflict }
+            let committed = ResearchEditedCopyImport(requestID: session.requestID, originalDocumentID: original.documentID,
+                                                     originalSHA256: original.sha256, originalVersion: version,
+                                                     localCopy: editedURL, editedSHA256: selected.sha256, byteCount: selected.byteCount, mode: mode)
+            try client.markEditedCopyImported(committed)
+            return
         }
+        guard let current = documents.first(where: { $0.id == document.id }),
+              try Self.canonicalDocument(current) == Self.canonicalDocument(document),
+              let folder = folders.first(where: { $0.id == current.folderID }) else { throw ResearchDocumentImportError.versionConflict }
+        let prepared = try client.prepareEditedCopyImport(requestID: session.requestID, currentDocumentID: current.id,
+                                                          currentOriginalURL: managedDocumentURL(current), currentVersion: current.updatedAt,
+                                                          userSelectedEditedCopy: editedURL, mode: mode)
+        let expected = try expectedState(for: current, checksum: prepared.originalSHA256)
+        let now = Date(), ext = editedURL.pathExtension.lowercased()
+        let newID = asNewVersion ? current.id : Self.stableImportID("attachment:\(jobID)").uuidString
+        let stored = jobID.uuidString + "." + ext
+        var updated = current
+        updated.id = newID; updated.storedName = stored; updated.fileExtension = ext
+        updated.byteCount = prepared.byteCount; updated.updatedAt = now
+        updated.contentText = nil; updated.contentIndexedAt = nil
+        if !asNewVersion {
+            updated.originalName = editedURL.lastPathComponent
+            updated.displayName = current.displayName + "（编辑附件）"
+            updated.uploadedAt = now
+        }
+        let provenance = DocumentProvenance(documentID: newID, originalSHA256: prepared.originalSHA256,
+                                           sourceBundleID: session.providerBundleID,
+                                           sourceDeclaration: "用户重新选择保存的编辑副本；来源声明未经认证", importedAt: now,
+                                           targetRecordID: current.id)
+        let relation = AttachmentRevision(documentID: newID, originalDocumentID: current.id,
+                                          originalSHA256: prepared.originalSHA256, derivedSHA256: prepared.editedSHA256,
+                                          kind: asNewVersion ? "editedVersion" : "derivedAttachment", createdAt: now)
+        let input = ResearchImportJournal.Input(id: jobID.uuidString, sourceURL: prepared.localCopy, documentID: newID, scopeID: folder.id,
+                                                destinationRelativePath: destinationPath(folder: folder, stored: stored),
+                                                sha256: prepared.editedSHA256, byteCount: prepared.byteCount,
+                                                recordData: try Self.encodeImportRecord(.init(document: updated, folder: nil)),
+                                                provenance: provenance, revision: relation,
+                                                operation: asNewVersion ? .update : .revision, expectedOriginal: expected,
+                                                recordVersion: Self.importRecordVersion(updated.updatedAt),
+                                                originalRecordData: try Self.encodeImportRecord(.init(document: current, folder: nil)))
+        try await preserveLibrarySnapshot(jobID: jobID, originals: [current])
+        _ = try await journal.submit(requestID: jobID, items: [input])
+        try client.markEditedCopyImported(prepared)
     }
 
-    /// 应用来自「搞截图」的 OCR 识别结果：关联至原件作为衍生件并更新全文索引与页码定位
-    func applyOCRResult(_ output: ResearchOCROutput, to document: ManagedDocument) async throws {
-        guard let folder = folders.first(where: { $0.id == document.folderID }) else { throw ResearchDocumentImportError.invalidTarget }
-        let now = Date()
-        let pages = output.pages.map { p in
-            DocumentProvenance.Page(pageNumber: p.pageNumber, text: p.text, bounds: nil, confidence: p.confidence, status: p.status)
+    /// Shared production entry for the review sheet and isolated product tests.
+    /// Receipt recovery runs before new copying; a received-only duplicate is
+    /// still eligible for approval, while a committed receipt is a no-op.
+    func applyExchangeResult(_ review: PendingExchangeResultReview, userApproved: Bool,
+                             targetFolderID: String? = nil,
+                             reselectedReferences: [String: URL] = [:]) async throws -> ResearchImportJournal.Outcome {
+        guard userApproved else { throw ResearchDocumentImportError.approvalRequired }
+        let result = review.result, manifest = result.package.manifest
+        guard ["completed", "partial"].contains(manifest.status ?? ""), result.session.action != .openDocument else {
+            throw ResearchDocumentImportError.resultNotApplicable
         }
-        let fullText = output.pages.compactMap(\.text).joined(separator: "\n\n")
-        let provenance = DocumentProvenance(documentID: document.id, originalSHA256: output.sourceSHA256,
-                                           sourceBundleID: "com.gaoseries.GaoJieTu", sourceDeclaration: "搞截图 OCR 识别产物",
-                                           importedAt: now, ocrEngine: output.engine, ocrVersion: output.engineVersion,
-                                           ocrLanguages: output.languages, pages: pages, targetRecordID: document.id)
+        guard libraryIsWritable(), !isImportingDocuments, let jobID = UUID(uuidString: manifest.requestID) else { throw ResearchDocumentImportError.busy }
+        let client = exchangeClient, session = try client.loadSession(result.session.requestID)
+        if let receipt = session.appliedResults?[manifest.requestID] {
+            return .init(documentIDs: receipt.importedDocumentIDs, importedCount: 0,
+                         duplicateCount: receipt.importedDocumentIDs.count, replayed: true)
+        }
+        let accessed = reselectedReferences.values.filter { $0.startAccessingSecurityScopedResource() }
+        defer { accessed.forEach { $0.stopAccessingSecurityScopedResource() } }
+        isImportingDocuments = true; activeImportRequestID = jobID
+        defer { isImportingDocuments = false; activeImportRequestID = nil }
         let journal = try transactionJournal()
-        // 保存 DocumentProvenance 元数据
-        try journal.recordProvenanceDirectly(provenance)
-        // 更新文档全文索引正文
-        if let index = documents.firstIndex(where: { $0.id == document.id }) {
-            let combined = [documents[index].contentText ?? "", fullText].filter { !$0.isEmpty }.joined(separator: "\n\n")
-            documents[index].contentText = combined
-            documents[index].contentIndexedAt = now
-            if !documents[index].tags.contains("已OCR") {
-                documents[index].tags.append("已OCR")
-            }
-            if let commit = persistTransaction { try commit() }
+        var chosenFolder: DocumentFolder?
+        if session.action == .chooseFiles {
+            let id = try client.resolveFileSelectionTarget(requestID: session.requestID,
+                                                           existingFolderIDs: Set(folders.map(\.id)), userConfirmedFolderID: targetFolderID)
+            guard let folder = folders.first(where: { $0.id == id }) else { throw ResearchDocumentImportError.invalidTarget }
+            chosenFolder = folder
         }
+        let outcome: ResearchImportJournal.Outcome
+        if let existing = try journal.job(requestID: jobID) {
+            if let chosenFolder, !existing.items.allSatisfy({ $0.scopeID == chosenFolder.id }) { throw ResearchDocumentImportError.invalidTarget }
+            // Durable staging/plan is authoritative after interruption. A valid
+            // completed job can repair a missing business receipt without replay.
+            var incoming = Dictionary(uniqueKeysWithValues: result.package.stagedItems.map { ($0.item.id, $0.url) })
+            let retainedRoot = ResearchExchangePaths.root.appendingPathComponent("ImportStaging/" + jobID.uuidString)
+            for item in existing.items where incoming[item.id] == nil {
+                let retained = retainedRoot.appendingPathComponent(item.stagedRelativePath)
+                if FileManager.default.fileExists(atPath: retained.path) { incoming[item.id] = retained }
+                else if let reference = result.selectedReferences.first(where: { "reference:" + $0.id == item.id }) {
+                    let selected = try client.verifySelectedReference(reference, userSelectedURL: reselectedReferences[reference.id], maximumBytes: item.byteCount)
+                    guard selected.sha256 == item.sha256 else { throw ResearchDocumentImportError.versionConflict }
+                    incoming[item.id] = selected.localCopy
+                }
+            }
+            let inputs = existing.items.map { Self.restoredInput($0, source: incoming[$0.id] ?? result.package.stagingDirectory.appendingPathComponent("missing")) }
+            outcome = try await journal.submit(requestID: jobID, items: inputs)
+        } else {
+            var inputs: [ResearchImportJournal.Input] = []
+            switch session.action {
+            case .chooseFiles:
+                guard let folder = chosenFolder else { throw ResearchDocumentImportError.invalidTarget }
+                var staged = result.package.stagedItems
+                let references = result.selectedReferences
+                guard staged.count + references.count <= 256 else { throw ResearchExchangeClientError.tooManyItems }
+                let initialBytes = staged.reduce(Int64(0)) { $0 + $1.item.byteCount }
+                let selected = try await Task.detached(priority: .userInitiated) {
+                    var totalBytes = initialBytes
+                    return try references.map { reference in
+                        let selected = try client.verifySelectedReference(reference, userSelectedURL: reselectedReferences[reference.id],
+                                                                          maximumBytes: 2_147_483_648 - totalBytes)
+                        totalBytes += selected.byteCount
+                        return selected
+                    }
+                }.value
+                for copy in selected {
+                    let filename = URL(fileURLWithPath: copy.originalReference.displayName).lastPathComponent
+                    let item = GaoActionItem(id: "reference:" + copy.referenceID,
+                                             relativePath: "payload/" + copy.referenceID + "/" + filename,
+                                             uti: UTType(filenameExtension: copy.localCopy.pathExtension)?.identifier ?? "public.data",
+                                             byteCount: copy.byteCount, sha256: copy.sha256)
+                    staged.append(.init(item: item, url: copy.localCopy))
+                }
+                guard !staged.isEmpty else { throw ResearchDocumentImportError.resultNotApplicable }
+                for item in staged {
+                    let id = Self.stableImportID("choose:\(jobID):\(item.item.id)").uuidString
+                    let ext = item.url.pathExtension.lowercased()
+                    guard Self.supportedExtensions.contains(ext) else { throw ResearchDocumentImportError.unsupportedFile }
+                    let stored = id + "." + ext, now = Date()
+                    let document = ManagedDocument(id: id, folderID: folder.id, originalName: item.originalFilename,
+                                                   displayName: item.originalFilename, storedName: stored, fileExtension: ext,
+                                                   tags: [], byteCount: item.item.byteCount, uploadedAt: now, updatedAt: now)
+                    let provenance = DocumentProvenance(documentID: id, originalSHA256: item.item.sha256,
+                                                       sourceBundleID: manifest.sourceBundleID, sourceDeclaration: "用户所选文件；来源声明未经认证")
+                    inputs.append(.init(id: item.item.id, sourceURL: item.url, documentID: id, scopeID: folder.id,
+                                        destinationRelativePath: destinationPath(folder: folder, stored: stored),
+                                        sha256: item.item.sha256, byteCount: item.item.byteCount,
+                                        recordData: try Self.encodeImportRecord(.init(document: document, folder: nil)), provenance: provenance))
+                }
+            case .ocrFiles:
+                guard !result.ocrOutputs.isEmpty else { throw ResearchDocumentImportError.resultNotApplicable }
+                for output in result.ocrOutputs {
+                    guard let originalID = output.sourceDocumentID, let original = documents.first(where: { $0.id == originalID }),
+                          let folder = folders.first(where: { $0.id == original.folderID }) else { throw ResearchDocumentImportError.missingDocument }
+                    let expected = try expectedState(for: original, checksum: output.sourceSHA256)
+                    let pages = try ocrPages(for: output, allOutputs: result.ocrOutputs)
+                    let id = Self.stableImportID("ocr:\(jobID):\(output.itemID)").uuidString
+                    let ext = output.localCopy.pathExtension.lowercased()
+                    guard Self.supportedExtensions.contains(ext) else { throw ResearchDocumentImportError.unsupportedFile }
+                    let stored = id + "." + ext, now = Date()
+                    let text = pages.compactMap(\.text).joined(separator: "\n\n")
+                    let document = ManagedDocument(id: id, folderID: folder.id,
+                                                   originalName: "OCR-" + original.originalName + "." + ext,
+                                                   displayName: original.displayName + "（OCR \(ext)）", storedName: stored, fileExtension: ext,
+                                                   tags: ["OCR衍生件"], byteCount: output.byteCount, uploadedAt: now, updatedAt: now,
+                                                   contentText: text.isEmpty ? nil : text)
+                    let provenance = DocumentProvenance(documentID: id, originalSHA256: output.sourceSHA256,
+                                                       sourceBundleID: manifest.sourceBundleID, sourceDeclaration: "已审核 OCR 衍生附件；原件保留；来源声明未经认证",
+                                                       ocrEngine: output.engine, ocrVersion: output.engineVersion, ocrLanguages: output.languages,
+                                                       pages: pages, targetRecordID: original.id)
+                    let revision = AttachmentRevision(documentID: id, originalDocumentID: original.id,
+                                                       originalSHA256: output.sourceSHA256, derivedSHA256: output.sha256, kind: "ocrDerived")
+                    inputs.append(.init(id: output.itemID, sourceURL: output.localCopy, documentID: id, scopeID: folder.id,
+                                        destinationRelativePath: destinationPath(folder: folder, stored: stored), sha256: output.sha256,
+                                        byteCount: output.byteCount, recordData: try Self.encodeImportRecord(.init(document: document, folder: nil)),
+                                        provenance: provenance, revision: revision, operation: .revision, expectedOriginal: expected,
+                                        recordVersion: Self.importRecordVersion(document.updatedAt),
+                                        originalRecordData: try Self.encodeImportRecord(.init(document: original, folder: nil))))
+                }
+            case .openDocument: throw ResearchDocumentImportError.resultNotApplicable
+            }
+            let originalIDs = Set(inputs.compactMap { $0.expectedOriginal?.documentID })
+            try await preserveLibrarySnapshot(jobID: jobID, originals: documents.filter { originalIDs.contains($0.id) })
+            outcome = try await journal.submit(requestID: jobID, items: inputs)
+        }
+        _ = try client.markResultApplied(requestID: session.requestID, resultID: manifest.requestID,
+                                        importedDocumentIDs: outcome.documentIDs, receiptID: jobID.uuidString)
+        pendingExchangeResultReview = nil
+        exchangeFeedbackMessage = "交接已导入 \(outcome.importedCount) 项；原件与恢复快照保留。"
+        return outcome
+    }
+
+    private func expectedState(for document: ManagedDocument, checksum: String) throws -> ResearchImportJournal.RecordState {
+        let url = managedDocumentURL(document)
+        let actual = try GaoActionFileAccess.fingerprint(at: url)
+        guard actual.sha256 == checksum else { throw ResearchDocumentImportError.versionConflict }
+        return .init(documentID: document.id, scopeID: document.folderID, sha256: actual.sha256,
+                     destinationRelativePath: String(url.path.dropFirst(LibraryPaths.managedDocuments.path.count + 1)),
+                     version: Self.importRecordVersion(document.updatedAt))
+    }
+
+    private func destinationPath(folder: DocumentFolder, stored: String) -> String {
+        "\(folder.libraryKind.rawValue)/\(URL(fileURLWithPath: folder.id).lastPathComponent)/\(stored)"
+    }
+
+    private func preserveLibrarySnapshot(jobID: UUID, originals: [ManagedDocument]) async throws {
+        let directory = ResearchExchangePaths.root.appendingPathComponent("Snapshots/" + jobID.uuidString)
+        let snapshot = directory.appendingPathComponent("library-before.json")
+        if FileManager.default.fileExists(atPath: snapshot.path) {
+            _ = try GaoActionFileAccess.readPrivateData(at: snapshot, maximumBytes: 128 * 1_048_576)
+        } else {
+            guard let read = readDurableLibraryData else { throw ResearchDocumentImportError.unavailableLibrary }
+            let data = try read()
+            // Decode before preserving; unreadable/too-new libraries never become blank snapshots.
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            let library = try decoder.decode(PersistedLibrary.self, from: data)
+            guard library.version <= LibrarySchema.currentVersion else { throw ResearchDocumentImportError.unavailableLibrary }
+            try GaoActionFileAccess.writePrivateData(data, to: snapshot)
+            guard try GaoActionFileAccess.readPrivateData(at: snapshot, maximumBytes: 128 * 1_048_576) == data else { throw GaoActionError.checksumMismatch }
+        }
+        let copies = try originals.map { document in
+            (managedDocumentURL(document), directory.appendingPathComponent(Self.stableImportID("original:" + document.id).uuidString + ".data"),
+             try Self.encodeImportRecord(.init(document: document, folder: nil)))
+        }
+        try await Task.detached(priority: .utility) {
+            for (source, destination, record) in copies {
+                let expected = try GaoActionFileAccess.fingerprint(at: source)
+                if FileManager.default.fileExists(atPath: destination.path) {
+                    let previous = try GaoActionFileAccess.fingerprint(at: destination)
+                    guard previous.sha256 == expected.sha256 else { throw GaoActionError.checksumMismatch }
+                } else {
+                    let copied = try GaoActionFileAccess.copyRegularFile(at: source, to: destination)
+                    guard copied.sha256 == expected.sha256 else { throw GaoActionError.sourceChanged }
+                }
+                let recordURL = destination.deletingPathExtension().appendingPathExtension("record.json")
+                if FileManager.default.fileExists(atPath: recordURL.path) {
+                    guard try GaoActionFileAccess.readPrivateData(at: recordURL, maximumBytes: 16 * 1_048_576) == record else { throw GaoActionError.sourceChanged }
+                } else { try GaoActionFileAccess.writePrivateData(record, to: recordURL) }
+            }
+        }.value
+    }
+
+    private static func stableImportID(_ value: String) -> UUID {
+        var bytes = Array(SHA256.hash(data: Data(value.utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x50; bytes[8] = (bytes[8] & 0x3f) | 0x80
+        return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                           bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+    }
+
+    private static func restoredInput(_ item: ResearchImportJournal.CommittedItem, source: URL) -> ResearchImportJournal.Input {
+        .init(id: item.id, sourceURL: source, documentID: item.documentID, scopeID: item.scopeID,
+              destinationRelativePath: item.destinationRelativePath, sha256: item.sha256, byteCount: item.byteCount,
+              recordData: item.recordData, provenance: item.provenance, revision: item.revision,
+              operation: item.operation, expectedOriginal: item.expectedOriginal,
+              recordVersion: item.recordVersion, originalRecordData: item.originalRecordData)
+    }
+
+    private func ocrPages(for output: ResearchOCROutput, allOutputs: [ResearchOCROutput]) throws -> [DocumentProvenance.Page] {
+        var pages = output.pages.map { page in
+            DocumentProvenance.Page(pageNumber: page.pageNumber, text: page.text,
+                                    bounds: page.regions.first.flatMap { region in
+                guard page.coordinateSpace == "normalized", case .number(let x)? = region["x"], case .number(let y)? = region["y"],
+                      case .number(let width)? = region["width"], case .number(let height)? = region["height"] else { return nil }
+                return [x, y, width, height]
+            }, confidence: page.confidence, status: page.status)
+        }
+        // JSON output contains the producer's real per-page text. Preserve it
+        // only after matching original SHA and source ID, never by filename.
+        for json in allOutputs where json.sourceItemID == output.sourceItemID && ["public.json", "application/json"].contains(json.uti) {
+            let data = try GaoActionFileAccess.readPrivateData(at: json.localCopy, maximumBytes: 16 * 1_048_576)
+            guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  object["schemaVersion"] as? Int == 1, let sources = object["sources"] as? [[String: Any]],
+                  let jsonPages = object["pages"] as? [[String: Any]] else { throw ResearchExchangeClientError.invalidOCRMapping }
+            let matches = sources.filter { ($0["sha256"] as? String)?.lowercased() == output.sourceSHA256 }
+            guard matches.count == 1, let sourceID = matches[0]["id"] as? String else { throw ResearchExchangeClientError.invalidOCRMapping }
+            for page in jsonPages where page["sourceID"] as? String == sourceID {
+                guard let number = page["pageNumber"] as? Int, number > 0,
+                      (page["originalSHA256"] as? String)?.lowercased() == output.sourceSHA256,
+                      let status = page["status"] as? String, ["completed", "failed", "cancelled"].contains(status),
+                      let lines = page["lines"] as? [[String: Any]] else { throw ResearchExchangeClientError.invalidOCRMapping }
+                let ordered = lines.sorted { ($0["readingOrder"] as? Int ?? 0) < ($1["readingOrder"] as? Int ?? 0) }
+                let texts = try ordered.map { line -> String in
+                    guard let text = line["text"] as? String else { throw ResearchExchangeClientError.invalidOCRMapping }
+                    return text
+                }
+                if let index = pages.firstIndex(where: { $0.pageNumber == number }) {
+                    guard pages[index].status == status else { throw ResearchExchangeClientError.invalidOCRMapping }
+                    pages[index].text = texts.joined(separator: "\n")
+                } else { pages.append(.init(pageNumber: number, text: texts.joined(separator: "\n"), status: status)) }
+            }
+        }
+        return pages.sorted { $0.pageNumber < $1.pageNumber }
     }
 }
-
-

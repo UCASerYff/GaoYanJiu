@@ -66,6 +66,22 @@ final class PaperStore: ObservableObject {
             try self.saveThrowing()
         }
         documentLibrary.libraryIsWritable = { [weak self] in self?.libraryLoadFailed == false }
+        documentLibrary.readDurableDocuments = { [weak self] in
+            guard let self, !self.libraryLoadFailed else { throw ResearchDocumentImportError.unavailableLibrary }
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            let data = try GaoActionFileAccess.readPrivateData(at: self.repository.libraryURL, maximumBytes: 128 * 1_048_576)
+            let library = try decoder.decode(PersistedLibrary.self, from: data)
+            guard library.version <= LibrarySchema.currentVersion else { throw ResearchDocumentImportError.unavailableLibrary }
+            return library.managedDocuments
+        }
+        documentLibrary.readDurableLibraryData = { [weak self] in
+            guard let self, !self.libraryLoadFailed else { throw ResearchDocumentImportError.unavailableLibrary }
+            let data = try GaoActionFileAccess.readPrivateData(at: self.repository.libraryURL, maximumBytes: 128 * 1_048_576)
+            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+            let library = try decoder.decode(PersistedLibrary.self, from: data)
+            guard library.version <= LibrarySchema.currentVersion else { throw ResearchDocumentImportError.unavailableLibrary }
+            return data
+        }
         documentLibrary.errorHandler = { [weak self] in self?.lastError = $0 }
         backupService.persist = { [weak self] in self?.save() }
         backupService.reload = { [weak self] in self?.load() }

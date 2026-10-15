@@ -184,6 +184,69 @@ struct GaoActionFixtureTests {
             try fm.createSymbolicLink(at: nested.appendingPathComponent("payload/nested"), withDestinationURL: fixtureDirectory)
             try rejects([.unsafePath]) { _ = try validator.stagePackage(at: nested, stagingRoot: staging) }
         }
+        try test("package-ancestor-symlink-is-rejected") {
+            let realParent = root.appendingPathComponent("RealPackageParent", isDirectory: true)
+            let package = try GaoActionFixtures.makePackage(base, in: realParent, name: "ancestor")
+            // A user directory named tmp is not the whitelisted root /tmp.
+            let alias = root.appendingPathComponent("tmp", isDirectory: true)
+            try fm.createSymbolicLink(at: alias, withDestinationURL: realParent)
+            let linkedPackage = alias.appendingPathComponent(package.lastPathComponent, isDirectory: true)
+            let stagedBefore = try fm.contentsOfDirectory(atPath: staging.path).count
+            for path in [linkedPackage, GaoActionFileAccess.canonicalFileURL(linkedPackage)] {
+                try rejects([.unsafePath]) { _ = try validator.stagePackage(at: path, stagingRoot: staging) }
+            }
+            try check(try fm.contentsOfDirectory(atPath: staging.path).count == stagedBefore, "Linked package created receiver staging")
+            try check(try Data(contentsOf: package.appendingPathComponent("payload/input.txt")) == GaoActionFixtures.hello, "Linked package rejection changed source")
+        }
+        try test("own-staging-ancestor-symlink-is-rejected-before-creation") {
+            let package = try GaoActionFixtures.makePackage(base, in: root, name: "safe-package-for-linked-staging")
+            let realParent = root.appendingPathComponent("RealStagingParent", isDirectory: true)
+            try fm.createDirectory(at: realParent, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let alias = root.appendingPathComponent("LinkedStagingParent", isDirectory: true)
+            try fm.createSymbolicLink(at: alias, withDestinationURL: realParent)
+            let newStaging = alias.appendingPathComponent("Missing/Nested/Staging", isDirectory: true)
+            try rejects([.unsafePath]) { _ = try validator.stagePackage(at: package, stagingRoot: newStaging) }
+            try check(try fm.contentsOfDirectory(atPath: realParent.path).isEmpty, "Staging followed an ancestor link while creating directories")
+            let existing = realParent.appendingPathComponent("Existing/Staging", isDirectory: true)
+            try fm.createDirectory(at: existing, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+            try rejects([.unsafePath]) {
+                _ = try validator.stagePackage(at: package, stagingRoot: alias.appendingPathComponent("Existing/Staging", isDirectory: true))
+            }
+            try check(try fm.contentsOfDirectory(atPath: existing.path).isEmpty, "Staging followed a link to an existing directory")
+        }
+        try test("writer-and-file-access-ancestor-symlinks-are-rejected") {
+            let realParent = root.appendingPathComponent("RealWriterParent", isDirectory: true)
+            try fm.createDirectory(at: realParent, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+            let selected = realParent.appendingPathComponent("selected.txt")
+            try GaoActionFixtures.hello.write(to: selected)
+            let alias = root.appendingPathComponent("LinkedWriterParent", isDirectory: true)
+            try fm.createSymbolicLink(at: alias, withDestinationURL: realParent)
+            try rejects([.unsafePath]) { _ = try GaoActionFileAccess.fingerprint(at: alias.appendingPathComponent("selected.txt")) }
+            try rejects([.unsafePath]) {
+                _ = try GaoActionPackageWriter().write(manifest: base, files: ["input": selected],
+                                                       outgoingRoot: alias.appendingPathComponent("Outgoing", isDirectory: true))
+            }
+            try rejects([.unsafePath]) {
+                _ = try GaoActionFileAccess.copyRegularFile(at: selected, to: alias.appendingPathComponent("Copies/private.txt"))
+            }
+            try check(!fm.fileExists(atPath: realParent.appendingPathComponent("Outgoing").path) &&
+                      !fm.fileExists(atPath: realParent.appendingPathComponent("Copies").path), "Safe writer created files through an ancestor link")
+            try check(try Data(contentsOf: selected) == GaoActionFixtures.hello, "Ancestor rejection changed selected source")
+        }
+        try test("macos-root-aliases-work-without-resolving-user-links") {
+            for (alias, actual) in [("/tmp", "/private/tmp"), ("/var", "/private/var"), ("/etc", "/private/etc")] {
+                let declared = try GaoActionReference.capture(at: URL(fileURLWithPath: alias, isDirectory: true), kind: "directory")
+                let direct = try GaoActionReference.capture(at: URL(fileURLWithPath: actual, isDirectory: true), kind: "directory")
+                try check(declared.declaredIdentity.device == direct.declaredIdentity.device &&
+                          declared.declaredIdentity.inode == direct.declaredIdentity.inode, "System root alias resolved to a different directory")
+            }
+            try check(GaoActionFileAccess.canonicalFileURL(URL(fileURLWithPath: "/private/tmp")).path == "/private/tmp", "Lexical normalization rewrote private prefix")
+            let package = try GaoActionFixtures.makePackage(base, in: root, name: "tmp-alias-package")
+            let aliasRoot = URL(fileURLWithPath: "/tmp", isDirectory: true).appendingPathComponent(root.lastPathComponent, isDirectory: true)
+            let accepted = try validator.stagePackage(at: aliasRoot.appendingPathComponent(package.lastPathComponent, isDirectory: true),
+                                                       stagingRoot: aliasRoot.appendingPathComponent("AliasReceiver/Staging", isDirectory: true))
+            try check(try Data(contentsOf: accepted.stagedItems[0].url) == GaoActionFixtures.hello, "Whitelisted /tmp alias could not stage a private copy")
+        }
         try test("hardlinks-directories-and-fifos") {
             let package = try GaoActionFixtures.makePackage(base, in: root, name: "hardlink")
             let file = package.appendingPathComponent("payload/input.txt")

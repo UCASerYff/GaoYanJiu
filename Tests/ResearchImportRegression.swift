@@ -11,6 +11,7 @@ import Foundation
         var relativePath: String
         var sha256: String
         var indexedText: String? = nil
+        var version: String? = nil
     }
     struct Library: Codable {
         var version = 32
@@ -27,6 +28,7 @@ import Foundation
         var failCommit = false
         var failIndex = false
         var failAfterDurableCommit = false
+        var indexGate: (() async throws -> Void)? = nil
         init(root: URL, initialize: Bool = true) throws {
             self.root = root
             libraryURL = root.appendingPathComponent("library.json")
@@ -51,7 +53,7 @@ import Foundation
                         let bytes = try Data(contentsOf: self.attachments.appendingPathComponent(record.relativePath))
                         guard Self.sha(bytes) == record.sha256 else { throw Failure(description: "Fixture record attachment mismatch") }
                         return .init(documentID: record.id, scopeID: record.scopeID, sha256: record.sha256,
-                                     destinationRelativePath: record.relativePath)
+                                     destinationRelativePath: record.relativePath, version: record.version)
                     }
                 }, commitRecords: { items in
                     if self.failCommit { throw Failure(description: "Injected atomic JSON save failure") }
@@ -59,14 +61,25 @@ import Foundation
                     for item in items {
                         let record = try JSONDecoder().decode(Record.self, from: item.recordData)
                         try expect(record.id == item.documentID, "Opaque record payload changed")
-                        try expect(!library.managedDocuments.contains(where: { $0.id == record.id }), "Duplicate record commit")
-                        library.managedDocuments.append(record)
+                        if item.effectiveOperation == .update {
+                            guard let offset = library.managedDocuments.firstIndex(where: { $0.id == record.id }),
+                                  let expected = item.expectedOriginal else { throw Failure(description: "Missing update CAS") }
+                            let old = library.managedDocuments[offset]
+                            try expect(old.scopeID == expected.scopeID && old.sha256 == expected.sha256 &&
+                                       old.relativePath == expected.destinationRelativePath &&
+                                       (expected.version == nil || old.version == expected.version), "Atomic adapter CAS failed")
+                            library.managedDocuments[offset] = record
+                        } else {
+                            try expect(!library.managedDocuments.contains(where: { $0.id == record.id }), "Duplicate record commit")
+                            library.managedDocuments.append(record)
+                        }
                     }
                     try self.save(library)
                     var counts = try self.counters(); counts.commits += 1; try self.saveCounters(counts)
                     if self.failAfterDurableCommit { throw Failure(description: "Injected failure after durable JSON save") }
                 }, indexDocuments: { ids in
                     if self.failIndex { throw Failure(description: "Injected index failure") }
+                    try await self.indexGate?()
                     var library = try self.library()
                     for offset in library.managedDocuments.indices where ids.contains(library.managedDocuments[offset].id) {
                         let file = self.attachments.appendingPathComponent(library.managedDocuments[offset].relativePath)
@@ -99,6 +112,40 @@ import Foundation
             }.sorted()
         }
         static func sha(_ bytes: Data) -> String { SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() }
+
+        func seedVersioned() async throws -> Record {
+            var input = try inputs(["original version"], variant: "seed")[0]
+            var record = try JSONDecoder().decode(Record.self, from: input.recordData)
+            record.version = "v1"
+            input.recordVersion = record.version
+            input.recordData = try JSONEncoder().encode(record)
+            _ = try await engine().submit(requestID: UUID(), items: [input])
+            return try library().managedDocuments[0]
+        }
+
+        func updateInput(from original: Record, variant: String = "v2") throws -> ResearchImportJournal.Input {
+            var input = try inputs(["edited content " + variant], variant: variant)[0]
+            var record = try JSONDecoder().decode(Record.self, from: input.recordData)
+            record.id = original.id
+            record.version = variant
+            input.id = "edited-item"
+            input.documentID = original.id
+            input.recordData = try JSONEncoder().encode(record)
+            input.operation = .update
+            input.expectedOriginal = Self.state(original)
+            input.recordVersion = variant
+            input.originalRecordData = try JSONEncoder().encode(original)
+            input.provenance.documentID = original.id
+            input.provenance.originalSHA256 = original.sha256
+            input.revision = .init(documentID: original.id, originalDocumentID: original.id,
+                                   originalSHA256: original.sha256, derivedSHA256: input.sha256, kind: "editedVersion")
+            return input
+        }
+
+        static func state(_ record: Record) -> ResearchImportJournal.RecordState {
+            .init(documentID: record.id, scopeID: record.scopeID, sha256: record.sha256,
+                  destinationRelativePath: record.relativePath, version: record.version)
+        }
     }
 
     static func expect(_ condition: Bool, _ description: String) throws {
@@ -109,13 +156,13 @@ import Foundation
         do { try await body() } catch { failed = true }
         try expect(failed, description)
     }
-    static func checkComplete(_ fixture: Fixture, count: Int) throws {
+    static func checkComplete(_ fixture: Fixture, count: Int, retainedOriginals: Int = 0) throws {
         let library = try fixture.library()
         try expect(library.managedDocuments.count == count, "Wrong durable record count")
         try expect(Set(library.managedDocuments.map(\.id)).count == count, "Duplicate durable IDs")
         try expect(library.originalBusinessAndGameState == Library().originalBusinessAndGameState, "Unrelated business/game data changed")
         try expect(library.managedDocuments.allSatisfy { $0.indexedText != nil }, "Index and records disagree")
-        try expect(try fixture.managedFiles().count == count, "Untracked attachment files")
+        try expect(try fixture.managedFiles().count == count + retainedOriginals, "Untracked attachment files")
     }
     static func treeHashes(_ root: URL) throws -> [String: String] {
         guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey]) else { return [:] }
@@ -239,23 +286,244 @@ import Foundation
             try expect(try fixture.counters().commits == counts.commits && fixture.counters().indexes == counts.indexes, "Completed job repeated effects")
             try expect(counts.commits == 1, "Crash recovery duplicated an atomic JSON commit")
         }
-        print("PASS Import: atomic JSON adapter; multi-file SHA; request/conflict/same-SHA idempotency; cancellation; attachment/JSON compensation; durable-save/index recovery; 5 real process interruptions; no completed replay; business/game sentinel retained")
+        try await runUpdates(root: root.appendingPathComponent("updates"))
+        print("PASS Import: insert/update/revision CAS; request/same-SHA idempotency; 10 update failure boundaries; cancellation/JSON/index compensation; legacy jobs; retained originals/history; 13 real process interruptions; no completed replay; business/game sentinel retained")
     }
 
-    static func crashWorker(_ point: String) async throws {
+    static func runUpdates(root: URL) async throws {
+        let fixture = try Fixture(root: root.appendingPathComponent("roundtrip"))
+        let original = try await fixture.seedVersioned()
+        let originalBytes = try Data(contentsOf: fixture.attachments.appendingPathComponent(original.relativePath))
+        let engine = try fixture.engine(), request = UUID()
+        let input = try fixture.updateInput(from: original)
+        let result = try await engine.submit(requestID: request, items: [input])
+        try expect(result.documentIDs == [original.id] && result.importedCount == 1, "Same-ID update did not commit")
+        try checkComplete(fixture, count: 1, retainedOriginals: 1)
+        try expect(try fixture.library().managedDocuments[0].version == "v2", "Update lost replayable result version")
+        try expect(try Data(contentsOf: fixture.attachments.appendingPathComponent(original.relativePath)) == originalBytes, "Update changed original attachment")
+        try expect(try engine.revision(documentID: original.id)?.originalSHA256 == original.sha256, "Update revision relationship missing")
+        let history = try treeHashes(fixture.exchange.appendingPathComponent("Metadata/DocumentHistory"))
+        try expect(history.keys.contains(where: { $0.hasSuffix("state.json") }) &&
+                   history.values.contains(Fixture.sha(input.originalRecordData!)), "Original record/history snapshot missing")
+        var retry = input
+        retry.recordVersion = "regenerated-time"
+        retry.destinationRelativePath = "summaryReports/fixture-folder/regenerated-name.txt"
+        retry.provenance.importedAt = Date().addingTimeInterval(123)
+        let before = try treeHashes(fixture.root), counts = try fixture.counters()
+        let replay = try await engine.submit(requestID: request, items: [retry])
+        try expect(replay.replayed && replay.documentIDs == [original.id], "Update replay did not reuse original result")
+        try expect(try treeHashes(fixture.root) == before, "Completed update replay wrote files")
+        try expect(try fixture.counters().commits == counts.commits && fixture.counters().indexes == counts.indexes, "Update replay repeated side effects")
+        var conflict = input
+        conflict.expectedOriginal?.version = "different-original-version"
+        try await rejected("Update request accepted conflicting CAS") { _ = try await engine.submit(requestID: request, items: [conflict]) }
+        try expect(try treeHashes(fixture.root) == before, "Conflicting update request changed files")
+        let secondOriginal = try fixture.library().managedDocuments[0]
+        _ = try await engine.submit(requestID: UUID(), items: [fixture.updateInput(from: secondOriginal, variant: "v3")])
+        try checkComplete(fixture, count: 1, retainedOriginals: 2)
+        try expect(try engine.revision(documentID: original.id)?.originalSHA256 == secondOriginal.sha256, "Second update overwrote revision history incorrectly")
+        var derivative = try fixture.inputs(["derived attachment"], variant: "derivative")[0]
+        let source = try fixture.library().managedDocuments[0]
+        derivative.operation = .revision
+        derivative.expectedOriginal = Fixture.state(source)
+        derivative.provenance.originalSHA256 = source.sha256
+        derivative.revision = .init(documentID: derivative.documentID, originalDocumentID: source.id,
+                                     originalSHA256: source.sha256, derivedSHA256: derivative.sha256, kind: "derivedAttachment")
+        _ = try await engine.submit(requestID: UUID(), items: [derivative])
+        try checkComplete(fixture, count: 2, retainedOriginals: 2)
+        try expect(try fixture.library().managedDocuments.first(where: { $0.id == source.id })?.sha256 == source.sha256,
+                   "Revision changed its source record")
+        var sameBytes = try fixture.inputs(["edited content v3"], variant: "same-bytes-revision")[0]
+        sameBytes.operation = .revision
+        sameBytes.expectedOriginal = Fixture.state(source)
+        sameBytes.provenance.originalSHA256 = source.sha256
+        sameBytes.revision = .init(documentID: sameBytes.documentID, originalDocumentID: source.id,
+                                    originalSHA256: source.sha256, derivedSHA256: sameBytes.sha256, kind: "derivedAttachment")
+        let explicitCopy = try await engine.submit(requestID: UUID(), items: [sameBytes])
+        try expect(explicitCopy.importedCount == 1 && explicitCopy.duplicateCount == 0,
+                   "Explicit new attachment with identical bytes was silently deduplicated")
+        try checkComplete(fixture, count: 3, retainedOriginals: 2)
+
+        let rejectedFixture = try Fixture(root: root.appendingPathComponent("cas-rejections"))
+        let old = try await rejectedFixture.seedVersioned()
+        let valid = try rejectedFixture.updateInput(from: old)
+        let rejectingEngine = try rejectedFixture.engine()
+        let oldLibrary = try Data(contentsOf: rejectedFixture.libraryURL)
+        var legacy = valid; legacy.operation = nil; legacy.expectedOriginal = nil
+        do {
+            _ = try await rejectingEngine.submit(requestID: UUID(), items: [legacy])
+            throw Failure(description: "Legacy insert accepted a different version at the same ID")
+        } catch let error as ResearchImportJournal.JournalError {
+            try expect(error == .recordConflict, "Legacy same-ID mismatch changed error semantics")
+        }
+        for field in ["sha", "scope", "path", "version", "missingCAS", "samePath"] {
+            var invalid = valid
+            switch field {
+            case "sha":
+                invalid.expectedOriginal?.sha256 = String(repeating: "a", count: 64)
+                invalid.provenance.originalSHA256 = String(repeating: "a", count: 64)
+                invalid.revision?.originalSHA256 = String(repeating: "a", count: 64)
+            case "scope": invalid.expectedOriginal?.scopeID = "another-folder"
+            case "path": invalid.expectedOriginal?.destinationRelativePath = "summaryReports/fixture-folder/another.txt"
+            case "version": invalid.expectedOriginal?.version = "stale-v0"
+            case "missingCAS": invalid.expectedOriginal = nil
+            default: invalid.destinationRelativePath = old.relativePath
+            }
+            try await rejected("Update accepted stale/missing " + field) { _ = try await rejectingEngine.submit(requestID: UUID(), items: [invalid]) }
+            try expect(try Data(contentsOf: rejectedFixture.libraryURL) == oldLibrary, "Rejected CAS modified the library")
+            try expect(try rejectedFixture.managedFiles().count == 1, "Rejected CAS changed original files")
+        }
+
+        let failures: [(String, ResearchImportJournal.FaultPoint)] = [
+            ("staging", .afterStaging), ("validated", .afterValidation), ("journal", .afterCommitJournal),
+            ("before-file", .beforeAttachmentCommit(0)), ("after-file", .afterAttachmentCommit(0)),
+            ("before-db", .beforeDatabaseCommit), ("after-db", .afterDatabaseCommit),
+            ("before-index", .beforeIndex), ("after-index", .afterIndex), ("completion", .beforeCompleted)
+        ]
+        for (name, boundary) in failures {
+            let failed = try Fixture(root: root.appendingPathComponent("failure-" + name))
+            let old = try await failed.seedVersioned()
+            let update = try failed.updateInput(from: old), id = UUID()
+            let faulting = try failed.engine(fault: { if $0 == boundary { throw Failure(description: "Injected update boundary") } })
+            try await rejected("Update failure boundary was ignored: " + name) { _ = try await faulting.submit(requestID: id, items: [update]) }
+            try expect(try Data(contentsOf: failed.attachments.appendingPathComponent(old.relativePath)) == Data("original version".utf8), "Failure removed original attachment: " + name)
+            let recovered = await (try failed.engine()).recoverPending()
+            try expect(recovered.count == 1 && recovered[0].outcome?.documentIDs == [old.id], "Update failure recovery failed: " + name)
+            try expect(try failed.counters().commits == 2, "Recovery duplicated/skipped update JSON commit: " + name)
+            try checkComplete(failed, count: 1, retainedOriginals: 1)
+        }
+        for uncertain in [false, true] {
+            let failed = try Fixture(root: root.appendingPathComponent(uncertain ? "uncertain-update-save" : "failed-update-save"))
+            let old = try await failed.seedVersioned(), update = try failed.updateInput(from: old)
+            failed.failCommit = !uncertain; failed.failAfterDurableCommit = uncertain
+            try await rejected("Injected update save failure was ignored") { _ = try await failed.engine().submit(requestID: UUID(), items: [update]) }
+            try expect(try failed.managedFiles().count == (uncertain ? 2 : 1), "Update save failure compensation was wrong")
+            failed.failCommit = false; failed.failAfterDurableCommit = false
+            let recovered = await (try failed.engine()).recoverPending()
+            try expect(recovered.first?.outcome != nil, "Update atomic save recovery failed")
+            try expect(try failed.counters().commits == 2, "Uncertain update commit replayed")
+            try checkComplete(failed, count: 1, retainedOriginals: 1)
+        }
+        let cancelled = try Fixture(root: root.appendingPathComponent("cancelled-update"))
+        let cancelOld = try await cancelled.seedVersioned(), cancelUpdate = try cancelled.updateInput(from: cancelOld), cancelID = UUID()
+        var cancelEngine: ResearchImportJournal!
+        cancelEngine = try cancelled.engine(progress: { stage, done, _ in
+            if stage == .attachments && done == 1 { try? cancelEngine.cancel(requestID: cancelID) }
+        })
+        try await rejected("Update cancellation ignored") { _ = try await cancelEngine.submit(requestID: cancelID, items: [cancelUpdate]) }
+        try expect(try cancelled.library().managedDocuments[0] == cancelOld && cancelled.managedFiles().count == 1, "Cancellation changed original version")
+        try expect(await cancelEngine.recoverPending().isEmpty, "Cancelled update was replayed")
+
+        let raced = try Fixture(root: root.appendingPathComponent("concurrent-version"))
+        let raceOld = try await raced.seedVersioned(), raceUpdate = try raced.updateInput(from: raceOld)
+        let raceEngine = try raced.engine(fault: { point in
+            if point == .beforeDatabaseCommit {
+                var value = try raced.library(); value.managedDocuments[0].version = "concurrently-edited"; try raced.save(value)
+            }
+        })
+        try await rejected("Update overwrote concurrently changed record version") { _ = try await raceEngine.submit(requestID: UUID(), items: [raceUpdate]) }
+        try expect(try raced.library().managedDocuments[0].version == "concurrently-edited", "Concurrent version CAS failed")
+        let blocked = await (try raced.engine()).recoverPending()
+        try expect(blocked.first?.errorCode == "recordConflict", "Stale update recovery bypassed CAS")
+        try expect(try raced.managedFiles().count == 1, "CAS rejection left an unreferenced new attachment")
+        try expect(try Data(contentsOf: raced.attachments.appendingPathComponent(raceOld.relativePath)) == Data("original version".utf8), "Concurrent update changed original bytes")
+
+        let legacyFixture = try Fixture(root: root.appendingPathComponent("legacy-job"))
+        let legacyID = UUID(), legacyInputs = try legacyFixture.inputs()
+        let legacyEngine = try legacyFixture.engine(fault: { if $0 == .afterCommitJournal { throw ResearchImportJournal.SimulatedCrash() } })
+        try await rejected("Legacy fixture did not stop") { _ = try await legacyEngine.submit(requestID: legacyID, items: legacyInputs) }
+        let jobURL = legacyFixture.exchange.appendingPathComponent("Metadata/ImportJobs/" + legacyID.uuidString.lowercased() + ".json")
+        var object = try JSONSerialization.jsonObject(with: Data(contentsOf: jobURL)) as! [String: Any]
+        var rows = object["items"] as! [[String: Any]]
+        for index in rows.indices {
+            for key in ["operation", "expectedOriginal", "recordVersion", "originalRecordData", "previousProvenance", "previousRevision"] { rows[index].removeValue(forKey: key) }
+        }
+        object["items"] = rows
+        try JSONSerialization.data(withJSONObject: object).write(to: jobURL, options: .atomic)
+        let legacyRecovered = await (try legacyFixture.engine()).recoverPending()
+        try expect(legacyRecovered.first?.outcome?.importedCount == 2, "Pre-update journal was not backward compatible")
+        try checkComplete(legacyFixture, count: 2)
+
+        let legacyCommitted = try Fixture(root: root.appendingPathComponent("legacy-durable-job"))
+        let legacyDurableID = UUID()
+        let legacyDurableEngine = try legacyCommitted.engine(fault: {
+            if $0 == .afterDatabaseCommit { throw ResearchImportJournal.SimulatedCrash() }
+        })
+        try await rejected("Legacy durable fixture did not stop") {
+            _ = try await legacyDurableEngine.submit(requestID: legacyDurableID, items: legacyCommitted.inputs())
+        }
+        // The upgraded adapter may expose version tokens which were absent in
+        // an older job. Its saved SHA/path/ID still identify committed inserts.
+        var newlyVersioned = try legacyCommitted.library()
+        for offset in newlyVersioned.managedDocuments.indices { newlyVersioned.managedDocuments[offset].version = "new-adapter-token" }
+        try legacyCommitted.save(newlyVersioned)
+        let legacyDurableRecovery = await (try legacyCommitted.engine()).recoverPending()
+        try expect(legacyDurableRecovery.first?.outcome?.importedCount == 2, "Legacy committed job rejected new adapter version tokens")
+        try expect(try legacyCommitted.counters().commits == 1, "Legacy committed job replayed its insert")
+        try checkComplete(legacyCommitted, count: 2)
+
+        let locked = try Fixture(root: root.appendingPathComponent("locked-job"))
+        var reachedIndex = false, releaseIndex = false
+        locked.indexGate = {
+            reachedIndex = true
+            while !releaseIndex { try await Task.sleep(nanoseconds: 1_000_000) }
+        }
+        let lockOwner = try locked.engine(), contender = try locked.engine()
+        let lockedInputs = try locked.inputs()
+        let ownerTask = Task { try await lockOwner.submit(requestID: UUID(), items: lockedInputs) }
+        defer { releaseIndex = true }
+        for _ in 0..<10_000 where !reachedIndex { try await Task.sleep(nanoseconds: 1_000_000) }
+        try expect(reachedIndex, "Lock fixture did not reach its wait boundary")
+        do {
+            _ = try await contender.submit(requestID: UUID(), items: lockedInputs)
+            throw Failure(description: "Concurrent engine acquired the transaction lock")
+        } catch let error as ResearchImportJournal.JournalError {
+            try expect(error == .busy, "Concurrent import did not report busy")
+        }
+        let contendedRecovery = await contender.recoverPending()
+        try expect(contendedRecovery.first?.errorCode == "busy", "Recovery bypassed a held transaction lock")
+        releaseIndex = true
+        _ = try await ownerTask.value
+        try checkComplete(locked, count: 2)
+        try expect(await contender.recoverPending().isEmpty, "Completed locked transaction replayed")
+
+        for crashPoint in ["after-staging", "after-validation", "after-journal", "after-attachment", "before-database", "after-database", "after-index", "before-completed"] {
+            let crashed = try Fixture(root: root.appendingPathComponent("process-" + crashPoint))
+            let old = try await crashed.seedVersioned()
+            let child = Process(); child.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+            child.arguments = ["--update-crash-worker", crashPoint]
+            child.environment = ProcessInfo.processInfo.environment.merging(["GQ_IMPORT_WORKER_ROOT": crashed.root.path]) { _, new in new }
+            child.standardOutput = FileHandle.nullDevice; child.standardError = FileHandle.nullDevice
+            try child.run(); child.waitUntilExit()
+            try expect(child.terminationStatus == 77, "Update worker missed crash boundary: " + crashPoint)
+            let recovering = try crashed.engine(), recovered = await recovering.recoverPending()
+            try expect(recovered.count == 1 && recovered[0].outcome?.documentIDs == [old.id], "Real-process update recovery failed: " + crashPoint)
+            try checkComplete(crashed, count: 1, retainedOriginals: 1)
+            try expect(try crashed.counters().commits == 2, "Real-process recovery duplicated update commit")
+            let before = try treeHashes(crashed.root)
+            try expect(await recovering.recoverPending().isEmpty, "Completed update recovered twice")
+            try expect(try treeHashes(crashed.root) == before, "Completed update recovery wrote files")
+        }
+    }
+
+    static func crashWorker(_ point: String, update: Bool = false) async throws {
         guard let path = ProcessInfo.processInfo.environment["GQ_IMPORT_WORKER_ROOT"] else { throw Failure(description: "Missing worker fixture root") }
         let fixture = try Fixture(root: URL(fileURLWithPath: path), initialize: false)
         let target: ResearchImportJournal.FaultPoint
         switch point {
         case "after-staging": target = .afterStaging
+        case "after-validation": target = .afterValidation
         case "after-journal": target = .afterCommitJournal
         case "after-attachment": target = .afterAttachmentCommit(0)
+        case "before-database": target = .beforeDatabaseCommit
         case "after-database": target = .afterDatabaseCommit
         case "after-index": target = .afterIndex
+        case "before-completed": target = .beforeCompleted
         default: throw Failure(description: "Unknown fixture interruption")
         }
         let engine = try fixture.engine(fault: { if $0 == target { _exit(77) } })
-        _ = try await engine.submit(requestID: UUID(uuidString: "11111111-1111-4111-8111-000000000004")!, items: fixture.inputs())
+        let inputs = update ? [try fixture.updateInput(from: fixture.library().managedDocuments[0])] : try fixture.inputs()
+        _ = try await engine.submit(requestID: UUID(uuidString: "11111111-1111-4111-8111-000000000004")!, items: inputs)
         throw Failure(description: "Crash worker completed unexpectedly")
     }
 
@@ -263,6 +531,9 @@ import Foundation
         do {
             if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--crash-worker" {
                 try await crashWorker(CommandLine.arguments[2]); return
+            }
+            if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--update-crash-worker" {
+                try await crashWorker(CommandLine.arguments[2], update: true); return
             }
             guard let path = ProcessInfo.processInfo.environment["GQ_IMPORT_TEST_ROOT"] else { throw Failure(description: "Use scripts/test_import.sh") }
             let root = URL(fileURLWithPath: path, isDirectory: true)
