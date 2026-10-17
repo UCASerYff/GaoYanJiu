@@ -689,7 +689,7 @@ struct DocumentLibraryDashboard: View {
                     if provider.isAvailable {
                         do {
                             try await store.documentLibrary.exchangeClient.openInProvider(prepared)
-                            store.exchangeFeedbackMessage = AppLocalization.format("已在搞文件中打开“%@”。编辑保存后，请在“导入编辑新版本…”中导入修改后的文件。", document.displayName)
+                            store.exchangeFeedbackMessage = AppLocalization.format("已请求搞文件接收“%@”的副本。请在搞文件中确认并编辑，导出后再在“导入编辑新版本…”中选择文件并复核入库。", document.displayName)
                         } catch {
                             store.documentLibrary.exchangeClient.revealFallback(prepared)
                             store.exchangeFeedbackMessage = AppLocalization.format("启动搞文件失败（%@），已在访达中定位交接副本。", error.localizedDescription)

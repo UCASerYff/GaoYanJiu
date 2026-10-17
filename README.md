@@ -1,17 +1,17 @@
-# 搞研究 V4.03
+# 搞研究 V4.04
 
 独立 macOS 应用，包含本模块完整业务、游戏场景和 WidgetKit 小组件。运行不依赖搞七廿三或其他六个应用；联动功能需要同时安装相关应用。
 
 ## 下载与安装
 
-从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.03.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
+从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.04.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
 
 1. 支持 macOS 14 或更高版本、Apple Silicon；暂未提供 Intel 版本。
 2. 解压 ZIP，将 `搞研究.app` 拖入“应用程序”文件夹。
 3. 如果 macOS 拦截打开，请先确认软件来源，再进入“系统设置 → 隐私与安全性”，允许该应用打开。发行包使用 Apple Development 签名，未做 Apple 公证。
 4. 安装后运行一次，再从系统小组件列表添加本应用的小组件。整合版的小组件需要重新添加。
 
-下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.03.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
+下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.04.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
 
 ## 功能
 
@@ -24,7 +24,7 @@
 
 ## 用户数据、附件与隐私
 
-源码及安装包不包含个人记录、账户配置、账单、健康数据、私人附件、API 密钥、浏览器会话或用户备份。新电脑首次打开时创建自己的资料库；GitHub 下载不能恢复个人数据。
+源码及安装包不包含个人记录、账户配置、账单、健康数据、私人附件、API 密钥、浏览器会话或用户备份。新电脑首次打开时须确认创建自己的资料库；GitHub 下载不能恢复个人数据。
 
 - 业务数据目录：`~/Library/Application Support/GaoSeries/Research/`。
 - 数据库或小组件镜像：`~/Library/Group Containers/5G96498KGJ.com.academic-achievement.manager/`。
@@ -49,7 +49,7 @@ V4.0 从整合版拆分时保留业务历史、余额、库存、游戏进度、
 ./scripts/build.sh
 ./scripts/package.sh
 # 退出搞研究后，保存输出中的私有 backup 目录
-python3 scripts/upgrade_data.py snapshot --version 4.03
+python3 scripts/upgrade_data.py snapshot --version 4.04
 ./scripts/install.sh
 # 安装后核验原数据、附件、设置与研究城；本命令不启动应用
 python3 scripts/upgrade_data.py verify-live /path/to/private/backup
@@ -59,6 +59,8 @@ python3 scripts/upgrade_data.py verify-live /path/to/private/backup
 ./scripts/test_exchange_clients.sh
 ./scripts/test_backup.sh
 ./scripts/test_product.sh
+./scripts/test_library_load.sh
+./scripts/test_widgets.sh
 python3 Tests/InstallSafetyRegression.py
 ```
 
@@ -74,6 +76,15 @@ python3 Tests/InstallSafetyRegression.py
 版本以 `Info.plist` 为准。后续更新仅更新受影响的应用，每次版本 +0.01、构建号 +1。先核验用户资料，再安装新程序并检查记录、附件和游戏进度，成功后清理旧程序、安装包与中间构建。程序资源与用户资料须分别处理，不能用清理构建目录的方式删除用户数据。
 
 第三方组件和资源保留各自许可，详情见 `Resources/` 中的许可、来源说明与补丁记录。
+
+## V4.04 更新
+
+- 缺失、损坏、无法读取或来自更新版本的资料库保持原位，停止写入和统计发布；重试恢复成功后才解除保护。真正首次使用需本人确认新建，迁移前备份失败也会阻止迁移。
+- 小组件从经过校验的磁盘资料库生成 schema2 原子快照，核对来源与内容摘要，保留最后有效快照。区分统计内容更新时间、资料库文件写入、快照发布和扩展实际读取；旧日期本身不代表停刷。失败保存待重试状态，采用有限重试和激活、睡醒、跨日、时区及语言事件恢复。
+- OCR 结果按原请求、目标、实际内容和逐页来源识别相同工作，换信封编号或刷新有效期也不会重复建附件；仍保留每份结果的审核与接收凭据。提交前持久绑定结果与事务，引用原件改变后仍沿原计划恢复；缺少完整旧来源证据的新信封明确要求复核。兼容已有事务和 V4.03 严格版本校验。
+- 文档提供方的 partial/pending 回执保留为待办，不当作编辑保存完成。真实编辑后的文件仍由用户导回并复核；缺失的文件选择提供方保留请求。接口约束见 [三方交接说明](docs/CROSS_APP_HANDOFF.md)。
+- 主资料沿用 schema32、原路径与钥匙串；仅小组件派生快照升级。提供不创建窗口、不初始化资料库的 `--widget-diagnostics`（只读）与 `--refresh-widget-snapshot`（核验后发布）维护命令；运行二进制路径为应用内 `Contents/MacOS/AcademicAchievementManager`。
+- 验证范围为静态、编译、签名及隔离定向检查。没有执行冒烟或真实 GUI 操作；桌面视觉、所有尺寸/实例、点击定位、真实编辑/OCR 复核、重启及实际睡醒/午夜/时区场景须人工验收。Calendar 测试和 reload 请求不能证明系统已显示新内容。人工步骤见 [小组件验收说明](docs/WIDGET_VALIDATION.md)。
 
 ## V4.03 更新
 

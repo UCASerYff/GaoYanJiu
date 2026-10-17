@@ -178,6 +178,50 @@ struct ResearchExchangeClientsRegression {
         try expect(partialResult.ocrOutputs[0].sourceDocumentID == "doc-ocr", "OCR maps to original library document")
         let receivedAgain = try client.receiveResult(at: partial)
         try expect(receivedAgain.duplicate && !receivedAgain.businessApplied, "received-only duplicate remains available for approval/resume")
+        let refreshed = try result(root: root.appendingPathComponent("ProviderOutgoing"), request: ocr, action: .ocrFiles,
+                                   status: "partial", outputFiles: [output], provenance: partialMetadata)
+        let refreshedManifestURL = refreshed.appendingPathComponent("manifest.json")
+        var renewed = try JSONDecoder().decode(GaoActionManifest.self, from: Data(contentsOf: refreshedManifestURL))
+        renewed.nonce = Data(repeating: 7, count: 32).base64EncodedString()
+        renewed.expiresAt = "2026-10-12T12:01:59Z"
+        try write(JSONEncoder().encode(renewed), to: refreshedManifestURL)
+        let refreshedResult = try client.receiveResult(at: refreshed)
+        let firstSemantic = try client.semanticResultFingerprint(partialResult, targetScope: "folder:fixture-target")
+        let refreshedSemantic = try client.semanticResultFingerprint(refreshedResult, targetScope: "folder:fixture-target")
+        try expect(partialResult.package.manifest.requestID != refreshedResult.package.manifest.requestID && firstSemantic == refreshedSemantic,
+                   "new result UUID/TTL/nonce preserve business identity")
+        try expect(try client.semanticResultFingerprint(refreshedResult, targetScope: "folder:other-target") != firstSemantic,
+                   "semantic identity binds actual target scope")
+        var changedProvenance = partialMetadata
+        changedProvenance["engineVersion"] = .string("different-engine-revision")
+        let changed = try result(root: root.appendingPathComponent("ProviderOutgoing"), request: ocr, action: .ocrFiles,
+                                 status: "partial", outputFiles: [output], provenance: changedProvenance)
+        let changedResult = try client.receiveResult(at: changed)
+        try expect(try client.semanticResultFingerprint(changedResult, targetScope: "folder:fixture-target") != firstSemantic,
+                   "semantic identity binds engine and page provenance")
+        var changedPages = partialMetadata
+        if case .array(var pages)? = changedPages["pages"] {
+            pages[1] = .object(["pageNumber": .number(2), "status": .string("cancelled")])
+            changedPages["pages"] = .array(pages)
+        }
+        let otherPages = try result(root: root.appendingPathComponent("ProviderOutgoing"), request: ocr, action: .ocrFiles,
+                                    status: "partial", outputFiles: [output], provenance: changedPages)
+        try expect(try client.semanticResultFingerprint(client.receiveResult(at: otherPages), targetScope: "folder:fixture-target") != firstSemantic,
+                   "semantic identity cannot reuse a job with different page evidence")
+        let pendingJob = UUID()
+        try client.recordResultIntent(requestID: ocr.requestID, resultID: refreshedResult.package.manifest.requestID, jobID: pendingJob)
+        let pendingSession = try client.loadSession(ocr.requestID)
+        try expect(pendingSession.resultIntents?[refreshedResult.package.manifest.requestID]?.jobID == pendingJob.uuidString &&
+                   pendingSession.appliedResults?[refreshedResult.package.manifest.requestID] == nil,
+                   "write-ahead result intent is durable without an applied receipt")
+        try fails("result intent cannot rebind", expected: .resultMismatch) {
+            try client.recordResultIntent(requestID: ocr.requestID, resultID: refreshedResult.package.manifest.requestID, jobID: UUID())
+        }
+        try fails("applied receipt must use its bound job", expected: .resultMismatch) {
+            _ = try client.markResultApplied(requestID: ocr.requestID, resultID: refreshedResult.package.manifest.requestID,
+                                            importedDocumentIDs: ["fixture-doc"], receiptID: UUID().uuidString)
+        }
+        try expect(try !client.receiveResult(at: refreshed).businessApplied, "pending intent remains eligible for review and recovery")
         let partialManifestURL = partial.appendingPathComponent("manifest.json")
         var mutated = try JSONDecoder().decode(GaoActionManifest.self, from: Data(contentsOf: partialManifestURL))
         mutated.provenance?["engineVersion"] = .string("fixture-2")
@@ -212,6 +256,17 @@ struct ResearchExchangeClientsRegression {
         let opened = try result(root: root.appendingPathComponent("ProviderOutgoing"), request: edit, action: .openDocument,
                                 status: "completed", provenance: ["workflowState": .string("opened")])
         try expect(try client.receiveResult(at: opened).workflowState == "opened", "open receipt is not a saved revision")
+        let editSession = try client.loadSession(edit.requestID)
+        for state in ["pending", "partial", "failed", "cancelled"] {
+            let receipt = try result(root: root.appendingPathComponent("ProviderOutgoing"), request: edit, action: .openDocument,
+                                     status: state, provenance: ["workflowState": .string(state), "saved": .bool(false),
+                                                                "openedItemIDs": .array(state == "partial" ? [.string(editSession.sources[0].itemID)] : [])])
+            let received = try client.receiveResult(at: receipt)
+            try expect(received.workflowState == state && !received.businessApplied, "real editor pending/partial/failure remains an unsaved receipt")
+        }
+        let falseSave = try result(root: root.appendingPathComponent("ProviderOutgoing"), request: edit, action: .openDocument,
+                                   status: "completed", provenance: ["workflowState": .string("opened"), "saved": .bool(true)])
+        try fails("open receipt cannot claim edit saved", expected: .invalidEditResult) { _ = try client.receiveResult(at: falseSave) }
         let savedClaim = try result(root: root.appendingPathComponent("ProviderOutgoing"), request: edit, action: .openDocument,
                                     status: "completed", outputFiles: [edited], provenance: ["workflowState": .string("saved")])
         try fails("editing return cannot auto-overwrite", expected: .invalidEditResult) { _ = try client.receiveResult(at: savedClaim) }
@@ -287,6 +342,19 @@ struct ResearchExchangeClientsRegression {
                        "absent confidence and language remain absent")
         }
         try expect(!checked.businessApplied && checked.workflowState == "needsReview", "partial receipt waits for explicit business approval")
+        let reorderedURL = try result(root: outgoing, request: request, action: .ocrFiles, status: "partial",
+                                      outputFiles: [firstOutput, json, emptyText], provenance: provenance,
+                                      outputUTIs: ["public.utf8-plain-text", "public.json", "public.utf8-plain-text"])
+        let reorderManifestURL = reorderedURL.appendingPathComponent("manifest.json")
+        var reordered = try JSONDecoder().decode(GaoActionManifest.self, from: Data(contentsOf: reorderManifestURL))
+        reordered.items.reverse()
+        for key in ["sources", "outputs"] {
+            if case .array(let entries)? = reordered.provenance?[key] { reordered.provenance?[key] = .array(entries.reversed()) }
+        }
+        try write(JSONEncoder().encode(reordered), to: reorderManifestURL)
+        let orderIndependent = try client.receiveResult(at: reorderedURL)
+        try expect(try client.semanticResultFingerprint(checked, targetScope: "same-target") == client.semanticResultFingerprint(orderIndependent, targetScope: "same-target"),
+                   "irrelevant item/source/output ordering does not duplicate business work")
         let repeated = try client.receiveResult(at: partial)
         try expect(repeated.duplicate && !repeated.businessApplied, "partial retry is still recoverable before import")
         _ = try client.markResultApplied(requestID: request.requestID, resultID: checked.package.manifest.requestID,

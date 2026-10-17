@@ -93,6 +93,7 @@ struct ContentView: View {
     @State private var portalToRemove: PortalAccount?
     @State private var showingTrash = false
     @State private var loadFailureAlertDismissed = false
+    @State private var confirmingNewLibrary = false
     /// 侧栏隐藏/显示（场景级记忆；键全 app 唯一，与其它模块互不冲突）。
     /// 只有 隐藏↔显示 两态，不提供「收起成图标栏」。
     @SceneStorage("gqns.sidebarHidden.research") private var sidebarHidden = false
@@ -133,11 +134,13 @@ struct ContentView: View {
     }
 
     private var loadFailureAlertMessage: String {
-        var message = AppLocalization.text("数据没有丢失，但资料库文件无法读取。为保护数据，应用已暂停所有写入，直到恢复出可用的资料库。")
+        var message = AppLocalization.text("资料库未能成功读取，已暂停写入并保留原文件与最后有效的小组件内容。请重试读取，或从备份恢复。")
         if let name = store.quarantinedLibraryFileName {
             message += "\n\n" + AppLocalization.format("无法读取的文件已隔离保存为“%@”。", name)
         }
-        message += "\n\n" + AppLocalization.text("可从每日自动备份中恢复，也可以直接点击下方按钮：")
+        if store.libraryCanInitializeNew {
+            message += "\n\n" + AppLocalization.text("此位置未发现既有资料。仅在首次使用且无需恢复旧资料时，确认创建新的资料库。")
+        }
         return message
     }
 
@@ -370,15 +373,44 @@ struct ContentView: View {
                 set: { if !$0 { loadFailureAlertDismissed = true } }
             )
         ) {
+            Button(AppLocalization.text("重试读取")) {
+                store.load()
+                loadFailureAlertDismissed = false
+            }
             Button(AppLocalization.text("从备份恢复…")) {
                 loadFailureAlertDismissed = true
                 store.chooseAndRestoreFullBackup()
+            }
+            if store.libraryCanInitializeNew {
+                Button(AppLocalization.text("创建新的资料库…")) { confirmingNewLibrary = true }
             }
             Button(AppLocalization.text("稍后"), role: .cancel) {
                 loadFailureAlertDismissed = true
             }
         } message: {
             Text(loadFailureAlertMessage)
+        }
+        .confirmationDialog(AppLocalization.text("创建新的资料库？"), isPresented: $confirmingNewLibrary, titleVisibility: .visible) {
+            Button(AppLocalization.text("确认创建")) {
+                do { try store.initializeNewLibraryAfterUserConfirmation() }
+                catch { store.lastError = error.localizedDescription }
+                loadFailureAlertDismissed = false
+            }
+        } message: {
+            Text(AppLocalization.text("这将开始一份新的空资料库。如果这台 Mac 原有研究资料，请取消并从备份恢复。"))
+        }
+        .safeAreaInset(edge: .top) {
+            if store.libraryLoadFailed {
+                HStack {
+                    Label(AppLocalization.text("资料库未读取，保存已暂停"), systemImage: "exclamationmark.triangle")
+                    Spacer()
+                    Button(AppLocalization.text("重试读取")) { store.load(); loadFailureAlertDismissed = false }
+                    Button(AppLocalization.text("恢复选项…")) { loadFailureAlertDismissed = false }
+                }
+                .font(.callout)
+                .padding(12)
+                .background(.regularMaterial)
+            }
         }
         .safeAreaInset(edge: .bottom) {
             if store.lastDeletedTrashID != nil {

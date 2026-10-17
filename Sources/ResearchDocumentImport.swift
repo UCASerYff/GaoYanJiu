@@ -4,7 +4,7 @@ import Foundation
 import UniformTypeIdentifiers
 
 enum ResearchDocumentImportError: LocalizedError {
-    case unavailableLibrary, busy, invalidTarget, unsupportedFile, missingDocument, versionConflict, approvalRequired, resultNotApplicable
+    case unavailableLibrary, busy, invalidTarget, unsupportedFile, missingDocument, versionConflict, approvalRequired, resultNotApplicable, legacyResultReviewRequired, resultIntentConflict
     var errorDescription: String? {
         switch self {
         case .unavailableLibrary: return "资料库未成功加载或无法提交，原资料未修改。"
@@ -15,6 +15,8 @@ enum ResearchDocumentImportError: LocalizedError {
         case .versionConflict: return "原研究附件或版本已改变，请重新核对后再导入。"
         case .approvalRequired: return "请先明确核对并批准本次交接。"
         case .resultNotApplicable: return "此结果尚未完成或没有可导入附件；原资料未修改。"
+        case .legacyResultReviewRequired: return "旧版交接未保留完整原始意图，不能自动确认本次重发。请核对已导入附件，或从原条目明确发起新请求；原资料未修改。"
+        case .resultIntentConflict: return "本次交接已绑定经过核验的选择，当前内容或目标已改变。请恢复原选择，或明确发起新请求；原资料未修改。"
         }
     }
 }
@@ -378,15 +380,21 @@ extension DocumentLibraryStore {
         guard ["completed", "partial"].contains(manifest.status ?? ""), result.session.action != .openDocument else {
             throw ResearchDocumentImportError.resultNotApplicable
         }
-        guard libraryIsWritable(), !isImportingDocuments, let jobID = UUID(uuidString: manifest.requestID) else { throw ResearchDocumentImportError.busy }
+        guard libraryIsWritable(), !isImportingDocuments, let envelopeID = UUID(uuidString: manifest.requestID) else { throw ResearchDocumentImportError.busy }
         let client = exchangeClient, session = try client.loadSession(result.session.requestID)
+        let boundID: UUID?
+        if let intent = session.resultIntents?[manifest.requestID] {
+            guard intent.manifestSHA256 == session.resultManifestSHA256?[manifest.requestID],
+                  let id = UUID(uuidString: intent.jobID) else { throw ResearchDocumentImportError.resultIntentConflict }
+            boundID = id
+        } else { boundID = nil }
         if let receipt = session.appliedResults?[manifest.requestID] {
             return .init(documentIDs: receipt.importedDocumentIDs, importedCount: 0,
                          duplicateCount: receipt.importedDocumentIDs.count, replayed: true)
         }
         let accessed = reselectedReferences.values.filter { $0.startAccessingSecurityScopedResource() }
         defer { accessed.forEach { $0.stopAccessingSecurityScopedResource() } }
-        isImportingDocuments = true; activeImportRequestID = jobID
+        isImportingDocuments = true
         defer { isImportingDocuments = false; activeImportRequestID = nil }
         let journal = try transactionJournal()
         var chosenFolder: DocumentFolder?
@@ -396,13 +404,48 @@ extension DocumentLibraryStore {
             guard let folder = folders.first(where: { $0.id == id }) else { throw ResearchDocumentImportError.invalidTarget }
             chosenFolder = folder
         }
+        // Before V4.04 jobs used the envelope UUID. Their journal does not
+        // retain the full result manifest, so a new envelope cannot prove the
+        // same intent from partial saved page metadata. Exact UUID recovery
+        // remains valid; otherwise stop before copying or creating a new job.
+        let jobID: UUID
+        var verifiedSelections: [ResearchVerifiedSelection] = []
+        if let boundID, try journal.job(requestID: boundID) != nil { jobID = boundID }
+        else if try journal.job(requestID: envelopeID) != nil {
+            guard boundID == nil || boundID == envelopeID else { throw ResearchDocumentImportError.resultIntentConflict }
+            jobID = envelopeID
+        }
+        else {
+            if try hasLegacyEnvelopeJob(result, journal: journal) { throw ResearchDocumentImportError.legacyResultReviewRequired }
+            if session.action == .chooseFiles {
+                let references = result.selectedReferences
+                guard result.package.stagedItems.count + references.count <= 256 else { throw ResearchExchangeClientError.tooManyItems }
+                let initialBytes = result.package.stagedItems.reduce(Int64(0)) { $0 + $1.item.byteCount }
+                verifiedSelections = try await Task.detached(priority: .userInitiated) {
+                    var totalBytes = initialBytes
+                    return try references.map { reference in
+                        let selected = try client.verifySelectedReference(reference, userSelectedURL: reselectedReferences[reference.id],
+                                                                          maximumBytes: 2_147_483_648 - totalBytes)
+                        totalBytes += selected.byteCount
+                        return selected
+                    }
+                }.value
+            }
+            let scope = try resultTargetScope(result, chosenFolder: chosenFolder)
+            let fingerprint = try client.semanticResultFingerprint(result, targetScope: scope, verifiedSelections: verifiedSelections)
+            let semanticID = Self.stableImportID("exchange-result-v1:" + fingerprint)
+            guard boundID == nil || boundID == semanticID else { throw ResearchDocumentImportError.resultIntentConflict }
+            jobID = semanticID
+        }
+        activeImportRequestID = jobID
         let outcome: ResearchImportJournal.Outcome
         if let existing = try journal.job(requestID: jobID) {
             if let chosenFolder, !existing.items.allSatisfy({ $0.scopeID == chosenFolder.id }) { throw ResearchDocumentImportError.invalidTarget }
             // Durable staging/plan is authoritative after interruption. A valid
             // completed job can repair a missing business receipt without replay.
             var incoming = Dictionary(uniqueKeysWithValues: result.package.stagedItems.map { ($0.item.id, $0.url) })
-            let retainedRoot = ResearchExchangePaths.root.appendingPathComponent("ImportStaging/" + jobID.uuidString)
+            for selected in verifiedSelections { incoming["reference:" + selected.referenceID] = selected.localCopy }
+            let retainedRoot = ResearchExchangePaths.root.appendingPathComponent("ImportStaging/" + jobID.uuidString.lowercased())
             for item in existing.items where incoming[item.id] == nil {
                 let retained = retainedRoot.appendingPathComponent(item.stagedRelativePath)
                 if FileManager.default.fileExists(atPath: retained.path) { incoming[item.id] = retained }
@@ -413,6 +456,7 @@ extension DocumentLibraryStore {
                 }
             }
             let inputs = existing.items.map { Self.restoredInput($0, source: incoming[$0.id] ?? result.package.stagingDirectory.appendingPathComponent("missing")) }
+            try client.recordResultIntent(requestID: session.requestID, resultID: manifest.requestID, jobID: jobID)
             outcome = try await journal.submit(requestID: jobID, items: inputs)
         } else {
             var inputs: [ResearchImportJournal.Input] = []
@@ -420,19 +464,7 @@ extension DocumentLibraryStore {
             case .chooseFiles:
                 guard let folder = chosenFolder else { throw ResearchDocumentImportError.invalidTarget }
                 var staged = result.package.stagedItems
-                let references = result.selectedReferences
-                guard staged.count + references.count <= 256 else { throw ResearchExchangeClientError.tooManyItems }
-                let initialBytes = staged.reduce(Int64(0)) { $0 + $1.item.byteCount }
-                let selected = try await Task.detached(priority: .userInitiated) {
-                    var totalBytes = initialBytes
-                    return try references.map { reference in
-                        let selected = try client.verifySelectedReference(reference, userSelectedURL: reselectedReferences[reference.id],
-                                                                          maximumBytes: 2_147_483_648 - totalBytes)
-                        totalBytes += selected.byteCount
-                        return selected
-                    }
-                }.value
-                for copy in selected {
+                for copy in verifiedSelections {
                     let filename = URL(fileURLWithPath: copy.originalReference.displayName).lastPathComponent
                     let item = GaoActionItem(id: "reference:" + copy.referenceID,
                                              relativePath: "payload/" + copy.referenceID + "/" + filename,
@@ -490,6 +522,7 @@ extension DocumentLibraryStore {
             }
             let originalIDs = Set(inputs.compactMap { $0.expectedOriginal?.documentID })
             try await preserveLibrarySnapshot(jobID: jobID, originals: documents.filter { originalIDs.contains($0.id) })
+            try client.recordResultIntent(requestID: session.requestID, resultID: manifest.requestID, jobID: jobID)
             outcome = try await journal.submit(requestID: jobID, items: inputs)
         }
         _ = try client.markResultApplied(requestID: session.requestID, resultID: manifest.requestID,
@@ -506,6 +539,31 @@ extension DocumentLibraryStore {
         return .init(documentID: document.id, scopeID: document.folderID, sha256: actual.sha256,
                      destinationRelativePath: String(url.path.dropFirst(LibraryPaths.managedDocuments.path.count + 1)),
                      version: Self.importRecordVersion(document.updatedAt))
+    }
+
+    private func resultTargetScope(_ result: ResearchValidatedExternalResult, chosenFolder: DocumentFolder?) throws -> String {
+        if result.session.action == .chooseFiles {
+            guard let chosenFolder else { throw ResearchDocumentImportError.invalidTarget }
+            return "folder:" + chosenFolder.id
+        }
+        var scope: [[String: String]] = []
+        for output in result.ocrOutputs {
+            guard let sourceID = output.sourceDocumentID, let source = documents.first(where: { $0.id == sourceID }),
+                  folders.contains(where: { $0.id == source.folderID }) else { throw ResearchDocumentImportError.missingDocument }
+            scope.append(["itemID": output.itemID, "documentID": source.id, "folderID": source.folderID])
+        }
+        let data = try JSONSerialization.data(withJSONObject: scope.sorted { $0["itemID"]! < $1["itemID"]! }, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private func hasLegacyEnvelopeJob(_ result: ResearchValidatedExternalResult,
+                                      journal: ResearchImportJournal) throws -> Bool {
+        let session = try exchangeClient.loadSession(result.session.requestID)
+        for resultID in session.resultIDs where resultID != result.package.manifest.requestID {
+            guard let candidate = UUID(uuidString: resultID) else { throw ResearchExchangeClientError.invalidSession }
+            if try journal.job(requestID: candidate) != nil { return true }
+        }
+        return false
     }
 
     private func destinationPath(folder: DocumentFolder, stored: String) -> String {

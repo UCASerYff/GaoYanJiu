@@ -1,4 +1,6 @@
 import Foundation
+import Darwin
+import CoreFoundation
 
 // MARK: - 资料库路径与 schema 常量
 //
@@ -22,6 +24,10 @@ enum LibraryPaths {
     static let trashStorage = applicationSupport.appendingPathComponent("TrashStorage", isDirectory: true)
 
     static let legacyApplicationSupport: URL = {
+        if let override = ProcessInfo.processInfo.environment["GAO_RESEARCH_DATA_DIR"], !override.isEmpty {
+            return URL(fileURLWithPath: override, isDirectory: true).deletingLastPathComponent()
+                .appendingPathComponent("PaperSignal", isDirectory: true)
+        }
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
         return base.appendingPathComponent("PaperSignal", isDirectory: true)
     }()
@@ -114,12 +120,31 @@ enum LibraryLoadResult {
         migratedLegacyDirectory: Bool,
         migrationBackupError: Error?
     )
-    /// library.json 不存在：安全的空库。
+    /// Legacy adapter result; callers must treat absence as unavailable, never as a new library.
     case empty
     /// 资料库来自更新版本：原位保留，调用方须阻断写盘。
     case futureVersion(Int)
-    /// 无法解码：已尝试隔离原文件，调用方须阻断写盘。
+    /// 无法读取：原文件原位保留，调用方须阻断写盘。
     case corrupted(quarantinedFileName: String?, error: Error)
+}
+
+enum LibraryLoadFailureReason: String {
+    case missing, unreadable, corrupted, futureVersion, migrationBackupFailed
+}
+
+enum LibraryPersistenceError: LocalizedError {
+    case missing, invalidStructure, backupFailed(Error), initializationNotAllowed, changedSinceRead, futureVersion(Int), readRequired
+    var errorDescription: String? {
+        switch self {
+        case .missing: return "资料库文件缺失；请恢复原资料，不能自动新建空库。"
+        case .invalidStructure: return "资料库结构不完整；原文件已原位保留。"
+        case .backupFailed(let error): return "升级前安全备份失败，已暂停迁移和保存：\(error.localizedDescription)"
+        case .initializationNotAllowed: return "发现既有资料或备份线索，不能创建新资料库；请恢复原资料。"
+        case .changedSinceRead: return "磁盘资料库已改变，请重新读取后再保存；原文件未被覆盖。"
+        case .futureVersion(let version): return "资料库版本 \(version) 高于当前应用支持的版本，原文件保持不变。"
+        case .readRequired: return "资料库上次读取失败，请成功重新读取后再保存。"
+        }
+    }
 }
 
 // MARK: - LibraryRepository 协议
@@ -134,7 +159,7 @@ protocol LibraryRepository: AnyObject {
     /// 迁移链阈值序列：loaded 版本低于哪个阈值就触发对应迁移步骤。
     var migrationThresholds: [Int] { get }
 
-    /// 加载 library.json：旧目录迁移、解码、高版本拒绝、损坏隔离、迁移备份、迁移链调度。
+    /// 加载 library.json：旧目录迁移、解码、高版本拒绝、原位保留、迁移备份、迁移链调度。
     /// `migrate` 由调用方（PaperStore）提供，按阈值对内存中的资料库做归一化改写。
     func loadLibrary(migratingWith migrate: (inout PersistedLibrary, Int) -> Void) -> LibraryLoadResult
     /// 原子写 library.json。
@@ -146,8 +171,34 @@ protocol LibraryRepository: AnyObject {
 final class DiskLibraryRepository: LibraryRepository {
     let decoder: JSONDecoder
     let encoder: JSONEncoder
+    let applicationSupportURL: URL
+    let legacyApplicationSupportURL: URL
+    let migrationBackupsURL: URL
+    private let readData: (URL) throws -> Data
+    private let migrationBackup: ((Int) throws -> Void)?
+    private let snapshotEvidenceURLs: [URL]?
+    private var lastReadData: Data?
+    private var observedExistingLibrary = false
+    private var writeBlockedByLoadFailure = false
 
-    init() {
+    init(applicationSupportURL: URL = LibraryPaths.applicationSupport,
+         legacyApplicationSupportURL: URL = LibraryPaths.legacyApplicationSupport,
+         migrationBackupsURL: URL = LibraryPaths.migrationBackups,
+         readData: @escaping (URL) throws -> Data = { try GaoActionFileAccess.readPrivateData(at: $0, maximumBytes: 128 * 1_048_576) },
+         migrationBackup: ((Int) throws -> Void)? = nil,
+         snapshotEvidenceURLs: [URL]? = nil) {
+        self.applicationSupportURL = applicationSupportURL
+        self.legacyApplicationSupportURL = legacyApplicationSupportURL
+        self.migrationBackupsURL = migrationBackupsURL
+        self.readData = readData
+        self.migrationBackup = migrationBackup
+        if let snapshotEvidenceURLs { self.snapshotEvidenceURLs = snapshotEvidenceURLs }
+        else if ProcessInfo.processInfo.environment["GAO_RESEARCH_DATA_DIR"] != nil {
+            // An isolated data-root override must never query the user's real App Group.
+            self.snapshotEvidenceURLs = []
+        } else if let snapshot = ResearchWidgetSnapshot.fileURL {
+            self.snapshotEvidenceURLs = [snapshot, snapshot.deletingLastPathComponent().appendingPathComponent("statistics.last-good.json")]
+        } else { self.snapshotEvidenceURLs = nil }
         decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
         encoder = JSONEncoder()
@@ -155,29 +206,28 @@ final class DiskLibraryRepository: LibraryRepository {
         // 紧凑输出：不写美化空白与键排序。解码与格式无关，旧文件兼容。
     }
 
-    var libraryURL: URL { LibraryPaths.library }
-    var applicationSupportURL: URL { LibraryPaths.applicationSupport }
+    var libraryURL: URL { applicationSupportURL.appendingPathComponent("library.json") }
     var currentVersion: Int { LibrarySchema.currentVersion }
     /// V4.4 迁移链调度表，与原 PaperStore.load() 中的 if 链一一对应。
     var migrationThresholds: [Int] { [14, 18, 19, 20, 21, 22, 23, 24, 25, 29, 32] }
 
     func loadLibrary(migratingWith migrate: (inout PersistedLibrary, Int) -> Void) -> LibraryLoadResult {
+        writeBlockedByLoadFailure = true
         do {
             let migratedLegacyDirectory = try migrateLegacyStorageIfNeeded()
-            let data = try Data(contentsOf: libraryURL)
+            guard try pathExists(libraryURL) else { throw LibraryPersistenceError.missing }
+            observedExistingLibrary = true
+            let data = try readData(libraryURL)
+            let version = try Self.libraryVersion(in: data)
+            guard version <= currentVersion else { return .futureVersion(version) }
+            try Self.validateStructure(data, version: version)
             var library = try decoder.decode(PersistedLibrary.self, from: data)
-
-            guard library.version <= currentVersion else {
-                // 资料库来自更新版本：不隔离（文件本身完好，升级后仍须原位可读）。
-                return .futureVersion(library.version)
-            }
-
-            var migrationBackupError: Error?
             if library.version < currentVersion {
                 do {
-                    try createMigrationBackup(from: library.version)
+                    if let migrationBackup { try migrationBackup(library.version) }
+                    else { try createMigrationBackup(from: library.version) }
                 } catch {
-                    migrationBackupError = error
+                    throw LibraryPersistenceError.backupFailed(error)
                 }
             }
 
@@ -185,28 +235,35 @@ final class DiskLibraryRepository: LibraryRepository {
             for threshold in migrationThresholds where originalVersion < threshold {
                 migrate(&library, threshold)
             }
-
+            lastReadData = data
+            writeBlockedByLoadFailure = false
             return .loaded(
                 library: library,
                 originalVersion: originalVersion,
                 migratedLegacyDirectory: migratedLegacyDirectory,
-                migrationBackupError: migrationBackupError
+                migrationBackupError: nil
             )
-        } catch CocoaError.fileReadNoSuchFile {
-            return .empty
         } catch {
-            let quarantinedFileName = quarantineCorruptedLibraryFile()
-            return .corrupted(quarantinedFileName: quarantinedFileName, error: error)
+            if case LibraryPersistenceError.futureVersion(let version) = error { return .futureVersion(version) }
+            return .corrupted(quarantinedFileName: nil, error: error)
         }
     }
 
     func saveLibrary(_ library: PersistedLibrary) throws {
-        try FileManager.default.createDirectory(
-            at: applicationSupportURL,
-            withIntermediateDirectories: true
-        )
+        guard !writeBlockedByLoadFailure else { throw LibraryPersistenceError.readRequired }
+        guard library.version <= currentVersion else { throw LibraryPersistenceError.futureVersion(library.version) }
+        // Missing/unreadable/newer data is never an implicit request to create or replace a library.
+        guard try pathExists(libraryURL) else { throw LibraryPersistenceError.missing }
+        observedExistingLibrary = true
+        let original = try readData(libraryURL)
+        let version = try Self.libraryVersion(in: original)
+        guard version <= currentVersion else { throw LibraryPersistenceError.futureVersion(version) }
+        try Self.validateStructure(original, version: version)
+        _ = try decoder.decode(PersistedLibrary.self, from: original)
+        if let lastReadData, lastReadData != original { throw LibraryPersistenceError.changedSinceRead }
         let data = try encoder.encode(library)
-        try data.write(to: libraryURL, options: .atomic)
+        try GaoActionFileAccess.writePrivateData(data, to: libraryURL)
+        lastReadData = data
         // library.json 含投稿门户等敏感信息；原子写每次都会重建文件，
         // 因此每次写盘后都重新收紧为仅本人可读写（0600）。失败不阻断保存，仅记日志。
         do {
@@ -216,60 +273,163 @@ final class DiskLibraryRepository: LibraryRepository {
         }
     }
 
-    /// 将无法解码的资料库文件改名隔离保留，避免后续流程误读；改名失败不致命，只记录日志。
-    private func quarantineCorruptedLibraryFile() -> String? {
-        let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: libraryURL.path) else { return nil }
-        let name = "library.corrupted-\(LibraryPaths.migrationTimestampFormatter.string(from: Date())).json"
-        do {
-            try fileManager.moveItem(
-                at: libraryURL,
-                to: applicationSupportURL.appendingPathComponent(name)
-            )
-            return name
-        } catch {
-            NSLog("Failed to quarantine corrupted library file: %@", error.localizedDescription)
-            return nil
+    static func libraryVersion(in data: Data) throws -> Int {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LibraryPersistenceError.invalidStructure
         }
+        guard let value = object["version"] else { return 1 } // genuine versionless legacy files
+        guard let number = value as? NSNumber,
+              CFGetTypeID(number) != CFBooleanGetTypeID(), number.doubleValue.rounded() == number.doubleValue,
+              number.intValue >= 1 else { throw LibraryPersistenceError.invalidStructure }
+        return number.intValue
+    }
+
+    static func validateStructure(_ data: Data, version: Int) throws {
+        guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw LibraryPersistenceError.invalidStructure
+        }
+        let arrays = ["papers", "portals", "existingWorks", "projects", "certificates", "fundingRecords", "documentFolders", "managedDocuments", "trashItems"]
+        // Optional defaults keep old schemas readable; they must not turn {} or a truncated current library into zero records.
+        guard object["papers"] is [Any] else { throw LibraryPersistenceError.invalidStructure }
+        for key in arrays where object[key] != nil || version == LibrarySchema.currentVersion {
+            guard object[key] is [Any] else { throw LibraryPersistenceError.invalidStructure }
+        }
+        if version == LibrarySchema.currentVersion || object["rewardCity"] != nil {
+            guard object["rewardCity"] is [String: Any] else { throw LibraryPersistenceError.invalidStructure }
+        }
+    }
+
+    private func pathExists(_ url: URL) throws -> Bool {
+        var info = Darwin.stat()
+        if lstat(url.path, &info) == 0 { return true }
+        if errno == ENOENT { return false }
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+
+    var canInitializeNewLibrary: Bool {
+        guard !observedExistingLibrary, lastReadData == nil else { return false }
+        do {
+            guard try !pathExists(libraryURL) else { return false }
+            guard let snapshotEvidenceURLs else { return false }
+            for snapshot in snapshotEvidenceURLs where try pathExists(snapshot) { return false }
+            let automatic = applicationSupportURL.deletingLastPathComponent().appendingPathComponent("AcademicAchievementManager-AutomaticBackups")
+            for directory in [applicationSupportURL, legacyApplicationSupportURL, migrationBackupsURL, automatic] {
+                if try pathExists(directory) {
+                    let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
+                    guard values.isDirectory == true, values.isSymbolicLink != true,
+                          try FileManager.default.contentsOfDirectory(atPath: directory.path).isEmpty else { return false }
+                }
+            }
+            return true
+        } catch { return false }
+    }
+
+    /// Called only by an explicit UI confirmation. O_EXCL is the final no-overwrite gate.
+    func initializeNewLibraryAfterUserConfirmation() throws {
+        guard canInitializeNewLibrary else { throw LibraryPersistenceError.initializationNotAllowed }
+        try GaoActionFileAccess.ensurePrivateDirectory(at: applicationSupportURL)
+        guard canInitializeNewLibrary else { throw LibraryPersistenceError.initializationNotAllowed }
+        let data = try encoder.encode(PersistedLibrary(version: currentVersion))
+        let parent = try openStorageDirectory()
+        defer { close(parent) }
+        let fd = openat(parent, "library.json", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        var created = Darwin.stat()
+        guard fstat(fd, &created) == 0 else { close(fd); throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        var completed = false
+        defer {
+            close(fd)
+            if !completed {
+                var current = Darwin.stat()
+                if fstatat(parent, "library.json", &current, AT_SYMLINK_NOFOLLOW) == 0,
+                   current.st_dev == created.st_dev, current.st_ino == created.st_ino {
+                    unlinkat(parent, "library.json", 0)
+                }
+            }
+        }
+        try data.withUnsafeBytes { bytes in
+            var offset = 0
+            while offset < bytes.count {
+                let count = Darwin.write(fd, bytes.baseAddress!.advanced(by: offset), bytes.count - offset)
+                if count < 0 && errno == EINTR { continue }
+                guard count > 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+                offset += count
+            }
+        }
+        guard fsync(fd) == 0, fsync(parent) == 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        completed = true
+        observedExistingLibrary = true
+        lastReadData = data
+        writeBlockedByLoadFailure = false
+    }
+
+    private func openStorageDirectory() throws -> Int32 {
+        var components = GaoActionFileAccess.canonicalFileURL(applicationSupportURL).path.split(separator: "/").map(String.init)
+        if let first = components.first, ["tmp", "var", "etc"].contains(first) { components.insert("private", at: 0) }
+        var fd = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard fd >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+        do {
+            for component in components {
+                let next = openat(fd, component, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+                guard next >= 0 else { throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno)) }
+                close(fd); fd = next
+            }
+            var info = Darwin.stat()
+            guard fstat(fd, &info) == 0, info.st_uid == geteuid() else { throw LibraryPersistenceError.initializationNotAllowed }
+            return fd
+        } catch { close(fd); throw error }
     }
 
     @discardableResult
     private func migrateLegacyStorageIfNeeded() throws -> Bool {
         let fileManager = FileManager.default
         guard
-            !fileManager.fileExists(atPath: libraryURL.path),
-            fileManager.fileExists(atPath: LibraryPaths.legacyLibrary.path)
+            try !pathExists(libraryURL),
+            try pathExists(legacyApplicationSupportURL.appendingPathComponent("library.json"))
         else { return false }
+        guard !observedExistingLibrary else { throw LibraryPersistenceError.missing }
 
-        try fileManager.createDirectory(
-            at: applicationSupportURL,
-            withIntermediateDirectories: true
-        )
-        let legacyItems = try fileManager.contentsOfDirectory(
-            at: LibraryPaths.legacyApplicationSupport,
-            includingPropertiesForKeys: nil
-        )
-        for source in legacyItems {
-            let destination = applicationSupportURL.appendingPathComponent(source.lastPathComponent)
-            guard !fileManager.fileExists(atPath: destination.path) else { continue }
-            try fileManager.copyItem(at: source, to: destination)
+        // Never fill holes in an existing modern data directory with unrelated legacy contents.
+        if try pathExists(applicationSupportURL),
+           !(try fileManager.contentsOfDirectory(atPath: applicationSupportURL.path)).isEmpty {
+            throw LibraryPersistenceError.missing
         }
+        let legacyData = try readData(legacyApplicationSupportURL.appendingPathComponent("library.json"))
+        let legacyVersion = try Self.libraryVersion(in: legacyData)
+        guard legacyVersion <= currentVersion else { throw LibraryPersistenceError.futureVersion(legacyVersion) }
+        try Self.validateStructure(legacyData, version: legacyVersion)
+        _ = try decoder.decode(PersistedLibrary.self, from: legacyData)
+
+        let automatic = applicationSupportURL.deletingLastPathComponent().appendingPathComponent("AcademicAchievementManager-AutomaticBackups")
+        for backup in [migrationBackupsURL, automatic] where try pathExists(backup) {
+            guard try fileManager.contentsOfDirectory(atPath: backup.path).isEmpty else { throw LibraryPersistenceError.missing }
+        }
+        let staging = applicationSupportURL.deletingLastPathComponent().appendingPathComponent(".ResearchLegacyMigration-\(UUID().uuidString)")
+        defer { try? fileManager.removeItem(at: staging) }
+        try fileManager.createDirectory(at: staging.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fileManager.copyItem(at: legacyApplicationSupportURL, to: staging)
+        guard try readData(staging.appendingPathComponent("library.json")) == legacyData else { throw LibraryPersistenceError.changedSinceRead }
+        if try pathExists(applicationSupportURL) {
+            guard try fileManager.contentsOfDirectory(atPath: applicationSupportURL.path).isEmpty else { throw LibraryPersistenceError.missing }
+            try fileManager.removeItem(at: applicationSupportURL)
+        }
+        try fileManager.moveItem(at: staging, to: applicationSupportURL)
         return true
     }
 
     private func createMigrationBackup(from libraryVersion: Int) throws {
         let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: libraryURL.path) else { return }
+        guard try pathExists(libraryURL) else { throw LibraryPersistenceError.missing }
 
         try fileManager.createDirectory(
-            at: LibraryPaths.migrationBackups,
+            at: migrationBackupsURL,
             withIntermediateDirectories: true
         )
         let sourceRelease = LibrarySchema.releaseName(forLibraryVersion: libraryVersion)
         let folderName = "\(sourceRelease)-before-\(LibrarySchema.marketingVersion)-\(LibraryPaths.migrationTimestampFormatter.string(from: Date()))-\(UUID().uuidString.prefix(8))"
-        let destination = LibraryPaths.migrationBackups.appendingPathComponent(folderName, isDirectory: true)
+        let destination = migrationBackupsURL.appendingPathComponent(folderName, isDirectory: true)
         try fileManager.copyItem(at: applicationSupportURL, to: destination)
-        MigrationBackupHousekeeping.prune(keeping: 5)
+        if migrationBackupsURL == LibraryPaths.migrationBackups { MigrationBackupHousekeeping.prune(keeping: 5) }
     }
 }
 

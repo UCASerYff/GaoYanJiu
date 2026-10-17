@@ -78,6 +78,7 @@ struct ResearchProductIntegration {
         let repository = FaultingDiskRepository()
         // This seed is essential: absent library.json would legitimately trigger
         // the production legacy PaperSignal migration on the user's computer.
+        try repository.disk.initializeNewLibraryAfterUserConfirmation()
         try repository.disk.saveLibrary(PersistedLibrary(version: LibrarySchema.currentVersion))
         let store = PaperStore(repository: repository)
         try require(!store.libraryLoadFailed, "Isolated disk library did not load")
@@ -289,6 +290,15 @@ struct ResearchProductIntegration {
         let repeated = try store.documentLibrary.receiveExchangeResultForReview(at: package)
         let replay = try await store.documentLibrary.applyExchangeResult(repeated, userApproved: true)
         try require(replay.replayed && replay.documentIDs == outcome.documentIDs && store.managedDocuments.count == 1, "Applied provider result repeated side effects")
+        let refreshedPackage = try providerResult(request: request, action: .chooseFiles, references: [reference], provenance: ["workflowState": .string("selected")])
+        let refreshed = try store.documentLibrary.receiveExchangeResultForReview(at: refreshedPackage)
+        try require(refreshed.id != review.id, "Refreshed provider result must have a new envelope ID")
+        let refreshedOutcome = try await store.documentLibrary.applyExchangeResult(refreshed, userApproved: true)
+        try require(refreshedOutcome.replayed && refreshedOutcome.documentIDs == outcome.documentIDs && store.managedDocuments.count == 1,
+                    "Refreshed chooser envelope duplicated the same business import")
+        let receipts = try client.loadSession(request.requestID).appliedResults
+        try require(receipts?[review.id] != nil && receipts?[refreshed.id] != nil && receipts?[review.id]?.receiptID == receipts?[refreshed.id]?.receiptID,
+                    "Each refreshed envelope needs its own receipt linked to the same stable business job")
         _ = try durable(store)
     }
     static func selectionTargetGone() async throws {
@@ -309,6 +319,75 @@ struct ResearchProductIntegration {
         try require(received.appliedResults?[review.result.package.manifest.requestID] == nil, "Invalid target falsely marked result applied")
         let outcome = try await store.documentLibrary.applyExchangeResult(review, userApproved: true, targetFolderID: other.id)
         try require(outcome.importedCount == 1 && store.managedDocuments.first?.folderID == other.id, "Explicit target review did not route correctly")
+        _ = try durable(store)
+    }
+    static func selectionUnboundReference() async throws {
+        let (store, _) = try makeStore(); let target = try folder(store)
+        let client = store.documentLibrary.exchangeClient
+        let request = try client.prepareFileSelection(targetFolderID: target.id)
+        let selected = try source("explicit-selection.txt", text: "first explicitly selected contents")
+        let reference = GaoActionReference(kind: "file", fileURL: selected.absoluteString,
+                                           displayName: selected.lastPathComponent, declaredIdentity: .init())
+        let firstPackage = try providerResult(request: request, action: .chooseFiles, references: [reference], provenance: ["workflowState": .string("selected")])
+        let firstReview = try store.documentLibrary.receiveExchangeResultForReview(at: firstPackage)
+        let originalSelectedSHA = try GaoActionFileAccess.fingerprint(at: selected).sha256
+        store.documentLibrary.importFailureInjector = { if $0 == .beforeIndex { throw ResearchImportJournal.SimulatedCrash() } }
+        try await rejects("Unbound selection must stop before receipt at the injected interruption") {
+            _ = try await store.documentLibrary.applyExchangeResult(firstReview, userApproved: true, reselectedReferences: [reference.id: selected])
+        }
+        let pending = try client.loadSession(request.requestID)
+        try require(pending.resultIntents?[firstReview.id] != nil && pending.appliedResults?[firstReview.id] == nil,
+                    "Pending intent must be durable without claiming business completion")
+        try GaoActionFileAccess.writePrivateData(Data("second explicitly selected contents".utf8), to: selected)
+        store.documentLibrary.importFailureInjector = nil; store.documentLibrary.importJournal = nil
+        let first = try await store.documentLibrary.applyExchangeResult(firstReview, userApproved: true, reselectedReferences: [reference.id: selected])
+        let firstID = try unwrap(first.documentIDs.first, "Unbound first selection did not import")
+        let firstRecord = try unwrap(store.managedDocuments.first(where: { $0.id == firstID }), "Missing first selection record")
+        let firstSHA = try GaoActionFileAccess.fingerprint(at: store.managedDocumentURL(firstRecord)).sha256
+        try require(firstSHA == originalSelectedSHA, "Same-envelope recovery rebound to changed referenced bytes instead of its frozen stage")
+        let changedSHA = try GaoActionFileAccess.fingerprint(at: selected).sha256
+        try require(changedSHA != firstSHA, "Selection fixture contents did not change")
+        let secondPackage = try providerResult(request: request, action: .chooseFiles, references: [reference], provenance: ["workflowState": .string("selected")])
+        let secondReview = try store.documentLibrary.receiveExchangeResultForReview(at: secondPackage)
+        store.documentLibrary.importFailureInjector = { if $0 == .afterStaging { throw ResearchImportJournal.SimulatedCrash() } }
+        store.documentLibrary.importJournal = nil
+        try await rejects("Missing-journal fixture must first stop after owned staging") {
+            _ = try await store.documentLibrary.applyExchangeResult(secondReview, userApproved: true, reselectedReferences: [reference.id: selected])
+        }
+        let secondIntent = try unwrap(client.loadSession(request.requestID).resultIntents?[secondReview.id], "Second pending intent missing")
+        // Isolated simulation of the write-ahead intent/journal gap. No record
+        // for this operation has been committed; retained staging is untouched.
+        for directory in ["ImportJobs", "ProcessedRequests"] {
+            let metadata = ResearchExchangePaths.root.appendingPathComponent("Metadata/" + directory + "/" + secondIntent.jobID.lowercased() + ".json")
+            try FileManager.default.removeItem(at: metadata)
+        }
+        try GaoActionFileAccess.writePrivateData(Data("third contents after the intent was bound".utf8), to: selected)
+        store.documentLibrary.importFailureInjector = nil; store.documentLibrary.importJournal = nil
+        do {
+            _ = try await store.documentLibrary.applyExchangeResult(secondReview, userApproved: true, reselectedReferences: [reference.id: selected])
+            throw Failure(description: "Missing journal rebound the same envelope to a different actual intent")
+        } catch ResearchDocumentImportError.resultIntentConflict { }
+        let conflicted = try client.loadSession(request.requestID)
+        try require(conflicted.resultIntents?[secondReview.id] == secondIntent && conflicted.appliedResults?[secondReview.id] == nil && store.managedDocuments.count == 1,
+                    "Intent conflict changed its association, applied receipt or records")
+        try GaoActionFileAccess.writePrivateData(Data("second explicitly selected contents".utf8), to: selected)
+        let second = try await store.documentLibrary.applyExchangeResult(secondReview, userApproved: true, reselectedReferences: [reference.id: selected])
+        try require(second.importedCount == 1 && second.documentIDs != first.documentIDs && store.managedDocuments.count == 2,
+                    "New envelope ignored actual reselected bytes and replayed an earlier unbound reference")
+        let secondRecord = try unwrap(store.managedDocuments.first(where: { second.documentIDs.contains($0.id) }), "Missing actual reselected contents")
+        try require(try GaoActionFileAccess.fingerprint(at: store.managedDocumentURL(secondRecord)).sha256 == changedSHA,
+                    "Selection semantic binding did not import the verified current bytes")
+        try require(try GaoActionFileAccess.fingerprint(at: store.managedDocumentURL(firstRecord)).sha256 == firstSHA,
+                    "Reselecting changed bytes modified the previous managed copy")
+        let replayPackage = try providerResult(request: request, action: .chooseFiles, references: [reference], provenance: ["workflowState": .string("selected")])
+        let replayReview = try store.documentLibrary.receiveExchangeResultForReview(at: replayPackage)
+        let replay = try await store.documentLibrary.applyExchangeResult(replayReview, userApproved: true, reselectedReferences: [reference.id: selected])
+        try require(replay.replayed && replay.documentIDs == second.documentIDs && store.managedDocuments.count == 2,
+                    "The same independently verified reference bytes did not reuse the correct semantic job")
+        let receipts = try client.loadSession(request.requestID).appliedResults
+        try require(receipts?[firstReview.id]?.receiptID != receipts?[secondReview.id]?.receiptID &&
+                    receipts?[secondReview.id]?.receiptID == receipts?[replayReview.id]?.receiptID,
+                    "Selection business receipts did not distinguish actual verified byte bindings")
         _ = try durable(store)
     }
     static func fixturePDF(_ texts: [String]) throws -> Data {
@@ -335,7 +414,7 @@ struct ResearchProductIntegration {
         try require(PDFDocument(data: data)?.pageCount == texts.count, "Owned PDF fixture page count invalid")
         return data
     }
-    static func ocrManagedResult(includeJSON: Bool = false) async throws {
+    static func ocrManagedResult(includeJSON: Bool = false, legacyJob: Bool = false) async throws {
         let (store, _) = try makeStore(); let target = try folder(store)
         // A self-created valid tiny image; this test never captures the screen or uses personal files.
         let image = try unwrap(NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 2, pixelsHigh: 2,
@@ -412,6 +491,33 @@ struct ResearchProductIntegration {
         try require(try GaoActionFileAccess.fingerprint(at: originalURL).sha256 == originalSHA, "OCR changed original image")
         let durableSession = try client.loadSession(request.requestID)
         try require(durableSession.appliedResults?[review.result.package.manifest.requestID]?.importedDocumentIDs == outcome.documentIDs, "OCR business receipt missing")
+        if legacyJob {
+            // Reconstruct only this isolated fixture's V4.03 storage naming:
+            // before semantic jobs, the result envelope UUID was the job UUID.
+            // Payload, immutable plans and provenance stay byte-for-byte intact.
+            let receipt = try unwrap(durableSession.appliedResults?[review.id], "Missing fixture receipt")
+            let oldID = try unwrap(UUID(uuidString: receipt.receiptID), "Invalid fixture business ID")
+            let legacyID = try unwrap(UUID(uuidString: review.id), "Invalid fixture envelope ID")
+            try require(oldID != legacyID, "Fixture must first create a semantic job")
+            for directory in ["ImportJobs", "ProcessedRequests"] {
+                let parent = ResearchExchangePaths.root.appendingPathComponent("Metadata/" + directory)
+                let from = parent.appendingPathComponent(oldID.uuidString.lowercased() + ".json")
+                let to = parent.appendingPathComponent(legacyID.uuidString.lowercased() + ".json")
+                var record = try JSONSerialization.jsonObject(with: GaoActionFileAccess.readPrivateData(at: from, maximumBytes: 64 * 1_048_576)) as! [String: Any]
+                record["requestID"] = legacyID.uuidString
+                try GaoActionFileAccess.writePrivateData(JSONSerialization.data(withJSONObject: record), to: to)
+                try FileManager.default.removeItem(at: from)
+            }
+            let sessionURL = ResearchExchangePaths.root.appendingPathComponent("Sessions/" + request.requestID + ".json")
+            var value = try JSONSerialization.jsonObject(with: GaoActionFileAccess.readPrivateData(at: sessionURL)) as! [String: Any]
+            var receipts = value["appliedResults"] as! [String: [String: Any]]
+            // Losing only a business receipt must still resume the exact old
+            // envelope UUID from its frozen, already completed journal.
+            receipts.removeValue(forKey: review.id)
+            value["appliedResults"] = receipts
+            value.removeValue(forKey: "resultIntents")
+            try GaoActionFileAccess.writePrivateData(JSONSerialization.data(withJSONObject: value), to: sessionURL)
+        }
         let initialText = Dictionary(uniqueKeysWithValues: store.managedDocuments.map { ($0.id, $0.contentText) })
         try await store.documentLibrary.indexImportedDocuments(documentIDs: outcome.documentIDs)
         try await store.documentLibrary.indexImportedDocuments(documentIDs: outcome.documentIDs)
@@ -420,6 +526,50 @@ struct ResearchProductIntegration {
         let repeated = try store.documentLibrary.receiveExchangeResultForReview(at: package)
         let replay = try await store.documentLibrary.applyExchangeResult(repeated, userApproved: true)
         try require(replay.replayed && replay.documentIDs == outcome.documentIDs && store.managedDocuments.count == outputFiles.count + 1, "Repeated OCR result created duplicate derived attachments")
+        if legacyJob {
+            let restoredReceipt = try unwrap(client.loadSession(request.requestID).appliedResults?[review.id], "Exact legacy recovery did not repair its receipt")
+            try require(restoredReceipt.receiptID == UUID(uuidString: review.id)?.uuidString, "Legacy exact-envelope recovery changed its frozen job")
+        }
+        // GaoJieTu sendResult refreshes requestID/TTL/nonce while preserving the
+        // original inReplyTo, output IDs, bytes and provenance. This is a new
+        // transport receipt, not a second approved business operation.
+        let refreshedPackage = try providerResult(request: request, action: .ocrFiles, files: outputFiles, status: "partial", provenance: provenance)
+        let refreshed = try store.documentLibrary.receiveExchangeResultForReview(at: refreshedPackage)
+        try require(refreshed.id != review.id && !refreshed.result.duplicate, "Producer-style resend must use a new envelope")
+        if legacyJob {
+            let journal = try store.documentLibrary.transactionJournal()
+            let originalJobs = Set(try journal.recentJobs(limit: Int.max).map(\.requestID))
+            do {
+                _ = try await store.documentLibrary.applyExchangeResult(refreshed, userApproved: true)
+                throw Failure(description: "New envelope reused an old job without full legacy intent evidence")
+            } catch ResearchDocumentImportError.legacyResultReviewRequired { }
+            // failureReason was never retained in the old Page sidecar. Even
+            // matching persisted page status/text cannot prove equal intent.
+            var changedSource = sourceRecord
+            changedSource["pages"] = .array([.object(["pageNumber": .number(1), "status": .string("completed"), "elapsedSeconds": .number(0.1), "lineCount": .number(1), "failureReason": .null]),
+                                             .object(["pageNumber": .number(2), "status": .string("failed"), "elapsedSeconds": .number(0.1), "lineCount": .number(0), "failureReason": .string("changed-unpersisted-evidence")])])
+            var changedProvenance = provenance; changedProvenance["sources"] = .array([.object(changedSource)])
+            let changedPackage = try providerResult(request: request, action: .ocrFiles, files: outputFiles, status: "partial", provenance: changedProvenance)
+            let changed = try store.documentLibrary.receiveExchangeResultForReview(at: changedPackage)
+            do {
+                _ = try await store.documentLibrary.applyExchangeResult(changed, userApproved: true)
+                throw Failure(description: "Changed legacy page evidence was silently treated as the old business intent")
+            } catch ResearchDocumentImportError.legacyResultReviewRequired { }
+            let receipts = try client.loadSession(request.requestID).appliedResults
+            try require(receipts?[review.id] != nil && receipts?[refreshed.id] == nil && receipts?[changed.id] == nil,
+                        "Legacy conflict must remain received-only, without fabricated applied receipts")
+            try require(Set(try journal.recentJobs(limit: Int.max).map(\.requestID)) == originalJobs && store.managedDocuments.count == outputFiles.count + 1,
+                        "Legacy conflict created jobs or duplicate derivatives")
+            try require(store.documentLibrary.pendingExchangeResultReview?.id == changed.id,
+                        "Legacy conflict disappeared from explicit review")
+        } else {
+            let refreshedOutcome = try await store.documentLibrary.applyExchangeResult(refreshed, userApproved: true)
+            try require(refreshedOutcome.replayed && refreshedOutcome.documentIDs == outcome.documentIDs && store.managedDocuments.count == outputFiles.count + 1,
+                        "Refreshed OCR envelope duplicated managed derivatives")
+            let receipts = try client.loadSession(request.requestID).appliedResults
+            try require(receipts?[review.id] != nil && receipts?[refreshed.id] != nil && receipts?[review.id]?.receiptID == receipts?[refreshed.id]?.receiptID,
+                        "OCR refreshed envelopes must have independent receipts for one stable business job")
+        }
         _ = try durable(store)
     }
     static func main() async {
@@ -443,8 +593,10 @@ struct ResearchProductIntegration {
             case "version-cas": try await versionCAS()
             case "selection-result": try await selectionResult()
             case "selection-target-gone": try await selectionTargetGone()
+            case "selection-unbound-reference": try await selectionUnboundReference()
             case "ocr-managed-result": try await ocrManagedResult()
             case "ocr-json-managed-result": try await ocrManagedResult(includeJSON: true)
+            case "ocr-legacy-envelope-retry": try await ocrManagedResult(includeJSON: true, legacyJob: true)
             case "attachment-recovery", "database-recovery", "index-recovery": try await recovery(name)
             default: throw Failure(description: "Unknown targeted product test")
             }

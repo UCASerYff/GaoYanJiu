@@ -3,7 +3,31 @@ import AppKit
 import UserNotifications
 import Research
 
-@main struct StandaloneApp: App {
+/// Maintenance commands run before SwiftUI creates the app or its data store.
+/// They read the existing library and never create a replacement library.
+@main enum StandaloneEntry {
+    @MainActor static func main() {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments == ["--widget-diagnostics"] {
+            FileHandle.standardOutput.write(ResearchWidgetMaintenance.diagnostics())
+            FileHandle.standardOutput.write(Data("\n".utf8))
+            return
+        }
+        if arguments == ["--refresh-widget-snapshot"] {
+            do {
+                FileHandle.standardOutput.write(try ResearchWidgetMaintenance.refreshFromDisk())
+                FileHandle.standardOutput.write(Data("\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data("Widget publication failed; the existing library and last valid snapshot are preserved.\n".utf8))
+                exit(1)
+            }
+            return
+        }
+        StandaloneApp.main()
+    }
+}
+
+struct StandaloneApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var route: URL?
     @State private var revision = 0

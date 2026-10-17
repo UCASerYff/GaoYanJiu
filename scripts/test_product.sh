@@ -50,7 +50,7 @@ if nm -u "$TEST_BUNDLE/Contents/MacOS/ResearchProductIntegration" | /usr/bin/c++
     /usr/bin/grep -E 'OBJC_CLASS_.*NSUserDefaults|Foundation.*UserDefaults'; then
     echo 'Unsafe product test binary: references real UserDefaults'; exit 1
 fi
-CASES=(fresh-import new-attachment new-version repeated-request target-gone version-cas attachment-recovery database-recovery index-recovery selection-result selection-target-gone ocr-managed-result ocr-json-managed-result)
+CASES=(fresh-import new-attachment new-version repeated-request target-gone version-cas attachment-recovery database-recovery index-recovery selection-result selection-target-gone selection-unbound-reference ocr-managed-result ocr-json-managed-result ocr-legacy-envelope-retry)
 if (( $# )); then CASES=("$@"); fi
 for case_name in $CASES; do
     print -- "RUN Product $case_name"

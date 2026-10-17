@@ -30,6 +30,11 @@ final class PaperStore: ObservableObject {
     @Published var backupMessage = ""
     /// 资料库加载失败（文件损坏或来自更新版本）时为 true；期间禁止一切写盘，避免用空库覆盖原始数据。
     @Published private(set) var libraryLoadFailed = false
+    @Published private(set) var libraryLoadFailureReason: LibraryLoadFailureReason?
+    @Published private(set) var libraryCanInitializeNew = false
+    /// Source mtime and successful read time have different meanings; failures retain both.
+    @Published private(set) var libraryLastModifiedAt: Date?
+    @Published private(set) var libraryLastReadAt: Date?
     /// 被隔离的损坏资料库文件名（位于 Application Support 目录内），供 UI 展示；未隔离时为 nil。
     @Published private(set) var quarantinedLibraryFileName: String?
     /// 连续保存失败时升级的告警文案；保存成功后重置为 nil。
@@ -102,7 +107,6 @@ final class PaperStore: ObservableObject {
             .store(in: &cancellables)
 
         load()
-        if !libraryLoadFailed { exportWidgetSnapshot() }
         applyTestingCoinGrantIfRequested()
         purgeExpiredTrash()
         // 每日自动备份挪到启动完成后后台触发，不阻塞首屏（BackupService 内部逻辑不变）。
@@ -870,14 +874,11 @@ final class PaperStore: ObservableObject {
     // MARK: - 加载与保存（委托 LibraryRepository）
 
     func load() {
-        libraryLoadFailed = false
-        quarantinedLibraryFileName = nil
-        consecutiveSaveFailures = 0
-        persistenceAlert = nil
         switch repository.loadLibrary(migratingWith: Self.applyLibraryMigration) {
         case let .loaded(library, originalVersion, migratedLegacyDirectory, migrationBackupError):
             if let migrationBackupError {
-                lastError = "旧版数据可以读取，但升级前安全备份创建失败：\(migrationBackupError.localizedDescription)"
+                recordLibraryLoadFailure(.migrationBackupFailed, error: migrationBackupError)
+                return
             }
             papers = legacySortedPapers(library.papers)
             portals = library.portals
@@ -895,47 +896,78 @@ final class PaperStore: ObservableObject {
             normalizeDocumentFolderOrdering()
             normalizeManagedDocumentOrdering()
 
+            libraryLastModifiedAt = (try? repository.libraryURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? libraryLastModifiedAt
+            libraryLastReadAt = Date()
+            libraryLoadFailed = false
+            libraryLoadFailureReason = nil
+            libraryCanInitializeNew = false
+            quarantinedLibraryFileName = nil
+            consecutiveSaveFailures = 0
+            persistenceAlert = nil
+            lastError = nil
+
             if migratedLegacyDirectory || originalVersion < Self.currentLibraryVersion {
                 save()
                 refreshMessage = migratedLegacyDirectory
                     ? "已自动迁移旧版资料库及附件"
                     : "\(LibrarySchema.releaseName(forLibraryVersion: originalVersion)) 数据及附件已迁移到 \(Self.marketingVersion)"
+            } else {
+                // Retry, backup restoration and initial reads all publish only after
+                // a complete successful load. Migration save() publishes on success.
+                exportWidgetSnapshot(reason: .libraryReloaded)
             }
         case .empty:
-            papers = []
-            portals = []
-            existingWorks = []
-            projects = []
-            certificates = []
-            fundingRecords = []
-            documentFolders = []
-            managedDocuments = []
-            trashItems = []
-            rewardCity = RewardCityState()
+            recordLibraryLoadFailure(.missing, error: LibraryPersistenceError.missing)
         case .futureVersion(let version):
             // 资料库来自更新版本：不隔离（文件本身完好，升级后仍须原位可读），
             // 只阻断写盘并提示升级。
             libraryLoadFailed = true
+            libraryLoadFailureReason = .futureVersion
+            libraryCanInitializeNew = false
             lastError = AppLocalization.language == .english
                 ? "The library was created by a newer version of the app (data version \(version)) and cannot be read by this version. Please update the app; your data on disk has not been modified."
                 : "资料库由更新版本的搞研究创建（数据版本 \(version)），当前版本无法读取。请升级 App 后再打开；磁盘上的数据未被改动。"
         case .corrupted(let quarantinedFileName, let error):
             quarantinedLibraryFileName = quarantinedFileName
-            libraryLoadFailed = true
-            let english = AppLocalization.language == .english
-            var detail = english
-                ? "The local library could not be read: \(error.localizedDescription)."
-                : "本地资料库读取失败：\(error.localizedDescription)。"
-            if let quarantinedFileName {
-                detail += english
-                    ? " The unreadable file has been set aside as “\(quarantinedFileName)” and will not be overwritten."
-                    : "原文件已隔离为“\(quarantinedFileName)”，不会被覆盖。"
+            var reason: LibraryLoadFailureReason = .unreadable
+            if let failure = error as? LibraryPersistenceError {
+                switch failure {
+                case .missing: reason = .missing
+                case .invalidStructure: reason = .corrupted
+                case .backupFailed: reason = .migrationBackupFailed
+                default: break
+                }
+            } else if error is DecodingError || (error as NSError).code == 3840 {
+                reason = .corrupted
             }
-            detail += english
-                ? " All saving is paused to protect your data; you can restore a daily automatic backup via the “Backup & Restore” menu."
-                : "为保护数据已暂停所有写入，可通过工具栏「备份与恢复」从每日自动备份恢复。"
-            lastError = detail
+            recordLibraryLoadFailure(reason, error: error)
         }
+    }
+
+    private func recordLibraryLoadFailure(_ reason: LibraryLoadFailureReason, error: Error) {
+        libraryLoadFailed = true
+        libraryLoadFailureReason = reason
+        libraryCanInitializeNew = reason == .missing && libraryLastReadAt == nil
+            && (repository as? DiskLibraryRepository)?.canInitializeNewLibrary == true
+        lastError = AppLocalization.language == .english
+            ? "The library could not be read: \(error.localizedDescription). Saving is paused. Existing files and the last valid widget snapshot are preserved. Restore your library, then retry reading."
+            : "资料库读取失败：\(error.localizedDescription)。已暂停写入，原文件及最后有效的小组件内容保持不变。请恢复资料后重新读取。"
+    }
+
+    /// The UI must obtain an explicit confirmation before calling this API.
+    func initializeNewLibraryAfterUserConfirmation() throws {
+        var initialCity = RewardCityState()
+        initialCity.lastCoinCollectionAt = rewardCity.lastCoinCollectionAt
+        guard libraryCanInitializeNew, libraryLastReadAt == nil,
+              papers.isEmpty, portals.isEmpty, existingWorks.isEmpty, projects.isEmpty,
+              certificates.isEmpty, fundingRecords.isEmpty, documentFolders.isEmpty,
+              managedDocuments.isEmpty, trashItems.isEmpty, rewardCity == initialCity,
+              let disk = repository as? DiskLibraryRepository else {
+            throw LibraryPersistenceError.initializationNotAllowed
+        }
+        try disk.initializeNewLibraryAfterUserConfirmation()
+        load()
+        guard !libraryLoadFailed else { throw LibraryPersistenceError.initializationNotAllowed }
     }
 
     /// 迁移链步骤分发：阈值序列由 LibraryRepository 调度，各步骤本体分别归属
@@ -1051,6 +1083,7 @@ final class PaperStore: ObservableObject {
                 trashItems: trashItems,
                 rewardCity: rewardCity
         ))
+        libraryLastModifiedAt = (try? repository.libraryURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? libraryLastModifiedAt
         exportWidgetSnapshot()
     }
 

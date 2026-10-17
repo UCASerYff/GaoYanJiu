@@ -4,22 +4,29 @@ import WidgetKit
 struct StatisticsEntry: TimelineEntry {
     let date: Date
     let snapshot: ResearchWidgetSnapshot?
+    let readAt: Date?
+    let readSource: String
+    init(date: Date, snapshot: ResearchWidgetSnapshot?, readAt: Date? = nil, readSource: String = "unavailable") {
+        self.date = date; self.snapshot = snapshot; self.readAt = readAt; self.readSource = readSource
+    }
 }
 struct StatisticsProvider: TimelineProvider {
     func placeholder(in context: Context) -> StatisticsEntry { .init(date:Date(),snapshot:nil) }
-    func getSnapshot(in context: Context, completion: @escaping (StatisticsEntry) -> Void) { completion(read()) }
+    func getSnapshot(in context: Context, completion: @escaping (StatisticsEntry) -> Void) { completion(read(requestKind: "snapshot")) }
     func getTimeline(in context: Context, completion: @escaping (Timeline<StatisticsEntry>) -> Void) {
-        let entry = read()
+        let entry = read(requestKind: "timeline")
         // Daily entries keep elapsed days advancing while the main app is closed.
-        let entries = [entry] + (1...7).compactMap { day -> StatisticsEntry? in
-            guard let date = Calendar.current.date(byAdding:.day,value:day,to:Calendar.current.startOfDay(for:entry.date)) else { return nil }
-            return .init(date:date,snapshot:entry.snapshot)
+        let entries = ResearchWidgetSchedule.entryDates(from: entry.date).map { date in
+            StatisticsEntry(date: date, snapshot: entry.snapshot, readAt: entry.readAt, readSource: entry.readSource)
         }
-        completion(Timeline(entries:entries,policy:.after(Date().addingTimeInterval(3600))))
+        completion(Timeline(entries: entries, policy: .after(ResearchWidgetSchedule.nextRefresh(after: entry.date))))
     }
-    private func read() -> StatisticsEntry {
-        let value = ResearchWidgetSnapshot.fileURL.flatMap { try? Data(contentsOf:$0) }.flatMap { try? JSONDecoder().decode(ResearchWidgetSnapshot.self,from:$0) }
-        return .init(date:Date(),snapshot:value)
+    private func read(requestKind: String) -> StatisticsEntry {
+        let value = ResearchWidgetStorage.read(at: ResearchWidgetSnapshot.fileURL, recordStatus: true, requestKind: requestKind)
+        NSLog("Research widget read: request=%@ source=%@ schema=%d revision=%@ generatedAt=%@ readAt=%@", requestKind, value.source,
+              value.snapshot?.schemaVersion ?? 0, value.snapshot?.revision ?? "legacy-or-unavailable",
+              value.snapshot?.generatedAt.description ?? "unknown", value.readAt.description)
+        return .init(date: value.readAt, snapshot: value.snapshot, readAt: value.snapshot == nil ? nil : value.readAt, readSource: value.source)
     }
 }
 // Each visible row receives its share of the available height. The minimum
@@ -73,13 +80,20 @@ struct StatisticsContentView: View {
                         else { achievements(snapshot, height: bodyHeight) }
                     }.frame(height: bodyHeight)
                     HStack(spacing: 3) {
-                        Text(snapshot.english ? "Updated" : "更新")
-                        Text(snapshot.updatedAt, style: .date)
+                        Text(statisticsDateLabel(snapshot))
+                        Text(snapshot.dataChangedAt, style: .date)
                         Spacer(minLength: 2)
+                        if let readAt = entry.readAt {
+                            Text(entry.readSource == "last-good" ? (snapshot.english ? "Saved read" : "缓存读取") : (snapshot.english ? "Read" : "读取"))
+                            Text(readAt, format: .dateTime.month(.twoDigits).day(.twoDigits).hour().minute())
+                        }
                         if submissions, layout.count < snapshot.papers.count {
                             Text(snapshot.english ? "Newest \(layout.count)/\(snapshot.papers.count)" : "最新 \(layout.count)/\(snapshot.papers.count) 篇")
                         }
-                    }.font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1).frame(height: 10)
+                    }.font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1).minimumScaleFactor(0.65).frame(height: 10)
+                        .help(snapshot.english
+                              ? "Statistics time is separate from snapshot generation and widget reading. Historical publication time does not prove the last business edit."
+                              : "统计内容时间、快照生成和组件读取分别记录；历史发布时间不等于业务最后编辑时间。")
                 }
             }
         } else {
@@ -89,6 +103,12 @@ struct StatisticsContentView: View {
                     .font(.caption).foregroundStyle(.secondary)
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         }
+    }
+
+    private func statisticsDateLabel(_ snapshot: ResearchWidgetSnapshot) -> String {
+        if snapshot.dataChangedAtBasis == "legacy-publication" { return snapshot.english ? "Published" : "统计发布" }
+        if snapshot.dataChangedAtBasis == "source-write-baseline" { return snapshot.english ? "Baseline" : "统计基准" }
+        return snapshot.english ? "Stats" : "统计更新"
     }
 
     private func papers(_ snapshot: ResearchWidgetSnapshot, layout: WidgetRowLayout) -> some View {

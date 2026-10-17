@@ -1,5 +1,6 @@
 import SwiftUI
 import Foundation
+import AppKit
 
 public final class ResearchBundleMarker: NSObject {}
 enum ResearchBundle {
@@ -11,12 +12,6 @@ enum ResearchBundle {
     static let store = PaperStore()
     static let settings = AppSettings()
     static let menuState = MenuCommandState()
-    static var exportedInitialSnapshot = false
-    static func exportInitialSnapshotIfNeeded() {
-        guard !exportedInitialSnapshot else { return }
-        exportedInitialSnapshot = true
-        store.exportWidgetSnapshot()
-    }
 }
 
 public struct ResearchModuleView: View {
@@ -36,8 +31,22 @@ public struct ResearchModuleView: View {
             .environmentObject(settings)
             .environmentObject(menuState)
             .environment(\.locale, settings.language.locale)
-            .onAppear { ResearchRuntime.exportInitialSnapshotIfNeeded() }
             .onAppear(perform: handleRoute)
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+                store.exportWidgetSnapshot(reason: .activation)
+            }
+            .onReceive(NSWorkspace.shared.notificationCenter.publisher(for: NSWorkspace.didWakeNotification)) { _ in
+                store.exportWidgetSnapshot(reason: .wake)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .NSSystemTimeZoneDidChange)) { _ in
+                store.exportWidgetSnapshot(reason: .calendarChanged)
+            }
+            .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
+                store.exportWidgetSnapshot(reason: .calendarChanged)
+            }
+            .onChange(of: settings.language) { _, _ in
+                store.exportWidgetSnapshot(reason: .languageChanged)
+            }
             .onChange(of: routeRevision) { _, _ in handleRoute() }
             .sheet(item: $store.pendingPackageReview) { context in
                 ActionPackageReviewSheet(context: context)

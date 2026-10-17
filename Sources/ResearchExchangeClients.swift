@@ -63,6 +63,14 @@ struct ResearchExchangeSession: Codable {
     var appliedResults: [String: ResearchResultApplicationReceipt]? = nil
     var resultStatuses: [String: String]? = nil
     var selectionIntentVersion: Int? = nil
+    // A pending intent binds a verified envelope to one durable job. It is not
+    // an applied receipt and never implies that records have been committed.
+    var resultIntents: [String: ResearchResultIntentBinding]? = nil
+}
+
+struct ResearchResultIntentBinding: Codable, Equatable {
+    var manifestSHA256: String
+    var jobID: String
 }
 
 struct ResearchResultApplicationReceipt: Codable, Equatable {
@@ -311,14 +319,25 @@ final class ResearchExchangeClient {
         case .openDocument:
             guard manifest.items.isEmpty, manifest.references.isEmpty else { throw ResearchExchangeClientError.invalidEditResult }
             let reported = manifest.provenance?["workflowState"]?.researchString
-            guard ["opened", "cancelled", "failed", "unsupported", "awaitingUser"].contains(reported ?? ""),
-                  manifest.status != "completed" || reported == "opened" else { throw ResearchExchangeClientError.invalidEditResult }
-            workflow = reported ?? "failed"
+            let allowed: [String: Set<String>] = ["completed": ["opened"], "partial": ["partial", "opened"],
+                                                  "pending": ["pending", "awaitingUser"], "cancelled": ["cancelled"],
+                                                  "failed": ["failed"], "unsupported": ["unsupported"]]
+            let status = manifest.status ?? "failed"
+            guard manifest.provenance?["saved"]?.researchBool != true,
+                  allowed[status]?.contains(reported ?? status) == true else { throw ResearchExchangeClientError.invalidEditResult }
+            if let value = manifest.provenance?["openedItemIDs"] {
+                guard let opened = value.researchStrings, Set(opened).count == opened.count,
+                      Set(opened).isSubset(of: Set(session.sources.map(\.itemID))) else { throw ResearchExchangeClientError.resultMismatch }
+            }
+            workflow = reported ?? status
         }
         let duplicate = session.resultIDs.contains(manifest.requestID)
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         let manifestSHA = SHA256.hash(data: try encoder.encode(manifest)).map { String(format: "%02x", $0) }.joined()
         if let previous = session.resultManifestSHA256?[manifest.requestID], previous != manifestSHA {
+            throw ResearchExchangeClientError.resultMismatch
+        }
+        if let intent = session.resultIntents?[manifest.requestID], intent.manifestSHA256 != manifestSHA {
             throw ResearchExchangeClientError.resultMismatch
         }
         if !duplicate || session.resultManifestSHA256?[manifest.requestID] == nil || session.resultStatuses?[manifest.requestID] == nil {
@@ -337,6 +356,66 @@ final class ResearchExchangeClient {
                      businessApplied: applied != nil)
     }
 
+    /// Providers may refresh a result's 120-second envelope with a new UUID.
+    /// Its business intent is unchanged when input bindings, target, verified
+    /// payload, status and provenance are unchanged. Identity/nonce claims are
+    /// still not authentication. This digest never grants approval or access.
+    func semanticResultFingerprint(_ result: ResearchValidatedExternalResult, targetScope: String,
+                                   verifiedSelections: [ResearchVerifiedSelection] = []) throws -> String {
+        var manifest = result.package.manifest
+        guard manifest.kind == "result", manifest.inReplyTo == result.session.requestID,
+              manifest.action == result.session.action.rawValue, manifest.sourceBundleID == result.session.providerBundleID,
+              manifest.targetBundleID == researchBundleID else { throw ResearchExchangeClientError.resultMismatch }
+        guard Set(verifiedSelections.map(\.referenceID)) == Set(result.selectedReferences.map(\.id)),
+              verifiedSelections.count == result.selectedReferences.count else { throw ResearchExchangeClientError.invalidSelection }
+        manifest.requestID = "00000000-0000-4000-8000-000000000000"
+        manifest.createdAt = ""; manifest.expiresAt = ""; manifest.nonce = ""
+        manifest.items.sort { $0.id < $1.id }; manifest.references.sort { $0.id < $1.id }
+        if var provenance = manifest.provenance {
+            for key in ["outputs", "sources", "pages"] {
+                guard let values = provenance[key]?.researchArray else { continue }
+                provenance[key] = .array(values.map { value in
+                    guard var object = value.researchObject else { return value }
+                    if let outputs = object["outputItemIDs"]?.researchStrings {
+                        object["outputItemIDs"] = .array(outputs.sorted().map(GaoJSONValue.string))
+                    }
+                    if let pages = object["pages"]?.researchArray {
+                        object["pages"] = .array(pages.sorted { ($0.researchObject?["pageNumber"]?.researchNumber ?? 0) < ($1.researchObject?["pageNumber"]?.researchNumber ?? 0) })
+                    }
+                    return .object(object)
+                }.sorted { left, right in
+                    if key == "pages" { return (left.researchObject?["pageNumber"]?.researchNumber ?? 0) < (right.researchObject?["pageNumber"]?.researchNumber ?? 0) }
+                    let a = left.researchObject ?? [:], b = right.researchObject ?? [:]
+                    return (a["resultItemID"]?.researchString ?? a["itemID"]?.researchString ?? a["sourceItemID"]?.researchString ?? "")
+                        < (b["resultItemID"]?.researchString ?? b["itemID"]?.researchString ?? b["sourceItemID"]?.researchString ?? "")
+                })
+            }
+            manifest.provenance = provenance
+        }
+        struct Intent: Encodable {
+            struct VerifiedReference: Encodable {
+                var id: String
+                var sha256: String
+                var byteCount: Int64
+                var fileExtension: String
+            }
+            var format = 1
+            var manifest: GaoActionManifest
+            var requestID: String
+            var sources: [ResearchExchangeSourceBinding]
+            var targetScope: String
+            var verifiedReferences: [VerifiedReference]
+        }
+        let intent = Intent(manifest: manifest, requestID: result.session.requestID,
+                            sources: result.session.sources.sorted { $0.itemID < $1.itemID }, targetScope: targetScope,
+                            verifiedReferences: verifiedSelections.sorted { $0.referenceID < $1.referenceID }.map {
+            .init(id: $0.referenceID, sha256: $0.sha256.lowercased(), byteCount: $0.byteCount,
+                  fileExtension: $0.localCopy.pathExtension.lowercased())
+        })
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        return SHA256.hash(data: try encoder.encode(intent)).map { String(format: "%02x", $0) }.joined()
+    }
+
     /// Receiving a result is not a business commit. Only call this after the
     /// import journal has durably committed all IDs covered by this receipt.
     @discardableResult
@@ -351,6 +430,9 @@ final class ResearchExchangeClient {
               !importedDocumentIDs.isEmpty, importedDocumentIDs.count <= 256,
               Set(importedDocumentIDs).count == importedDocumentIDs.count,
               importedDocumentIDs.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 }) else { throw ResearchExchangeClientError.invalidSession }
+        if let intent = session.resultIntents?[resultID] {
+            guard intent.manifestSHA256 == digest, intent.jobID == receiptID else { throw ResearchExchangeClientError.resultMismatch }
+        }
         if let existing = session.appliedResults?[resultID] {
             guard existing.manifestSHA256 == digest, existing.receiptID == receiptID,
                   existing.importedDocumentIDs == importedDocumentIDs else { throw ResearchExchangeClientError.resultMismatch }
@@ -364,6 +446,28 @@ final class ResearchExchangeClient {
         // decide idempotency rather than a global "completed" session state.
         try saveSession(session)
         return receipt
+    }
+
+    /// Persist before journal submission so a retry cannot rebind the same
+    /// verified envelope after its referenced file changes. Not business done.
+    func recordResultIntent(requestID: String, resultID: String, jobID: UUID) throws {
+        Self.sessionMutationLock.lock()
+        defer { Self.sessionMutationLock.unlock() }
+        var session = try loadSession(requestID)
+        guard session.action != .openDocument, session.resultIDs.contains(resultID),
+              let digest = session.resultManifestSHA256?[resultID],
+              ["completed", "partial"].contains(session.resultStatuses?[resultID] ?? "") else { throw ResearchExchangeClientError.invalidSession }
+        let binding = ResearchResultIntentBinding(manifestSHA256: digest, jobID: jobID.uuidString)
+        if let existing = session.resultIntents?[resultID] {
+            guard existing == binding else { throw ResearchExchangeClientError.resultMismatch }
+            return
+        }
+        if let receipt = session.appliedResults?[resultID] {
+            guard receipt.manifestSHA256 == digest, receipt.receiptID == binding.jobID else { throw ResearchExchangeClientError.resultMismatch }
+        }
+        if session.resultIntents == nil { session.resultIntents = [:] }
+        session.resultIntents?[resultID] = binding
+        try saveSession(session)
     }
 
     func resolveFileSelectionTarget(requestID: String, existingFolderIDs: Set<String>,

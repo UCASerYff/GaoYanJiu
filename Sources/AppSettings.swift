@@ -244,6 +244,12 @@ struct AppSettingsView: View {
                 }
 
                 Section {
+                    ResearchWidgetDiagnosticsView()
+                } header: {
+                    Text(AppLocalization.text("小组件数据状态"))
+                }
+
+                Section {
                     Text(AppLocalization.text("模块已并入搞研究，随整合版更新。"))
                         .font(.callout)
                         .foregroundStyle(.secondary)
