@@ -162,6 +162,16 @@ final class UserDefaults {
         try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: path)
         try rejects("Read followed ancestor symlink") { _ = try ResearchWidgetStorage.readFile(at: alias.appendingPathComponent("statistics.json")) }
         try rejects("Write followed ancestor symlink") { try ResearchWidgetStorage.atomicWrite(Data(), to: alias.appendingPathComponent("statistics.json")) }
+        let nested = path.appendingPathComponent("Nested", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: false)
+        let nestedFile = nested.appendingPathComponent("current.json")
+        try ResearchWidgetStorage.atomicWrite(original, to: nestedFile)
+        let nestedAlias = alias.appendingPathComponent("Nested/current.json")
+        try rejects("Read followed a nonfinal ancestor symlink") { _ = try ResearchWidgetStorage.readFile(at: nestedAlias) }
+        try rejects("Write followed a nonfinal ancestor symlink") { try ResearchWidgetStorage.atomicWrite(Data(), to: nestedAlias) }
+        try require(try ResearchWidgetStorage.readFile(at: nestedFile).data == original, "Rejected ancestor write changed original bytes")
+        let systemAlias = URL(fileURLWithPath: url.path.replacingOccurrences(of: "/private/tmp/", with: "/tmp/"))
+        try require(try ResearchWidgetStorage.readFile(at: systemAlias).data == original, "Fixed /tmp system alias stopped working")
         let hardlink = path.appendingPathComponent("hardlink.json")
         try require(link(url.path, hardlink.path) == 0, "Fixture hard link failed")
         try rejects("Read accepted multiply linked file") { _ = try ResearchWidgetStorage.readFile(at: url) }

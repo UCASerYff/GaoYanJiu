@@ -208,14 +208,12 @@ enum ResearchWidgetStorage {
         guard url.isFileURL, !components.contains(".."), !components.contains(".") else { throw Failure.unsafeFile }
         // Fixed macOS aliases only; never resolve a user-controlled ancestor.
         if let first = components.first, ["tmp", "var", "etc"].contains(first) { components.insert("private", at: 0) }
-        var fd = Darwin.open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        // App Sandbox grants data access to the Group, not directory listing of
+        // / or /Users. Open only the entitled final directory; the kernel still
+        // rejects symlinks in every component, including the final directory.
+        let path = "/" + components.joined(separator: "/")
+        let fd = Darwin.open(path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW_ANY | O_CLOEXEC)
         guard fd >= 0 else { throw errno == ENOENT ? Failure.missing : Failure.unavailable }
-        for part in components {
-            let next = openat(fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            Darwin.close(fd)
-            guard next >= 0 else { throw Failure.unsafeFile }
-            fd = next
-        }
         return fd
     }
     private static func sameFile(_ a: stat, _ b: stat) -> Bool {

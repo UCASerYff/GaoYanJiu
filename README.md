@@ -1,17 +1,17 @@
-# 搞研究 V4.04
+# 搞研究 V4.05
 
 独立 macOS 应用，包含本模块完整业务、游戏场景和 WidgetKit 小组件。运行不依赖搞七廿三或其他六个应用；联动功能需要同时安装相关应用。
 
 ## 下载与安装
 
-从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.04.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
+从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.05.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
 
 1. 支持 macOS 14 或更高版本、Apple Silicon；暂未提供 Intel 版本。
 2. 解压 ZIP，将 `搞研究.app` 拖入“应用程序”文件夹。
 3. 如果 macOS 拦截打开，请先确认软件来源，再进入“系统设置 → 隐私与安全性”，允许该应用打开。发行包使用 Apple Development 签名，未做 Apple 公证。
 4. 安装后运行一次，再从系统小组件列表添加本应用的小组件。整合版的小组件需要重新添加。
 
-下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.04.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
+下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.05.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
 
 ## 功能
 
@@ -49,7 +49,7 @@ V4.0 从整合版拆分时保留业务历史、余额、库存、游戏进度、
 ./scripts/build.sh
 ./scripts/package.sh
 # 退出搞研究后，保存输出中的私有 backup 目录
-python3 scripts/upgrade_data.py snapshot --version 4.04
+python3 scripts/upgrade_data.py snapshot --version 4.05
 ./scripts/install.sh
 # 安装后核验原数据、附件、设置与研究城；本命令不启动应用
 python3 scripts/upgrade_data.py verify-live /path/to/private/backup
@@ -77,7 +77,13 @@ python3 Tests/InstallSafetyRegression.py
 
 第三方组件和资源保留各自许可，详情见 `Resources/` 中的许可、来源说明与补丁记录。
 
-## V4.04 更新
+## V4.05 更新
+
+- 修复小组件沙盒无法列举共享目录上级路径导致统计读取失败的问题。直接打开已授权目录，并由内核拒绝路径任意层软链接，保留文件身份、所有者、大小与原子读写校验，不扩大沙盒权限。
+- V4.04 本地安装后经用户确认组件仍显示同步提示，未发布；按失败恢复规则先恢复 V4.03，再安装本版 V4.05 / build 6。以下 V4.04 基础改进包含在本版中。
+- 完整编译、签名及 73 项小组件隔离断言通过；安装后真实扩展的 Timeline 已成功读取有效快照，来源摘要与资料库一致。本机两个组件的显示与点击定位经用户确认恢复；全部尺寸、跨日、睡眠和真实三方业务仍需分别验收，不以接收时间线或测试通过代替这些场景。
+
+## V4.04 基础改进（未单独发布）
 
 - 缺失、损坏、无法读取或来自更新版本的资料库保持原位，停止写入和统计发布；重试恢复成功后才解除保护。真正首次使用需本人确认新建，迁移前备份失败也会阻止迁移。
 - 小组件从经过校验的磁盘资料库生成 schema2 原子快照，核对来源与内容摘要，保留最后有效快照。区分统计内容更新时间、资料库文件写入、快照发布和扩展实际读取；旧日期本身不代表停刷。失败保存待重试状态，采用有限重试和激活、睡醒、跨日、时区及语言事件恢复。
