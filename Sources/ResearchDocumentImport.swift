@@ -157,6 +157,7 @@ extension DocumentLibraryStore {
         do {
             let journal = try transactionJournal()
             let results = await journal.recoverPending()
+            try recoverIncomingHandoffReceipts(journal: journal)
             if !results.isEmpty { importProgress = "已检查 \(results.count) 个未完成交接；失败资料已保留，可在资料交接中复核。" }
         } catch { errorHandler("资料交接恢复未完成：\(error.localizedDescription)") }
     }
@@ -620,6 +621,10 @@ extension DocumentLibraryStore {
               recordData: item.recordData, provenance: item.provenance, revision: item.revision,
               operation: item.operation, expectedOriginal: item.expectedOriginal,
               recordVersion: item.recordVersion, originalRecordData: item.originalRecordData)
+    }
+
+    func ocrPagesForReview(for output: ResearchOCROutput, allOutputs: [ResearchOCROutput]) throws -> [DocumentProvenance.Page] {
+        try ocrPages(for: output, allOutputs: allOutputs)
     }
 
     private func ocrPages(for output: ResearchOCROutput, allOutputs: [ResearchOCROutput]) throws -> [DocumentProvenance.Page] {

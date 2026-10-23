@@ -28,6 +28,7 @@ final class DocumentLibraryStore: ObservableObject {
     var activeImportRequestID: UUID?
     var importJournal: ResearchImportJournal?
     var importFailureInjector: ((ResearchImportJournal.FaultPoint) throws -> Void)?
+    var incomingReceiptCompletionFailureInjector: (() throws -> Void)?
     @Published var pendingExchangeResultReview: PendingExchangeResultReview?
 
     static let supportedExtensions: Set<String> = [
@@ -544,6 +545,7 @@ struct PendingPackageReviewContext: Identifiable {
     let packageURL: URL
     let validatedPackage: GaoValidatedActionPackage
     var targetFolderID: String
+    var incomingReceipt: ResearchIncomingReceipt? = nil
 }
 
 struct PendingExchangeResultReview: Identifiable {
@@ -553,6 +555,8 @@ struct PendingExchangeResultReview: Identifiable {
     var requiresExplicitReview: Bool
     var canApply: Bool
     var summary: String
+    var ocrReviewPages: [String: [DocumentProvenance.Page]] = [:]
+    var ocrReviewErrors: [String: String] = [:]
     var references: [GaoActionReference] { result.selectedReferences }
     var warnings: [String] { Array(Set(result.ocrOutputs.flatMap(\.warnings))).sorted() }
     var itemCount: Int { result.package.stagedItems.count + references.count }
@@ -561,13 +565,20 @@ struct PendingExchangeResultReview: Identifiable {
 @MainActor
 extension DocumentLibraryStore {
     func handleIncomingPackage(at url: URL) {
+        guard !isImportingDocuments, pendingPackageReview == nil, pendingExchangeResultReview == nil else {
+            exchangeFeedbackMessage = "当前已有资料交接正在处理或等待审核。已保留当前审核；请完成或关闭后重新打开新交接包。"
+            return
+        }
         do {
             let validator = GaoActionPackageValidator(expectedTargetBundleID: ResearchExchangePaths.bundleID)
             let header = try validator.validateManifestData(GaoActionFileAccess.readPrivateData(at: url.appendingPathComponent("manifest.json")))
             if header.kind == "request" && header.action == "research.importDocuments" {
                 let package = try validator.stagePackage(at: url, stagingRoot: ResearchExchangePaths.root.appendingPathComponent("Incoming"))
+                var receipt = try incomingHandoffs.register(package)
+                if libraryIsWritable() { receipt = try reconcileIncomingReceipt(receipt, journal: transactionJournal()) }
                 // An external request does not choose a business destination.
-                pendingPackageReview = PendingPackageReviewContext(packageURL: url, validatedPackage: package, targetFolderID: "")
+                pendingPackageReview = PendingPackageReviewContext(packageURL: url, validatedPackage: package,
+                                                                  targetFolderID: receipt.targetFolderID ?? "", incomingReceipt: receipt)
             } else if header.kind == "result" {
                 pendingExchangeResultReview = try receiveExchangeResultForReview(at: url)
             } else {
@@ -580,15 +591,21 @@ extension DocumentLibraryStore {
     func receiveExchangeResultForReview(at url: URL) throws -> PendingExchangeResultReview {
         let result = try exchangeClient.receiveResult(at: url)
         let status = result.package.manifest.status ?? "failed"
-        let canApply = ["completed", "partial"].contains(status) && result.session.action != .openDocument
+        var canApply = ["completed", "partial"].contains(status) && result.session.action != .openDocument
             && (!result.package.stagedItems.isEmpty || !result.selectedReferences.isEmpty)
+        var pages: [String: [DocumentProvenance.Page]] = [:], pageErrors: [String: String] = [:]
+        for output in result.ocrOutputs {
+            do { pages[output.itemID] = try ocrPagesForReview(for: output, allOutputs: result.ocrOutputs) }
+            catch { pageErrors[output.itemID] = error.localizedDescription; canApply = false }
+        }
         let summary: String
         if result.businessApplied { summary = "此结果已完成业务导入；再次接收不会重复添加。" }
         else if result.session.action == .openDocument { summary = "提供方仅报告打开状态；保存后请重新选择编辑副本并明确导入。" }
         else if !canApply { summary = "提供方状态：\(status)。本次不会应用附件或覆盖资料，可等待后续结果。" }
         else { summary = "发送方仅声明来源身份；请核对输入、目标和逐页状态后批准导入。" }
         let review = PendingExchangeResultReview(result: result, targetFolderID: result.session.targetFolderID,
-                                                requiresExplicitReview: true, canApply: canApply, summary: summary)
+                                                requiresExplicitReview: true, canApply: canApply, summary: summary,
+                                                ocrReviewPages: pages, ocrReviewErrors: pageErrors)
         pendingExchangeResultReview = review
         return review
     }

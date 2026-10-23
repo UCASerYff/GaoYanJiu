@@ -183,6 +183,186 @@ struct ResearchProductIntegration {
         try require(store.managedDocuments.count == 1, "Same request added duplicate records")
         _ = try durable(store)
     }
+    static func incomingContext(_ store: PaperStore, id: String = UUID().uuidString,
+                                text: String = "public incoming fixture", parameters: [String: GaoJSONValue] = [:],
+                                uppercaseSHA: Bool = false) throws -> PendingPackageReviewContext {
+        let file = try source(UUID().uuidString + ".txt", text: text)
+        let item = GaoActionItem(id: "incoming-source", relativePath: "payload/source.txt", uti: "public.utf8-plain-text", byteCount: 0, sha256: String(repeating: "0", count: 64))
+        let request = GaoActionManifest(requestID: id, sourceBundleID: "com.gaoseries.GaoWenJian",
+                                        targetBundleID: ResearchExchangePaths.bundleID, action: "research.importDocuments",
+                                        items: [item], parameters: parameters)
+        let packageURL = try GaoActionPackageWriter().write(manifest: request, files: [item.id: file],
+                                                            outgoingRoot: root.appendingPathComponent("Sender-" + UUID().uuidString))
+        if uppercaseSHA {
+            let manifestURL = packageURL.appendingPathComponent("manifest.json")
+            var manifest = try JSONDecoder().decode(GaoActionManifest.self, from: GaoActionFileAccess.readPrivateData(at: manifestURL))
+            manifest.items[0].sha256 = manifest.items[0].sha256.uppercased()
+            try GaoActionFileAccess.writePrivateData(JSONEncoder().encode(manifest), to: manifestURL)
+        }
+        let raw = try GaoActionFileAccess.readPrivateData(at: packageURL.appendingPathComponent("manifest.json"))
+        let package = try GaoActionPackageValidator(expectedTargetBundleID: ResearchExchangePaths.bundleID)
+            .stagePackage(at: packageURL, stagingRoot: root.appendingPathComponent("Incoming"))
+        try require(package.manifestSHA256 == SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined(), "Receiver manifest digest is not exact validated bytes")
+        return .init(packageURL: packageURL, validatedPackage: package, targetFolderID: "")
+    }
+    static func incomingHandoff() async throws {
+        let (store, _) = try makeStore(); let target = try folder(store)
+        let context = try incomingContext(store, uppercaseSHA: true)
+        try await rejects("Unapproved incoming request changed library") {
+            _ = try await store.documentLibrary.approveIncomingDocuments(context, targetFolderID: target.id, userApproved: false)
+        }
+        try require(store.managedDocuments.isEmpty, "Unapproved request created records")
+        store.handleIncomingPackage(at: context.packageURL)
+        let pendingID = store.pendingPackageReview?.id
+        let other = try incomingContext(store)
+        store.handleIncomingPackage(at: other.packageURL)
+        try require(store.pendingPackageReview?.id == pendingID, "Second incoming request displaced current review")
+        let receipt = try await store.documentLibrary.approveIncomingDocuments(context, targetFolderID: target.id, userApproved: true)
+        try require(receipt.state == "completed" && store.managedDocuments.count == 1, "Approved incoming request not committed")
+        try require(store.managedDocuments.first?.contentIndexedAt != nil, "Completed receipt preceded indexing")
+        let again = try await store.documentLibrary.approveIncomingDocuments(context, targetFolderID: target.id, userApproved: true)
+        try require(again.outcome == receipt.outcome && store.managedDocuments.count == 1, "Incoming replay imported twice")
+        try require(try store.documentLibrary.cancelIncomingDocuments(context).state == "completed", "Cancellation replaced completed outcome")
+        let otherFolder = try unwrap(store.createDocumentFolder(kind: .importantLiterature, name: "Second incoming target"), "Second folder missing")
+        try await rejects("Same incoming UUID changed bound target") {
+            _ = try await store.documentLibrary.approveIncomingDocuments(context, targetFolderID: otherFolder, userApproved: true)
+        }
+        let changed = try incomingContext(store, id: receipt.id, text: "changed sender content")
+        try await rejects("Changed manifest reused incoming UUID") {
+            _ = try await store.documentLibrary.approveIncomingDocuments(changed, targetFolderID: target.id, userApproved: true)
+        }
+        let resultURL = try store.documentLibrary.prepareIncomingResult(requestID: receipt.id)
+        let result = try GaoActionPackageValidator(expectedTargetBundleID: "com.gaoseries.GaoWenJian")
+            .stagePackage(at: resultURL, stagingRoot: root.appendingPathComponent("SenderResultReview"))
+        try require(result.manifest.status == "completed" && result.manifest.inReplyTo == receipt.id &&
+                    result.manifest.items.isEmpty && result.manifest.references.isEmpty && result.manifest.parameters.isEmpty &&
+                    result.manifest.errorCode == nil, "Result manifest is not a minimal attachment-free business receipt")
+        let provenance = try unwrap(result.manifest.provenance, "Result provenance missing")
+        try require(provenance["requestManifestSHA256"] == .string(context.validatedPackage.manifestSHA256) &&
+                    provenance["workflowState"] == .string("imported"), "Result not bound to validated request bytes")
+        try require(provenance["sources"] == .array([.object(["sourceItemID": .string("incoming-source"),
+                    "sourceSHA256": .string(context.validatedPackage.manifest.items[0].sha256), "status": .string("imported")])]), "Result source bindings missing")
+        let resultData = try GaoActionFileAccess.readPrivateData(at: resultURL.appendingPathComponent("manifest.json"))
+        try require(!String(decoding: resultData, as: UTF8.self).contains(root.path), "Outgoing receipt leaked private fixture paths")
+        let secondResult = try store.documentLibrary.prepareIncomingResult(requestID: receipt.id)
+        try require(secondResult != resultURL && store.managedDocuments.count == 1, "Resending receipt repeated business import")
+        let cancelledContext = try incomingContext(store)
+        let closed = try store.documentLibrary.incomingHandoffs.register(cancelledContext.validatedPackage)
+        try require(closed.state == "pending", "Closing an unapproved request was treated as cancellation")
+        let cancelled = try store.documentLibrary.cancelIncomingReceipt(requestID: closed.id)
+        try require(cancelled.state == "cancelled", "Explicit refusal did not persist cancelled")
+        try require(try store.documentLibrary.cancelIncomingDocuments(cancelledContext).state == "cancelled", "Cancel replay changed terminal decision")
+        let refusedImport = try await store.documentLibrary.approveIncomingDocuments(cancelledContext, targetFolderID: target.id, userApproved: true)
+        try require(refusedImport.state == "cancelled" && store.managedDocuments.count == 1, "Cancelled request later imported")
+        let cancelledResult = try store.documentLibrary.prepareIncomingResult(requestID: closed.id)
+        let checkedCancel = try GaoActionPackageValidator(expectedTargetBundleID: "com.gaoseries.GaoWenJian")
+            .stagePackage(at: cancelledResult, stagingRoot: root.appendingPathComponent("CancelResult"))
+        try require(checkedCancel.manifest.status == "cancelled" && checkedCancel.manifest.provenance?["saved"] == .bool(false), "History cancellation lost machine receipt")
+        let unsupported = try incomingContext(store, parameters: ["targetRecordID": .string("unsupported-record")])
+        try await rejects("Unsupported business target silently imported") {
+            _ = try await store.documentLibrary.approveIncomingDocuments(unsupported, targetFolderID: target.id, userApproved: true)
+        }
+        try require(store.managedDocuments.count == 1, "Unsupported record target changed library")
+        _ = try durable(store)
+    }
+    static func incomingReceiptRecovery(indexInterrupted: Bool = false) async throws {
+        let (store, _) = try makeStore(); let target = try folder(store)
+        let context = try incomingContext(store)
+        if indexInterrupted {
+            store.documentLibrary.importFailureInjector = { if $0 == .beforeIndex { throw ResearchImportJournal.SimulatedCrash() } }
+        } else { store.documentLibrary.incomingReceiptCompletionFailureInjector = { throw Injected.checkpoint } }
+        try await rejects("Expected receipt-save interruption did not occur") {
+            _ = try await store.documentLibrary.approveIncomingDocuments(context, targetFolderID: target.id, userApproved: true)
+        }
+        try require(store.managedDocuments.count == 1, "Receipt interruption lost committed import")
+        try require(try store.documentLibrary.incomingHandoffs.load(context.validatedPackage.manifest.requestID)?.state == "pending", "Unwritten receipt claimed completed")
+        store.documentLibrary.incomingReceiptCompletionFailureInjector = nil
+        if indexInterrupted {
+            let pendingURL = try store.documentLibrary.prepareIncomingResult(requestID: context.validatedPackage.manifest.requestID)
+            let pending = try GaoActionPackageValidator(expectedTargetBundleID: "com.gaoseries.GaoWenJian")
+                .stagePackage(at: pendingURL, stagingRoot: root.appendingPathComponent("PendingResult"))
+            try require(pending.manifest.status == "pending" && pending.manifest.provenance?["saved"] == .bool(false),
+                        "Interrupted index was falsely reported completed")
+            try await rejects("Unfinished committed transaction was relabelled cancelled") {
+                _ = try store.documentLibrary.cancelIncomingDocuments(context)
+            }
+            store.documentLibrary.importFailureInjector = nil
+            store.documentLibrary.importJournal = nil
+            _ = try await store.documentLibrary.resumeIncomingHandoffs()
+        }
+        // Fresh lightweight receiver instances recover the authoritative completed job.
+        store.documentLibrary.importJournal = nil
+        let result = try store.documentLibrary.prepareIncomingResult(requestID: context.validatedPackage.manifest.requestID)
+        let checked = try GaoActionPackageValidator(expectedTargetBundleID: "com.gaoseries.GaoWenJian")
+            .stagePackage(at: result, stagingRoot: root.appendingPathComponent("RecoveredResult"))
+        try require(checked.manifest.status == "completed", "Journal did not repair missing completed receipt")
+        _ = try await store.documentLibrary.approveIncomingDocuments(context, targetFolderID: target.id, userApproved: true)
+        try require(store.managedDocuments.count == 1, "Receipt recovery imported a second attachment")
+        _ = try durable(store)
+    }
+    static func ocrReviewMetadata() async throws {
+        let (store, _) = try makeStore(); let target = try folder(store)
+        // Owned image bytes avoid PDFKit's process/UI registration in a CLI sandbox.
+        let png = try unwrap(Data(base64Encoded: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aP6kAAAAASUVORK5CYII="), "PNG fixture absent")
+        let input = root.appendingPathComponent("Inputs/review.png")
+        try GaoActionFileAccess.writePrivateData(png, to: input)
+        _ = try await store.importDocuments(from: [input], into: target.id)
+        let original = try unwrap(store.managedDocuments.first, "Review original absent")
+        // This case tests the receiver review model. UTType's dynamic extension
+        // lookup requires services absent in this CLI sandbox, so seed the exact
+        // private source session with a validated fixed-UTI request instead of
+        // claiming that provider discovery/request GUI was exercised here.
+        let sourceURL = store.managedDocumentURL(original)
+        let fingerprint = try GaoActionFileAccess.fingerprint(at: sourceURL)
+        let item = GaoActionItem(id: "review-input", relativePath: "payload/review.png", uti: "public.png",
+                                 byteCount: fingerprint.byteCount, sha256: fingerprint.sha256)
+        let parameters: [String: GaoJSONValue] = ["outputs": .array([.string("text"), .string("json")])]
+        let template = GaoActionManifest(sourceBundleID: ResearchExchangePaths.bundleID, targetBundleID: ResearchExternalAction.ocrFiles.providerBundleID,
+                                         action: "ocr.files", items: [item], parameters: parameters)
+        let packageURL = try GaoActionPackageWriter().write(manifest: template, files: [item.id: sourceURL],
+                                                            outgoingRoot: ResearchExchangePaths.root.appendingPathComponent("Outgoing"))
+        let written = try JSONDecoder().decode(GaoActionManifest.self, from: GaoActionFileAccess.readPrivateData(at: packageURL.appendingPathComponent("manifest.json")))
+        let fixtureSession = ResearchExchangeSession(requestID: written.requestID, providerBundleID: written.targetBundleID, action: .ocrFiles,
+            requestNonce: written.nonce, packageURL: packageURL.absoluteString, createdAt: Date(),
+            sources: [.init(itemID: item.id, documentID: original.id, originalFileURL: sourceURL.standardizedFileURL.absoluteString,
+                            sha256: fingerprint.sha256, byteCount: fingerprint.byteCount, identity: fingerprint.identity)],
+            state: "prepared", resultIDs: [], importedEditedSHA256: nil)
+        try GaoActionFileAccess.writePrivateData(JSONEncoder().encode(fixtureSession),
+            to: ResearchExchangePaths.root.appendingPathComponent("Sessions/" + written.requestID + ".json"))
+        let request = ResearchPreparedExchange(packageURL: packageURL, requestID: written.requestID, action: .ocrFiles, parameters: parameters)
+        let binding = try unwrap(store.documentLibrary.exchangeClient.loadSession(request.requestID).sources.first, "Review source absent")
+        let text = try source("review.txt", text: "recognized full text")
+        let jsonURL = root.appendingPathComponent("Inputs/review.json")
+        func json(_ sourceSHA: String) throws -> Data {
+            try JSONSerialization.data(withJSONObject: ["schemaVersion": 1,
+                "sources": [["id": "review-source", "sha256": binding.sha256]],
+                "pages": [["sourceID": "review-source", "originalSHA256": sourceSHA, "pageNumber": 1,
+                           "status": "completed", "lines": [["readingOrder": 1, "text": "actual page text for review"]]],
+                          ["sourceID": "review-source", "originalSHA256": sourceSHA, "pageNumber": 2,
+                           "status": "failed", "lines": []]]])
+        }
+        try GaoActionFileAccess.writePrivateData(json(binding.sha256), to: jsonURL)
+        let provenance: [String: GaoJSONValue] = ["engine": .string("fixture OCR"), "engineVersion": .string("1"),
+            "sources": .array([.object(["sourceID": .string("review-source"), "sourceItemID": .string(binding.itemID),
+                "sourceSHA256": .string(binding.sha256), "outputItemIDs": .array([.string("output-0"), .string("output-1")]),
+                "pages": .array([.object(["pageNumber": .number(1), "status": .string("completed")]),
+                                 .object(["pageNumber": .number(2), "status": .string("failed")])])])]),
+            "outputs": .array([0, 1].map { .object(["resultItemID": .string("output-\($0)"), "sourceItemID": .string(binding.itemID),
+                "sourceID": .string("review-source"), "sourceSHA256": .string(binding.sha256)]) })]
+        let package = try providerResult(request: request, action: .ocrFiles, files: [text, jsonURL], status: "partial", provenance: provenance)
+        let review = try store.documentLibrary.receiveExchangeResultForReview(at: package)
+        try require(review.result.package.manifest.status == "partial" && review.canApply && review.requiresExplicitReview, "Partial review lost approval gate")
+        try require(review.result.ocrOutputs.allSatisfy { $0.sourceDocumentID == original.id && $0.sourceSHA256 == binding.sha256 && !$0.warnings.isEmpty }, "Review lost original mapping or missing metadata warnings")
+        try require(review.ocrReviewPages.count == 2 && review.ocrReviewPages.values.allSatisfy {
+            $0.first(where: { $0.pageNumber == 1 })?.text == "actual page text for review" && $0.first(where: { $0.pageNumber == 2 })?.status == "failed"
+        }, "Review hid actual page text or failure state")
+        try require(store.managedDocuments.count == 1, "Review silently imported OCR derivatives")
+        try GaoActionFileAccess.writePrivateData(json(String(repeating: "f", count: 64)), to: jsonURL)
+        let badPackage = try providerResult(request: request, action: .ocrFiles, files: [text, jsonURL], status: "partial", provenance: provenance)
+        let invalidReview = try store.documentLibrary.receiveExchangeResultForReview(at: badPackage)
+        try require(!invalidReview.canApply && !invalidReview.ocrReviewErrors.isEmpty, "Invalid JSON page provenance remained approvable")
+        _ = try durable(store)
+    }
     static func targetGone() async throws {
         let (store, _) = try makeStore(); let target = try folder(store)
         let file = try source("gone.txt", text: "target removed before commit")
@@ -465,6 +645,12 @@ struct ResearchProductIntegration {
             "networkUsed": .bool(false), "exportFailures": .array([])]
         let package = try providerResult(request: request, action: .ocrFiles, files: outputFiles, status: "partial", provenance: provenance)
         let review = try store.documentLibrary.receiveExchangeResultForReview(at: package)
+        try require(!review.ocrReviewPages.isEmpty && review.ocrReviewPages.values.allSatisfy { $0.contains(where: { $0.pageNumber == 2 && $0.status == "failed" }) },
+                    "Review model hid failed page status")
+        if includeJSON {
+            try require(review.ocrReviewPages.values.allSatisfy { $0.first(where: { $0.pageNumber == 1 })?.text == "first recognized line\nsecond recognized line" },
+                        "Review model hid available JSON page text")
+        }
         try require(store.managedDocuments.count == 1, "Receiving OCR result silently changed the library")
         try require(review.result.ocrOutputs.count == outputFiles.count && review.result.ocrOutputs[0].pages.count == 2, "Real screenshot provider OCR mapping was not preserved")
         let outcome = try await store.documentLibrary.applyExchangeResult(review, userApproved: true)
@@ -589,6 +775,10 @@ struct ResearchProductIntegration {
             case "new-attachment": try await newAttachment()
             case "new-version": try await newVersion()
             case "repeated-request": try await repeatedRequest()
+            case "incoming-handoff": try await incomingHandoff()
+            case "incoming-receipt-recovery": try await incomingReceiptRecovery()
+            case "incoming-index-recovery": try await incomingReceiptRecovery(indexInterrupted: true)
+            case "ocr-review-metadata": try await ocrReviewMetadata()
             case "target-gone": try await targetGone()
             case "version-cas": try await versionCAS()
             case "selection-result": try await selectionResult()

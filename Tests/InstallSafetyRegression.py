@@ -191,7 +191,7 @@ class InstallSafetyRegression(unittest.TestCase):
     maxDiff = None
 
     def run_case(self, case, *, succeeds=False, no_old=False, expected_status=None):
-        with tempfile.TemporaryDirectory(prefix="research-install-regression-", dir="/private/tmp") as directory:
+        with tempfile.TemporaryDirectory(prefix="research-install-regression-", suffix=".noindex", dir="/private/tmp") as directory:
             root = Path(directory)
             scripts = root / "scripts"
             tools = root / "mock-bin"
@@ -258,14 +258,14 @@ class InstallSafetyRegression(unittest.TestCase):
             self.assertEqual(bool(list(root.glob(".install.noindex.*"))), case == "stage_cleanup", details)
             if succeeds:
                 self.assertEqual((target / "marker").read_text(), "new", details)
-                backups = list((root / "rollback").glob("*.app"))
+                backups = list((root / "rollback.noindex").glob("*.app"))
                 self.assertEqual(len(backups), 0 if no_old else 1, details)
                 if backups: self.assertEqual((backups[0] / "marker").read_text(), "old", details)
             elif no_old:
                 self.assertFalse(target.exists(), details)
             else:
                 self.assertEqual((target / "marker").read_text(), "old", details)
-                self.assertFalse(list((root / "rollback").glob("*.app")), details)
+                self.assertFalse(list((root / "rollback.noindex").glob("*.app")), details)
             commands_file = root / "commands.jsonl"
             commands = [json.loads(line) for line in commands_file.read_text().splitlines()] if commands_file.exists() else []
             self.assertFalse(any("UNSAFE" in line for line in (result.stdout, result.stderr)), details)
@@ -281,6 +281,19 @@ class InstallSafetyRegression(unittest.TestCase):
 
     def test_existing_lock_is_not_removed(self):
         self.run_case("lock_exists")
+
+    def test_recovery_program_is_retained_inside_noindex(self):
+        result, commands, _ = self.run_case("success", succeeds=True)
+        moves = [command for command in commands if command[0] == "mv"]
+        self.assertEqual(len(moves), 1)
+        recovery = Path(moves[0][-1])
+        self.assertEqual(recovery.parent.name, "rollback.noindex")
+        self.assertIn(str(recovery), result.stdout)
+        # Exercise the same retained path in the real rollback control flow.
+        _, failed_commands, _ = self.run_case("copy")
+        restores = [command for command in failed_commands if command[0] == "mv"]
+        self.assertEqual(len(restores), 2)
+        self.assertEqual(restores[1][1], restores[0][2])
 
     def test_transaction_failures_restore_bundle_and_unlock(self):
         for case in ("old_plugin_remove", "old_ls_remove", "move", "copy", "target_verify", "new_ls_register",

@@ -63,7 +63,10 @@ final class PaperStore: ObservableObject {
         // 子对象 → 门面的单向回调：落盘与错误提示统一上行。
         rewardStore.persist = { [weak self] in self?.save() }
         rewardStore.errorHandler = { [weak self] in self?.lastError = $0 }
-        trashStore.persist = { [weak self] in self?.save() }
+        trashStore.transaction = { [weak self] changes in
+            guard let self else { throw ResearchDocumentImportError.unavailableLibrary }
+            try self.performTrashTransaction(changes)
+        }
         trashStore.errorHandler = { [weak self] in self?.lastError = $0 }
         documentLibrary.persist = { [weak self] in self?.save() }
         documentLibrary.persistTransaction = { [weak self] in
@@ -1071,7 +1074,13 @@ final class PaperStore: ObservableObject {
     /// Transaction callers must observe persistence failure before committing attachments.
     func saveThrowing() throws {
         guard !libraryLoadFailed else { throw ResearchDocumentImportError.unavailableLibrary }
-        try repository.saveLibrary(PersistedLibrary(
+        try repository.saveLibrary(currentLibrarySnapshot())
+        libraryLastModifiedAt = (try? repository.libraryURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? libraryLastModifiedAt
+        exportWidgetSnapshot()
+    }
+
+    private func currentLibrarySnapshot() -> PersistedLibrary {
+        PersistedLibrary(
                 papers: papers,
                 portals: portals,
                 existingWorks: existingWorks,
@@ -1082,9 +1091,94 @@ final class PaperStore: ObservableObject {
                 managedDocuments: managedDocuments,
                 trashItems: trashItems,
                 rewardCity: rewardCity
-        ))
-        libraryLastModifiedAt = (try? repository.libraryURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? libraryLastModifiedAt
-        exportWidgetSnapshot()
+        )
+    }
+
+    private func readTrashLibrarySnapshot() throws -> PersistedLibrary {
+        let data = try GaoActionFileAccess.readPrivateData(at: repository.libraryURL, maximumBytes: 128 * 1_048_576)
+        let version = try DiskLibraryRepository.libraryVersion(in: data)
+        guard version == LibrarySchema.currentVersion else { throw ResearchDocumentImportError.unavailableLibrary }
+        try DiskLibraryRepository.validateStructure(data, version: version)
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        return try decoder.decode(PersistedLibrary.self, from: data)
+    }
+
+    private func trashSnapshotData(_ library: PersistedLibrary) throws -> Data {
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        guard var object = try JSONSerialization.jsonObject(with: encoder.encode(library)) as? [String: Any],
+              var city = object["rewardCity"] as? [String: Any] else { throw ResearchDocumentImportError.unavailableLibrary }
+        // These collections are sets in the model; array ordering is immaterial.
+        for key in ["unlockedPlotIDs", "rewardedWorkIDs", "rewardedCertificateIDs"] {
+            if let values = city[key] as? [String] { city[key] = values.sorted() }
+        }
+        object["rewardCity"] = city
+        return try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+    }
+
+    private func applyTrashLibrarySnapshot(_ library: PersistedLibrary) {
+        papers = library.papers; portals = library.portals; existingWorks = library.existingWorks
+        projects = library.projects; certificates = library.certificates; fundingRecords = library.fundingRecords
+        documentFolders = library.documentFolders; managedDocuments = library.managedDocuments
+        trashItems = library.trashItems; rewardCity = library.rewardCity
+    }
+
+    /// The caller retains both payload locations until this returns normally.
+    /// A thrown write may already have renamed the library; inspect disk before
+    /// restoring memory, and never discard edits which predate this operation.
+    private func performTrashTransaction(_ changes: () throws -> Void) throws {
+        guard !libraryLoadFailed else { throw ResearchDocumentImportError.unavailableLibrary }
+        let memoryBefore = currentLibrarySnapshot(), lastID = lastDeletedTrashID, message = deletionMessage
+        let diskBefore: Data
+        do { diskBefore = try trashSnapshotData(readTrashLibrarySnapshot()) }
+        catch { recordLibraryLoadFailure(.unreadable, error: error); throw error }
+        var expected: Data?
+        var saveAttempted = false
+        do {
+            try changes()
+            expected = try trashSnapshotData(currentLibrarySnapshot())
+            saveAttempted = true
+            try saveThrowing()
+            guard try trashSnapshotData(readTrashLibrarySnapshot()) == expected else { throw ResearchDocumentImportError.versionConflict }
+        } catch {
+            let originalError = error
+            if !saveAttempted {
+                applyTrashLibrarySnapshot(memoryBefore)
+                lastDeletedTrashID = lastID; deletionMessage = message
+                throw originalError
+            }
+            if let persistenceError = originalError as? LibraryPersistenceError,
+               case .changedSinceRead = persistenceError {
+                // The observed diskBefore may already contain someone else's
+                // newer records. Do not rebase stale memory onto that version.
+                applyTrashLibrarySnapshot(memoryBefore)
+                lastDeletedTrashID = lastID; deletionMessage = message
+                recordLibraryLoadFailure(.unreadable, error: originalError)
+                throw originalError
+            }
+            do {
+                let observed = try readTrashLibrarySnapshot(), observedData = try trashSnapshotData(observed)
+                // Refresh the repository's compare-and-save baseline without
+                // applying its load to the UI or losing earlier pending edits.
+                guard case let .loaded(reloaded, version, migrated, migrationError) = repository.loadLibrary(migratingWith: { _, _ in }),
+                      version == LibrarySchema.currentVersion, !migrated, migrationError == nil,
+                      try trashSnapshotData(reloaded) == observedData else { throw ResearchDocumentImportError.unavailableLibrary }
+                if observedData == diskBefore {
+                    applyTrashLibrarySnapshot(memoryBefore)
+                    lastDeletedTrashID = lastID; deletionMessage = message
+                } else if observedData == expected {
+                    applyTrashLibrarySnapshot(observed)
+                    deletionMessage = "资料库写入报告异常；已按磁盘状态核对并停止后续附件清理，请核对现有副本。"
+                } else { throw ResearchDocumentImportError.versionConflict }
+                libraryLastReadAt = Date()
+                libraryLastModifiedAt = (try? repository.libraryURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? libraryLastModifiedAt
+                exportWidgetSnapshot(reason: .libraryReloaded)
+            } catch {
+                applyTrashLibrarySnapshot(memoryBefore)
+                lastDeletedTrashID = lastID; deletionMessage = message
+                recordLibraryLoadFailure(.unreadable, error: error)
+            }
+            throw originalError
+        }
     }
 
     // MARK: - 启动一致性扫描（只报告，不自动删除）

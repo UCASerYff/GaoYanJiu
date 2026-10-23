@@ -130,6 +130,39 @@ private final class ResearchWidgetRetryState {
     }
 }
 
+#if RESEARCH_WIDGET_STORE_REGRESSION
+/// Available only in the isolated store-link test binary. Production builds
+/// cannot redirect their App Group publication or replace WidgetKit requests.
+@MainActor
+enum ResearchWidgetStoreRegressionHooks {
+    static var reloadKinds: [String] = []
+    static var failNextPrimaryWrite = false
+
+    static func snapshotURL(libraryURL: URL) -> URL? {
+        let environment = ProcessInfo.processInfo.environment
+        guard environment["GAOQINIANSAN_INTEGRATION_TEST"] == "1",
+              let path = environment["GAO_WIDGET_STORE_TEST_ROOT"],
+              path.hasPrefix("/private/tmp/"), path.hasSuffix(".noindex") else { return nil }
+        // URL.standardizedFileURL rewrites an existing /private/tmp tree to
+        // /tmp on macOS. Compare explicit paths without resolving that alias;
+        // the production no-follow file IO still validates every component.
+        let root = URL(fileURLWithPath: path, isDirectory: true)
+        guard root.path == path, !root.pathComponents.contains(".."), !root.pathComponents.contains("."),
+              environment["GAO_RESEARCH_DATA_DIR"] == root.appendingPathComponent("Data").path,
+              libraryURL.isFileURL, libraryURL.path == root.appendingPathComponent("Data/library.json").path else { return nil }
+        return root.appendingPathComponent("Widget/statistics.json")
+    }
+
+    static func write(_ data: Data, to url: URL) throws {
+        if failNextPrimaryWrite && url.lastPathComponent == "statistics.json" {
+            failNextPrimaryWrite = false
+            throw ResearchWidgetStorage.Failure.writeFailed
+        }
+        try ResearchWidgetStorage.atomicWrite(data, to: url)
+    }
+}
+#endif
+
 extension PaperStore {
     private func reloadWidgetsForCurrentRelease(force: Bool, reason: ResearchWidgetExportReason, state: ResearchWidgetRetryState) {
         let release = ResearchBundle.bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
@@ -137,33 +170,52 @@ extension PaperStore {
         guard force || ResearchBundle.defaults.string(forKey: key) != release else { return }
         if reason == .activation, let last = state.lastReloadAt, Date().timeIntervalSince(last) < 30 { return }
         // These are requests, not acknowledgements that WidgetKit rendered them.
+#if RESEARCH_WIDGET_STORE_REGRESSION
+        ResearchWidgetStoreRegressionHooks.reloadKinds += ["ResearchSubmissionDuration", "ResearchAchievementStatistics"]
+#else
         WidgetCenter.shared.reloadTimelines(ofKind: "ResearchSubmissionDuration")
         WidgetCenter.shared.reloadTimelines(ofKind: "ResearchAchievementStatistics")
+#endif
         state.lastReloadAt = Date()
         ResearchBundle.defaults.set(release, forKey: key)
     }
 
     func retryPendingWidgetSnapshot() {
+#if RESEARCH_WIDGET_STORE_REGRESSION
+        let url = ResearchWidgetStoreRegressionHooks.snapshotURL(libraryURL: repository.libraryURL)
+#else
         guard ProcessInfo.processInfo.environment["GAO_RESEARCH_DATA_DIR"] == nil else { return }
+        let url = ResearchWidgetSnapshot.fileURL
+#endif
         let state = ResearchWidgetRetryState.state(for: self)
-        let persisted = ResearchWidgetSnapshot.fileURL.flatMap { ResearchWidgetPublication.status(at: $0) }
+        let persisted = url.flatMap { ResearchWidgetPublication.status(at: $0) }
         guard state.pending || persisted?.pending == true else { return }
         exportWidgetSnapshot(reason: .retry)
     }
 
     func exportWidgetSnapshot(reason: ResearchWidgetExportReason = .dataSaved) {
         // CLI product fixtures cannot touch a real shared container.
+#if RESEARCH_WIDGET_STORE_REGRESSION
+        let url = ResearchWidgetStoreRegressionHooks.snapshotURL(libraryURL: repository.libraryURL)
+#else
         guard ProcessInfo.processInfo.environment["GAO_RESEARCH_DATA_DIR"] == nil else { return }
-        let state = ResearchWidgetRetryState.state(for: self)
         let url = ResearchWidgetSnapshot.fileURL
+#endif
+        let state = ResearchWidgetRetryState.state(for: self)
         let attemptedAt = Date()
         do {
             guard !libraryLoadFailed, let url else {
                 ResearchWidgetPublication.recordUnavailable(at: url, reason: reason.rawValue, now: attemptedAt)
                 throw ResearchWidgetStorage.Failure.unavailable
             }
+#if RESEARCH_WIDGET_STORE_REGRESSION
+            let write = ResearchWidgetStoreRegressionHooks.write
+#else
+            let write = ResearchWidgetStorage.atomicWrite
+#endif
             let result = try ResearchWidgetPublication.refresh(libraryURL: repository.libraryURL, snapshotURL: url,
-                maximumSchema: repository.currentVersion, english: AppLocalization.language == .english, reason: reason.rawValue, now: attemptedAt)
+                maximumSchema: repository.currentVersion, english: AppLocalization.language == .english,
+                reason: reason.rawValue, now: attemptedAt, write: write)
             let snapshot = result.snapshot
             let wasPending = state.pending || result.hadPending
             state.pending = false; state.attempts = 0; state.task?.cancel(); state.task = nil

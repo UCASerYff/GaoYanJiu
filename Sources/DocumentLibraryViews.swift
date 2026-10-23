@@ -126,6 +126,7 @@ struct DocumentLibraryDashboard: View {
     @State private var draggedDocumentID: String?
     @State private var previewDocument: ManagedDocument?
     @State private var previewPage: Int?
+    @State private var showingIncomingReceipts = false
     // V4.6 batch-T：文件拖动排序已接入后端 ManagedDocument.sortOrder
     // （store.documents(in:sort:.uploadTime) 手动序优先，moveManagedDocument 归一化并落盘）。
 
@@ -174,6 +175,12 @@ struct DocumentLibraryDashboard: View {
                 originalPDFURL: sourcePDFURL(for: document),
                 initialPage: previewPage
             )
+        }
+        .sheet(isPresented: $showingIncomingReceipts) {
+            IncomingReceiptHistorySheet().environmentObject(store)
+        }
+        .toolbar {
+            Button("交接回执…", systemImage: "tray.and.arrow.up") { showingIncomingReceipts = true }
         }
     }
 
@@ -773,10 +780,17 @@ struct ActionPackageReviewSheet: View {
     @State private var selectedFolderID: String
     @State private var isProcessing = false
     @State private var errorMessage: String?
+    @State private var receipt: ResearchIncomingReceipt?
 
     init(context: PendingPackageReviewContext) {
         self.context = context
         _selectedFolderID = State(initialValue: context.targetFolderID)
+        _receipt = State(initialValue: context.incomingReceipt)
+    }
+
+    private var unsupportedTarget: String? {
+        guard case .string(let target)? = context.validatedPackage.manifest.parameters["targetRecordID"], !target.isEmpty else { return nil }
+        return target
     }
 
     var body: some View {
@@ -806,6 +820,13 @@ struct ActionPackageReviewSheet: View {
                 }
                 .labelsHidden()
                 .pickerStyle(.menu)
+                .disabled(isProcessing || receipt?.targetFolderID != nil || receipt?.isTerminal == true)
+            }
+
+            if let target = unsupportedTarget {
+                Text("发送方指定的业务记录：\(target)").font(.caption)
+                Text(ResearchIncomingHandoffError.unsupportedRecordTarget.localizedDescription)
+                    .font(.callout).foregroundStyle(.orange)
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -842,20 +863,27 @@ struct ActionPackageReviewSheet: View {
                     .foregroundStyle(.red)
             }
 
+            if let receipt {
+                IncomingReceiptControls(receipt: receipt).environmentObject(store)
+            }
+
             HStack {
                 Spacer()
-                Button(AppLocalization.text("拒绝并取消")) {
-                    store.pendingPackageReview = nil
-                    dismiss()
+                Button("关闭") {
+                    store.pendingPackageReview = nil; dismiss()
                 }
                 .keyboardShortcut(.cancelAction)
                 .disabled(isProcessing)
-
-                Button(AppLocalization.text("确认导入")) {
-                    confirmImport()
+                if receipt?.isTerminal != true {
+                    Button(AppLocalization.text("拒绝并取消")) {
+                        do { receipt = try store.documentLibrary.cancelIncomingDocuments(context) }
+                        catch { errorMessage = error.localizedDescription }
+                    }
+                    .disabled(isProcessing)
+                    Button(AppLocalization.text("确认导入")) { confirmImport() }
+                        .buttonStyle(.borderedProminent)
+                        .disabled(selectedFolderID.isEmpty || isProcessing || unsupportedTarget != nil)
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(selectedFolderID.isEmpty || isProcessing)
             }
         }
         .padding(24)
@@ -871,15 +899,122 @@ struct ActionPackageReviewSheet: View {
         isProcessing = true
         Task { @MainActor in
             do {
-                let outcome = try await store.documentLibrary.importStagedDocuments(context.validatedPackage, into: folder)
-                store.exchangeFeedbackMessage = AppLocalization.format("已成功导入 %d 项文件，%d 项内容已存在去重保留。", outcome.importedCount, outcome.duplicateCount)
-                store.pendingPackageReview = nil
-                dismiss()
+                receipt = try await store.documentLibrary.approveIncomingDocuments(context, targetFolderID: folder.id, userApproved: true)
+                isProcessing = false
             } catch {
                 isProcessing = false
+                if let saved = try? store.documentLibrary.incomingHandoffs.load(context.validatedPackage.manifest.requestID) {
+                    receipt = saved
+                    selectedFolderID = saved.targetFolderID ?? selectedFolderID
+                }
                 errorMessage = AppLocalization.format("导入失败：%@", error.localizedDescription)
             }
         }
+    }
+}
+
+/// All sending/exporting starts with a fresh result envelope. Closing either
+/// sheet leaves durable pending/completed/cancelled state available here.
+private struct IncomingReceiptControls: View {
+    @EnvironmentObject private var store: PaperStore
+    let receipt: ResearchIncomingReceipt
+    var onCancelled: ((ResearchIncomingReceipt) -> Void)? = nil
+    @State private var isSending = false
+    @State private var message: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(stateDescription)
+                .font(.callout).foregroundStyle(receipt.state == "pending" ? Color.orange : Color.secondary)
+            HStack {
+                Button(isSending ? "正在发送…" : "发送回执给原发送方") {
+                    isSending = true; message = nil
+                    Task { @MainActor in
+                        defer { isSending = false }
+                        do {
+                            try await store.documentLibrary.sendIncomingResult(requestID: receipt.id)
+                            message = "已请求原发送方打开回执；接收状态由对方核验。"
+                        } catch { message = "发送未完成：\(error.localizedDescription) 回执已保留，可重试或导出。" }
+                    }
+                }.disabled(isSending)
+                Button("导出回执…") { export() }.disabled(isSending)
+                if let onCancelled, !receipt.isTerminal {
+                    Button("取消此接收请求") {
+                        do { onCancelled(try store.documentLibrary.cancelIncomingReceipt(requestID: receipt.id)) }
+                        catch { message = error.localizedDescription }
+                    }.disabled(isSending)
+                }
+            }
+            if let message { Text(message).font(.caption).textSelection(.enabled) }
+        }
+    }
+    private var stateDescription: String {
+        if receipt.state == "completed" { return "已完成业务导入；回执可重发，不会再次导入。" }
+        if receipt.state == "cancelled" { return "已明确取消；再次打开不会导入。" }
+        if receipt.targetFolderID == nil { return "尚未批准导入。可明确取消；原交接包过期后，请让发送方发起新请求。当前回执仅报告 pending。" }
+        return "已绑定目标，导入尚待完成。请恢复并核对状态；已有提交的事务不能取消或伪装完成。"
+    }
+    private func export() {
+        let panel = NSSavePanel()
+        panel.title = "导出资料交接回执"
+        panel.nameFieldStringValue = "资料交接回执.gaoaction"
+        panel.allowedContentTypes = [UTType(exportedAs: "com.gaoseries.action-package", conformingTo: .package)]
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+        do {
+            guard !FileManager.default.fileExists(atPath: destination.path) else { throw ResearchExchangeClientError.invalidSelection }
+            let url = try store.documentLibrary.prepareIncomingResult(requestID: receipt.id)
+            try FileManager.default.copyItem(at: url, to: destination)
+            message = "已导出当前有效回执；原业务状态保留。"
+        } catch { message = "导出未完成：\(error.localizedDescription)" }
+    }
+}
+
+private struct IncomingReceiptHistorySheet: View {
+    @EnvironmentObject private var store: PaperStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var receipts: [ResearchIncomingReceipt] = []
+    @State private var errorMessage: String?
+    @State private var isRecovering = false
+    @State private var recoveryMessage: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text("资料交接回执").font(.title2.weight(.semibold))
+            Text("关闭窗口不会取消请求。已完成和已取消的回执可重新发送；发送失败不改变业务状态。")
+                .font(.callout).foregroundStyle(.secondary)
+            if let errorMessage { Text(errorMessage).foregroundStyle(.red) }
+            Button(isRecovering ? "正在恢复…" : "恢复未完成导入") {
+                isRecovering = true; errorMessage = nil
+                Task { @MainActor in
+                    defer { isRecovering = false }
+                    do {
+                        receipts = try await store.documentLibrary.resumeIncomingHandoffs()
+                        let pending = receipts.filter { !$0.isTerminal }.count
+                        recoveryMessage = pending == 0 ? "已核对恢复状态；回执已刷新。" : "已检查恢复；仍有 \(pending) 项待确认或恢复，请核对状态。"
+                    } catch { errorMessage = error.localizedDescription }
+                }
+            }.disabled(isRecovering || store.documentLibrary.isImportingDocuments)
+            if let recoveryMessage { Text(recoveryMessage).font(.caption).foregroundStyle(.secondary) }
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    if receipts.isEmpty { Text("暂无接收记录。") }
+                    ForEach(receipts) { receipt in
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("\(receipt.request.sourceBundleID) · \(receipt.request.items.count) 项").font(.headline)
+                            Text("请求 \(receipt.id)").font(.caption.monospaced()).textSelection(.enabled)
+                            IncomingReceiptControls(receipt: receipt, onCancelled: { updated in
+                                if let index = receipts.firstIndex(where: { $0.id == updated.id }) { receipts[index] = updated }
+                            }).environmentObject(store)
+                                .disabled(isRecovering)
+                        }
+                        Divider()
+                    }
+                }.frame(maxWidth: .infinity, alignment: .leading)
+            }.frame(minHeight: 160, maxHeight: 400)
+            HStack { Spacer(); Button("关闭") { dismiss() }.keyboardShortcut(.cancelAction) }
+        }.padding(24).frame(width: 680)
+            .onAppear {
+                do { receipts = try store.documentLibrary.incomingHandoffs.recent().map { try store.documentLibrary.incomingReceiptForResult($0.id) } }
+                catch { errorMessage = error.localizedDescription }
+            }
     }
 }
 
@@ -902,6 +1037,8 @@ struct ExchangeResultReviewSheet: View {
         VStack(alignment: .leading, spacing: 16) {
             Text("审核资料交接结果").font(.title2.weight(.semibold))
             Text(review.summary).font(.callout)
+            Text("提供方状态：\(review.result.package.manifest.status ?? "failed") · 当前审核状态：\(review.result.workflowState)")
+                .font(.callout).foregroundStyle(review.result.package.manifest.status == "partial" ? Color.orange : Color.secondary)
             Text("来源声明：\(review.result.package.manifest.sourceBundleID)（声明未认证）")
                 .font(.caption).foregroundStyle(.secondary)
             Divider()
@@ -929,17 +1066,8 @@ struct ExchangeResultReviewSheet: View {
                         }
                     }
                     ForEach(review.result.ocrOutputs, id: \.itemID) { output in
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text(output.localCopy.lastPathComponent).font(.headline)
-                            Text("\(ByteCountFormatter.string(fromByteCount: output.byteCount, countStyle: .file)) · \(output.pages.count) 个页来源")
-                                .font(.caption).foregroundStyle(.secondary)
-                            ForEach(Array(output.warnings.enumerated()), id: \.offset) { _, warning in
-                                Text(warning).font(.caption).foregroundStyle(.orange)
-                            }
-                            if output.pages.contains(where: { $0.confidence == nil }) {
-                                Text("部分或全部页未提供置信度。").font(.caption).foregroundStyle(.secondary)
-                            }
-                        }
+                        OCRResultOutputReview(output: output, filename: outputFilename(output), sourceDisplayName: sourceName(output),
+                                              pages: review.ocrReviewPages[output.itemID] ?? [], pageError: review.ocrReviewErrors[output.itemID])
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }.frame(maxHeight: 260)
@@ -981,6 +1109,17 @@ struct ExchangeResultReviewSheet: View {
         if panel.runModal() == .OK, let url = panel.url { reselectedReferences[reference.id] = url }
     }
 
+    private func sourceName(_ output: ResearchOCROutput) -> String {
+        if let id = output.sourceDocumentID, let document = store.managedDocuments.first(where: { $0.id == id }) {
+            return document.displayName
+        }
+        return output.sourceDocumentID ?? "未提供"
+    }
+
+    private func outputFilename(_ output: ResearchOCROutput) -> String {
+        review.result.package.stagedItems.first(where: { $0.item.id == output.itemID })?.originalFilename ?? output.localCopy.lastPathComponent
+    }
+
     private func apply() {
         isProcessing = true
         errorMessage = nil
@@ -998,5 +1137,44 @@ struct ExchangeResultReviewSheet: View {
                 errorMessage = error.localizedDescription
             }
         }
+    }
+}
+
+private struct OCRResultOutputReview: View {
+    let output: ResearchOCROutput
+    let filename: String
+    let sourceDisplayName: String
+    let pages: [DocumentProvenance.Page]
+    let pageError: String?
+    var body: some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(filename).font(.headline)
+            Text("原件：\(sourceDisplayName)").font(.callout)
+            Text("输入 \(output.sourceItemID) · SHA256 \(output.sourceSHA256.prefix(16))")
+                .font(.caption.monospaced()).textSelection(.enabled)
+            Text("\(ByteCountFormatter.string(fromByteCount: output.byteCount, countStyle: .file)) · \(pages.count) 个页来源")
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(Array(output.warnings.enumerated()), id: \.offset) { _, warning in
+                Text(warning).font(.caption).foregroundStyle(.orange)
+            }
+            if pages.contains(where: { $0.confidence == nil }) {
+                Text("部分或全部页未提供置信度。").font(.caption).foregroundStyle(.secondary)
+            }
+            if let pageError { Text("页来源无法核验：\(pageError)").font(.caption).foregroundStyle(.red) }
+            ForEach(pages, id: \.pageNumber) { page in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(pageSummary(page)).font(.caption.weight(.medium))
+                        .foregroundStyle(page.status == "completed" ? Color.secondary : Color.orange)
+                    if let text = page.text, !text.isEmpty { Text(text).font(.caption).textSelection(.enabled) }
+                }
+            }
+        }
+    }
+    private func pageSummary(_ page: DocumentProvenance.Page) -> String {
+        let confidence: String
+        if let value = page.confidence { confidence = "置信度 \(Int((value * 100).rounded()))%" }
+        else { confidence = "置信度未提供" }
+        let status = page.status ?? "状态未提供"
+        return "第 \(page.pageNumber) 页 · \(status) · \(confidence)"
     }
 }

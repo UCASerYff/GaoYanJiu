@@ -141,8 +141,11 @@ if [[ "$ELECTIONS" == *$'\n-'* || "$ELECTIONS" == -* ]]; then
 elif [[ "$ELECTIONS" == *$'\n+'* || "$ELECTIONS" == +* ]]; then
     OLD_ELECTION=use
 fi
-SAFETY="$ROOT/rollback/搞研究-$(date +%Y%m%d-%H%M%S)-$$.app"
-mkdir -p "$ROOT/rollback"
+# Keep the recoverable old host outside Spotlight discovery while business
+# verification is pending. Moving it back on failure preserves the same path
+# used by the rollback trap; do not rename or discard a safety copy to hide it.
+SAFETY="$ROOT/rollback.noindex/搞研究-$(date +%Y%m%d-%H%M%S)-$$.app"
+mkdir -p "$ROOT/rollback.noindex"
 TRANSACTION_STARTED=1
 if [[ -d "$TARGET" ]]; then
     if [[ -d "$NEW_WIDGET" ]]; then

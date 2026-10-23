@@ -186,6 +186,9 @@ struct GaoValidatedActionPackage {
     let manifest: GaoActionManifest
     let stagingDirectory: URL
     let stagedItems: [GaoStagedActionItem]
+    // Digest of the exact bytes validated through the fixed manifest FD.
+    // An empty value is allowed only for legacy hand-built fixtures.
+    var manifestSHA256: String = ""
 }
 struct GaoActionFileFingerprint {
     let byteCount: Int64
@@ -368,7 +371,8 @@ struct GaoActionPackageValidator {
         }
         guard GaoSecureFD.unchanged(beforeManifest, try GaoSecureFD.stat(manifestFD)) else { throw GaoActionError.sourceChanged }
         succeeded = true
-        return .init(manifest: manifest, stagingDirectory: staging.url, stagedItems: copied)
+        return .init(manifest: manifest, stagingDirectory: staging.url, stagedItems: copied,
+                     manifestSHA256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())
     }
 }
 
