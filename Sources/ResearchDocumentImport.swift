@@ -73,7 +73,33 @@ extension DocumentLibraryStore {
                 }
                 let beforeDocuments = self.documents, beforeFolders = self.folders
                 let durableDocuments = try self.readDurableDocuments?() ?? self.documents
+                let isNewOCRDerivativeBatch = items.allSatisfy { item in
+                    guard item.effectiveOperation == .revision, let revision = item.revision else { return false }
+                    return revision.kind == "ocrDerived" && revision.documentID == item.documentID
+                        && revision.originalDocumentID != item.documentID
+                }
                 do {
+                    var normalizedDurableDocuments: [ManagedDocument] = []
+                    if isNewOCRDerivativeBatch {
+                        let memoryIDs = Set(beforeDocuments.map(\.id)), durableIDs = Set(durableDocuments.map(\.id))
+                        guard memoryIDs.count == beforeDocuments.count, durableIDs.count == durableDocuments.count,
+                              memoryIDs == durableIDs else { throw ResearchDocumentImportError.versionConflict }
+                        // Loading assigns UI order in memory without rewriting the library.
+                        // Validate every old record before carrying the fresh durable values
+                        // forward; unknown memory edits must never be silently discarded.
+                        normalizedDurableDocuments = Self.normalizedDocumentOrdering(durableDocuments)
+                        for memory in beforeDocuments {
+                            guard let durable = durableDocuments.first(where: { $0.id == memory.id }),
+                                  let normalized = normalizedDurableDocuments.first(where: { $0.id == memory.id }) else {
+                                throw ResearchDocumentImportError.versionConflict
+                            }
+                            let canonical = try Self.canonicalDocument(memory)
+                            guard try canonical == Self.canonicalDocument(durable)
+                                    || canonical == Self.canonicalDocument(normalized) else {
+                                throw ResearchDocumentImportError.versionConflict
+                            }
+                        }
+                    }
                     for item in items {
                         let record = try Self.decodeImportRecord(item.recordData)
                         guard record.document.id == item.documentID, record.document.folderID == item.scopeID else {
@@ -92,8 +118,28 @@ extension DocumentLibraryStore {
                                 let original = try Self.decodeImportRecord(data).document
                                 guard let memory = self.documents.first(where: { $0.id == original.id }),
                                       let durable = durableDocuments.first(where: { $0.id == original.id }),
-                                      try Self.canonicalDocument(memory) == Self.canonicalDocument(original),
-                                      try Self.canonicalDocument(durable) == Self.canonicalDocument(original) else { throw ResearchDocumentImportError.versionConflict }
+                                      try Self.canonicalDocument(memory) == Self.canonicalDocument(original) else {
+                                    throw ResearchDocumentImportError.versionConflict
+                                }
+                                if isNewOCRDerivativeBatch, let order = original.sortOrder {
+                                    // Moving a sibling can change this source's relative
+                                    // position without changing its own stored order value.
+                                    guard normalizedDurableDocuments.first(where: { $0.id == original.id })?.sortOrder == order else {
+                                        throw ResearchDocumentImportError.versionConflict
+                                    }
+                                }
+                                if try Self.canonicalDocument(durable) != Self.canonicalDocument(original) {
+                                    // Only a new OCR derivative may use the exact load-only
+                                    // nil-to-order view. Existing explicit order, all other
+                                    // metadata and update/replacement CAS remain strict.
+                                    guard isNewOCRDerivativeBatch, durable.sortOrder == nil, original.sortOrder != nil,
+                                          item.expectedOriginal?.documentID == original.id,
+                                          item.revision?.originalDocumentID == original.id,
+                                          let normalized = normalizedDurableDocuments.first(where: { $0.id == original.id }),
+                                          try Self.canonicalDocument(normalized) == Self.canonicalDocument(original) else {
+                                        throw ResearchDocumentImportError.versionConflict
+                                    }
+                                }
                             }
                             self.documents.append(record.document)
                         case .update:
@@ -108,6 +154,24 @@ extension DocumentLibraryStore {
                                   try Self.canonicalDocument(durable) == Self.canonicalDocument(original.document) else { throw ResearchDocumentImportError.versionConflict }
                             self.documents[index] = record.document
                         }
+                    }
+                    if isNewOCRDerivativeBatch {
+                        let createdIDs = Set(items.map(\.documentID))
+                        guard createdIDs.count == items.count,
+                              self.documents.count == beforeDocuments.count + items.count else {
+                            throw ResearchDocumentImportError.versionConflict
+                        }
+                        for original in beforeDocuments {
+                            guard let current = self.documents.first(where: { $0.id == original.id }),
+                                  try Self.canonicalDocument(current) == Self.canonicalDocument(original) else {
+                                throw ResearchDocumentImportError.versionConflict
+                            }
+                        }
+                        let created = self.documents.filter { createdIDs.contains($0.id) }
+                        guard created.count == items.count else { throw ResearchDocumentImportError.versionConflict }
+                        // PaperStore saves the whole collection. Preserve every old raw
+                        // record and its order instead of persisting load-only UI values.
+                        self.documents = durableDocuments + created
                     }
                     try persist()
                 } catch {
@@ -390,6 +454,15 @@ extension DocumentLibraryStore {
             boundID = id
         } else { boundID = nil }
         if let receipt = session.appliedResults?[manifest.requestID] {
+            if session.action == .ocrFiles {
+                let journal = try transactionJournal()
+                guard let id = UUID(uuidString: receipt.receiptID),
+                      let completed = try journal.job(requestID: id), completed.stage == .completed,
+                      completed.outcome?.documentIDs == receipt.importedDocumentIDs else {
+                    throw ResearchDocumentImportError.versionConflict
+                }
+                try validateCompletedOCRReplay(completed, result: result, journal: journal)
+            }
             return .init(documentIDs: receipt.importedDocumentIDs, importedCount: 0,
                          duplicateCount: receipt.importedDocumentIDs.count, replayed: true)
         }
@@ -405,13 +478,36 @@ extension DocumentLibraryStore {
             guard let folder = folders.first(where: { $0.id == id }) else { throw ResearchDocumentImportError.invalidTarget }
             chosenFolder = folder
         }
+        let targetScope = try resultTargetScope(result, chosenFolder: chosenFolder)
+        var ocrFingerprintV2 = session.action == .ocrFiles
+            ? try client.semanticResultFingerprintV2(result, targetScope: targetScope) : nil
         // Before V4.04 jobs used the envelope UUID. Their journal does not
         // retain the full result manifest, so a new envelope cannot prove the
         // same intent from partial saved page metadata. Exact UUID recovery
         // remains valid; otherwise stop before copying or creating a new job.
         let jobID: UUID
         var verifiedSelections: [ResearchVerifiedSelection] = []
-        if let boundID, try journal.job(requestID: boundID) != nil { jobID = boundID }
+        if let boundID, try journal.job(requestID: boundID) != nil {
+            if let currentFingerprintV2 = ocrFingerprintV2 {
+                if let stored = session.resultIntents?[manifest.requestID]?.semanticFingerprintV2 {
+                    guard stored == currentFingerprintV2 else { throw ResearchDocumentImportError.resultIntentConflict }
+                } else if boundID == envelopeID {
+                    // Pre-semantic journals used the exact envelope UUID.
+                    // The received full manifest is already bound by both
+                    // session digests. Restore only that exact immutable plan;
+                    // do not promote it into evidence for a different wrapper.
+                    ocrFingerprintV2 = nil
+                } else {
+                    // An exact legacy envelope can establish its own V2 binding
+                    // only from the complete manifest and the original V1 job.
+                    guard try client.historicalOCRSemanticFingerprintV2(requestID: session.requestID,
+                        historicalManifest: manifest, targetScope: targetScope) == currentFingerprintV2 else {
+                        throw ResearchDocumentImportError.legacyResultReviewRequired
+                    }
+                }
+            }
+            jobID = boundID
+        }
         else if try journal.job(requestID: envelopeID) != nil {
             guard boundID == nil || boundID == envelopeID else { throw ResearchDocumentImportError.resultIntentConflict }
             jobID = envelopeID
@@ -432,16 +528,43 @@ extension DocumentLibraryStore {
                     }
                 }.value
             }
-            let scope = try resultTargetScope(result, chosenFolder: chosenFolder)
-            let fingerprint = try client.semanticResultFingerprint(result, targetScope: scope, verifiedSelections: verifiedSelections)
+            let fingerprint = try ocrFingerprintV2 ?? client.semanticResultFingerprint(result, targetScope: targetScope,
+                                                                                       verifiedSelections: verifiedSelections)
             let semanticID = Self.stableImportID("exchange-result-v1:" + fingerprint)
-            guard boundID == nil || boundID == semanticID else { throw ResearchDocumentImportError.resultIntentConflict }
-            jobID = semanticID
+            if let ocrFingerprintV2 {
+                let matching = session.resultIDs.compactMap { session.resultIntents?[$0] }
+                    .filter { $0.semanticFingerprintV2 == ocrFingerprintV2 }
+                let jobIDs = Set(matching.map(\.jobID))
+                guard jobIDs.count <= 1 else { throw ResearchDocumentImportError.resultIntentConflict }
+                if let storedID = jobIDs.first {
+                    guard let restoredID = UUID(uuidString: storedID),
+                          try journal.job(requestID: restoredID) != nil,
+                          boundID == nil || boundID == restoredID else {
+                        throw ResearchDocumentImportError.resultIntentConflict
+                    }
+                    jobID = restoredID
+                } else {
+                    // A hash-only legacy intent cannot prove that a refreshed
+                    // package is a different business result. Require complete
+                    // historical evidence before creating another OCR batch.
+                    guard !(session.resultIntents?.values.contains { $0.semanticFingerprintV2 == nil } ?? false) else {
+                        throw ResearchDocumentImportError.legacyResultReviewRequired
+                    }
+                    guard boundID == nil || boundID == semanticID else { throw ResearchDocumentImportError.resultIntentConflict }
+                    jobID = semanticID
+                }
+            } else {
+                guard boundID == nil || boundID == semanticID else { throw ResearchDocumentImportError.resultIntentConflict }
+                jobID = semanticID
+            }
         }
         activeImportRequestID = jobID
         let outcome: ResearchImportJournal.Outcome
         if let existing = try journal.job(requestID: jobID) {
             if let chosenFolder, !existing.items.allSatisfy({ $0.scopeID == chosenFolder.id }) { throw ResearchDocumentImportError.invalidTarget }
+            if session.action == .ocrFiles, existing.stage == .completed {
+                try validateCompletedOCRReplay(existing, result: result, journal: journal)
+            }
             // Durable staging/plan is authoritative after interruption. A valid
             // completed job can repair a missing business receipt without replay.
             var incoming = Dictionary(uniqueKeysWithValues: result.package.stagedItems.map { ($0.item.id, $0.url) })
@@ -457,8 +580,13 @@ extension DocumentLibraryStore {
                 }
             }
             let inputs = existing.items.map { Self.restoredInput($0, source: incoming[$0.id] ?? result.package.stagingDirectory.appendingPathComponent("missing")) }
-            try client.recordResultIntent(requestID: session.requestID, resultID: manifest.requestID, jobID: jobID)
-            outcome = try await journal.submit(requestID: jobID, items: inputs)
+            try client.recordResultIntent(requestID: session.requestID, resultID: manifest.requestID, jobID: jobID,
+                                          semanticFingerprintV2: ocrFingerprintV2)
+            let resumed = try await journal.submit(requestID: jobID, items: inputs)
+            outcome = resumed.replayed
+                ? .init(documentIDs: resumed.documentIDs, importedCount: 0,
+                        duplicateCount: resumed.documentIDs.count, replayed: true)
+                : resumed
         } else {
             var inputs: [ResearchImportJournal.Input] = []
             switch session.action {
@@ -523,7 +651,8 @@ extension DocumentLibraryStore {
             }
             let originalIDs = Set(inputs.compactMap { $0.expectedOriginal?.documentID })
             try await preserveLibrarySnapshot(jobID: jobID, originals: documents.filter { originalIDs.contains($0.id) })
-            try client.recordResultIntent(requestID: session.requestID, resultID: manifest.requestID, jobID: jobID)
+            try client.recordResultIntent(requestID: session.requestID, resultID: manifest.requestID, jobID: jobID,
+                                          semanticFingerprintV2: ocrFingerprintV2)
             outcome = try await journal.submit(requestID: jobID, items: inputs)
         }
         _ = try client.markResultApplied(requestID: session.requestID, resultID: manifest.requestID,
@@ -531,6 +660,55 @@ extension DocumentLibraryStore {
         pendingExchangeResultReview = nil
         exchangeFeedbackMessage = "交接已导入 \(outcome.importedCount) 项；原件与恢复快照保留。"
         return outcome
+    }
+
+    /// A historical receipt describes a past commit. A fresh wrapper may reuse
+    /// that commit only while its actual derived records and files still exist
+    /// unchanged; it must never silently restore a user's deleted/edited copy.
+    private func validateCompletedOCRReplay(_ job: ImportJob, result: ResearchValidatedExternalResult,
+                                            journal: ResearchImportJournal) throws {
+        guard job.recordsCommitted, let savedOutcome = job.outcome,
+              Set(savedOutcome.documentIDs) == Set(job.items.map(\.documentID)),
+              Set(job.items.map(\.id)) == Set(result.ocrOutputs.map(\.itemID)) else {
+            throw ResearchDocumentImportError.versionConflict
+        }
+        let durable = try readDurableDocuments?() ?? documents
+        for item in job.items {
+            guard let output = result.ocrOutputs.first(where: { $0.itemID == item.id }),
+                  output.sha256.lowercased() == item.sha256.lowercased(), output.byteCount == item.byteCount,
+                  let originalID = output.sourceDocumentID,
+                  item.revision?.originalDocumentID == originalID,
+                  let original = durable.first(where: { $0.id == originalID }), original.folderID == item.scopeID,
+                  let current = durable.first(where: { $0.id == item.documentID }),
+                  current.folderID == item.scopeID, current.contentIndexedAt != nil else {
+                throw ResearchDocumentImportError.versionConflict
+            }
+            var planned = try Self.decodeImportRecord(item.recordData).document
+            var actual = current
+            // Display order may change after normal saves or user sorting.
+            // Compare copies only; retain current order and verify indexed
+            // text separately. All other metadata and file identity stay strict.
+            planned.contentText = nil; planned.contentIndexedAt = nil
+            actual.contentText = nil; actual.contentIndexedAt = nil
+            planned.sortOrder = nil; actual.sortOrder = nil
+            guard try Self.canonicalDocument(actual) == Self.canonicalDocument(planned),
+                  current.fileExtension.lowercased() == output.localCopy.pathExtension.lowercased(),
+                  try journal.provenance(documentID: item.documentID) == item.provenance,
+                  try journal.revision(documentID: item.documentID) == item.revision else {
+                throw ResearchDocumentImportError.versionConflict
+            }
+            let url = managedDocumentURL(current)
+            let relative = String(url.path.dropFirst(LibraryPaths.managedDocuments.path.count + 1))
+            let bytes = try GaoActionFileAccess.fingerprint(at: url)
+            guard relative == item.destinationRelativePath, bytes.sha256.lowercased() == item.sha256.lowercased(),
+                  bytes.byteCount == item.byteCount else { throw ResearchDocumentImportError.versionConflict }
+            let extracted = DocumentTextExtractor.extractText(from: url)
+            let pageText = item.provenance.pages.compactMap(\.text).joined(separator: "\n\n")
+            let frozenText = try Self.decodeImportRecord(item.recordData).document.contentText ?? ""
+            let indexed = DocumentTextExtractor.indexedText(extracted: extracted, ocrText: pageText)
+                ?? (frozenText.isEmpty ? nil : frozenText)
+            guard current.contentText == indexed else { throw ResearchDocumentImportError.versionConflict }
+        }
     }
 
     private func expectedState(for document: ManagedDocument, checksum: String) throws -> ResearchImportJournal.RecordState {

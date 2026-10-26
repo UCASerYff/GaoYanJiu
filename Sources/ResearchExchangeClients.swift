@@ -71,6 +71,9 @@ struct ResearchExchangeSession: Codable {
 struct ResearchResultIntentBinding: Codable, Equatable {
     var manifestSHA256: String
     var jobID: String
+    // Full semantic basis digest, not a payload-only duplicate heuristic.
+    // Missing in older sessions; never infer it from partial journal fields.
+    var semanticFingerprintV2: String? = nil
 }
 
 struct ResearchResultApplicationReceipt: Codable, Equatable {
@@ -216,8 +219,14 @@ final class ResearchExchangeClient {
         if let sourceScope {
             guard sourceScope.kind == "directory" else { throw ResearchExchangeClientError.invalidSelection }
         }
+        // Different extensions may resolve to the same UTI (jpg/jpeg,
+        // tif/tiff, yaml/yml, md/markdown). The provider requires unique values.
+        let normalizedUTIs = Array(Set(allowedUTIs)).sorted()
+        guard normalizedUTIs.count <= 64, allowedUTIs.allSatisfy(Self.validSelectionUTI) else {
+            throw ResearchExchangeClientError.invalidParameters
+        }
         var parameters: [String: GaoJSONValue] = ["multiple": .bool(multiple)]
-        if !allowedUTIs.isEmpty { parameters["allowedUTIs"] = .array(allowedUTIs.map(GaoJSONValue.string)) }
+        if !normalizedUTIs.isEmpty { parameters["allowedUTIs"] = .array(normalizedUTIs.map(GaoJSONValue.string)) }
         return try prepare(action: .chooseFiles, files: [], parameters: parameters, documentVersion: nil,
                            targetFolderID: targetFolderID, sourceScope: sourceScope)
     }
@@ -362,15 +371,40 @@ final class ResearchExchangeClient {
     /// still not authentication. This digest never grants approval or access.
     func semanticResultFingerprint(_ result: ResearchValidatedExternalResult, targetScope: String,
                                    verifiedSelections: [ResearchVerifiedSelection] = []) throws -> String {
-        var manifest = result.package.manifest
-        guard manifest.kind == "result", manifest.inReplyTo == result.session.requestID,
-              manifest.action == result.session.action.rawValue, manifest.sourceBundleID == result.session.providerBundleID,
+        try semanticFingerprint(manifest: result.package.manifest, session: result.session,
+                                references: result.selectedReferences, targetScope: targetScope,
+                                verifiedSelections: verifiedSelections, normalizeOCRTransportPaths: false)
+    }
+
+    /// V2 changes only OCR transport names. Type, extension, stable item IDs,
+    /// all payload evidence and complete remaining provenance stay bound.
+    /// File-selection filenames retain the original V1 semantics.
+    func semanticResultFingerprintV2(_ result: ResearchValidatedExternalResult, targetScope: String,
+                                     verifiedSelections: [ResearchVerifiedSelection] = []) throws -> String {
+        try semanticFingerprint(manifest: result.package.manifest, session: result.session,
+                                references: result.selectedReferences, targetScope: targetScope,
+                                verifiedSelections: verifiedSelections, normalizeOCRTransportPaths: true)
+    }
+
+    private func semanticFingerprint(manifest original: GaoActionManifest, session: ResearchExchangeSession,
+                                     references: [GaoActionReference], targetScope: String,
+                                     verifiedSelections: [ResearchVerifiedSelection],
+                                     normalizeOCRTransportPaths: Bool) throws -> String {
+        var manifest = original
+        guard manifest.kind == "result", manifest.inReplyTo == session.requestID,
+              manifest.action == session.action.rawValue, manifest.sourceBundleID == session.providerBundleID,
               manifest.targetBundleID == researchBundleID else { throw ResearchExchangeClientError.resultMismatch }
-        guard Set(verifiedSelections.map(\.referenceID)) == Set(result.selectedReferences.map(\.id)),
-              verifiedSelections.count == result.selectedReferences.count else { throw ResearchExchangeClientError.invalidSelection }
+        guard Set(verifiedSelections.map(\.referenceID)) == Set(references.map(\.id)),
+              verifiedSelections.count == references.count else { throw ResearchExchangeClientError.invalidSelection }
         manifest.requestID = "00000000-0000-4000-8000-000000000000"
         manifest.createdAt = ""; manifest.expiresAt = ""; manifest.nonce = ""
         manifest.items.sort { $0.id < $1.id }; manifest.references.sort { $0.id < $1.id }
+        if normalizeOCRTransportPaths && session.action == .ocrFiles {
+            for index in manifest.items.indices {
+                let ext = (manifest.items[index].relativePath as NSString).pathExtension.lowercased()
+                manifest.items[index].relativePath = "payload/output-\(index)" + (ext.isEmpty ? "" : "." + ext)
+            }
+        }
         if var provenance = manifest.provenance {
             for key in ["outputs", "sources", "pages"] {
                 guard let values = provenance[key]?.researchArray else { continue }
@@ -406,14 +440,57 @@ final class ResearchExchangeClient {
             var targetScope: String
             var verifiedReferences: [VerifiedReference]
         }
-        let intent = Intent(manifest: manifest, requestID: result.session.requestID,
-                            sources: result.session.sources.sorted { $0.itemID < $1.itemID }, targetScope: targetScope,
+        let intent = Intent(manifest: manifest, requestID: session.requestID,
+                            sources: session.sources.sorted { $0.itemID < $1.itemID }, targetScope: targetScope,
                             verifiedReferences: verifiedSelections.sorted { $0.referenceID < $1.referenceID }.map {
             .init(id: $0.referenceID, sha256: $0.sha256.lowercased(), byteCount: $0.byteCount,
                   fileExtension: $0.localCopy.pathExtension.lowercased())
         })
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return SHA256.hash(data: try encoder.encode(intent)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Comparison evidence only: this never validates an expired envelope for
+    /// execution, grants file access, applies a result or rewrites its TTL.
+    /// The full historical manifest must match BOTH prior receiver bindings,
+    /// and the untouched V1 basis must reproduce the existing journal UUID.
+    func historicalOCRSemanticFingerprintV2(requestID: String, historicalManifest manifest: GaoActionManifest,
+                                            targetScope: String) throws -> String {
+        Self.sessionMutationLock.lock()
+        defer { Self.sessionMutationLock.unlock() }
+        let session = try loadSession(requestID)
+        guard session.action == .ocrFiles, manifest.schemaVersion == 1, manifest.kind == "result",
+              manifest.inReplyTo == requestID, manifest.requestID != requestID,
+              manifest.action == session.action.rawValue, manifest.sourceBundleID == session.providerBundleID,
+              manifest.targetBundleID == researchBundleID, manifest.references.isEmpty,
+              session.resultIDs.contains(manifest.requestID),
+              let status = manifest.status, ["completed", "partial"].contains(status),
+              session.resultStatuses?[manifest.requestID] == status,
+              let intent = session.resultIntents?[manifest.requestID],
+              let jobID = UUID(uuidString: intent.jobID),
+              let digest = session.resultManifestSHA256?[manifest.requestID] else {
+            throw ResearchExchangeClientError.resultMismatch
+        }
+        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
+        let fullDigest = SHA256.hash(data: try encoder.encode(manifest)).map { String(format: "%02x", $0) }.joined()
+        guard digest == fullDigest, intent.manifestSHA256 == fullDigest else { throw ResearchExchangeClientError.resultMismatch }
+        let legacy = try semanticFingerprint(manifest: manifest, session: session, references: [], targetScope: targetScope,
+                                              verifiedSelections: [], normalizeOCRTransportPaths: false)
+        var bytes = Array(SHA256.hash(data: Data(("exchange-result-v1:" + legacy).utf8)).prefix(16))
+        bytes[6] = (bytes[6] & 0x0f) | 0x50; bytes[8] = (bytes[8] & 0x3f) | 0x80
+        let reproduced = UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                                     bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
+        guard reproduced == jobID else { throw ResearchExchangeClientError.resultMismatch }
+        // Keep this client independent of the journal implementation, but do
+        // require the owned, no-follow actual job file with that same UUID.
+        struct JobIdentity: Decodable { var requestID: UUID }
+        let jobURL = exchangeRoot.appendingPathComponent("Metadata/ImportJobs/" + jobID.uuidString.lowercased() + ".json")
+        let jobData = try GaoActionFileAccess.readPrivateData(at: jobURL, maximumBytes: 128 * 1_048_576)
+        guard try JSONDecoder().decode(JobIdentity.self, from: jobData).requestID == jobID else {
+            throw ResearchExchangeClientError.resultMismatch
+        }
+        return try semanticFingerprint(manifest: manifest, session: session, references: [], targetScope: targetScope,
+                                        verifiedSelections: [], normalizeOCRTransportPaths: true)
     }
 
     /// Receiving a result is not a business commit. Only call this after the
@@ -450,17 +527,26 @@ final class ResearchExchangeClient {
 
     /// Persist before journal submission so a retry cannot rebind the same
     /// verified envelope after its referenced file changes. Not business done.
-    func recordResultIntent(requestID: String, resultID: String, jobID: UUID) throws {
+    func recordResultIntent(requestID: String, resultID: String, jobID: UUID, semanticFingerprintV2: String? = nil) throws {
         Self.sessionMutationLock.lock()
         defer { Self.sessionMutationLock.unlock() }
         var session = try loadSession(requestID)
         guard session.action != .openDocument, session.resultIDs.contains(resultID),
               let digest = session.resultManifestSHA256?[resultID],
               ["completed", "partial"].contains(session.resultStatuses?[resultID] ?? "") else { throw ResearchExchangeClientError.invalidSession }
-        let binding = ResearchResultIntentBinding(manifestSHA256: digest, jobID: jobID.uuidString)
+        if let semanticFingerprintV2 {
+            guard session.action == .ocrFiles,
+                  semanticFingerprintV2.range(of: "^[0-9a-f]{64}$", options: .regularExpression) != nil else {
+                throw ResearchExchangeClientError.resultMismatch
+            }
+        }
+        let binding = ResearchResultIntentBinding(manifestSHA256: digest, jobID: jobID.uuidString,
+                                                  semanticFingerprintV2: semanticFingerprintV2)
         if let existing = session.resultIntents?[resultID] {
-            guard existing == binding else { throw ResearchExchangeClientError.resultMismatch }
-            return
+            guard existing.manifestSHA256 == binding.manifestSHA256, existing.jobID == binding.jobID,
+                  existing.semanticFingerprintV2 == nil || semanticFingerprintV2 == nil
+                    || existing.semanticFingerprintV2 == semanticFingerprintV2 else { throw ResearchExchangeClientError.resultMismatch }
+            if existing.semanticFingerprintV2 != nil || semanticFingerprintV2 == nil { return }
         }
         if let receipt = session.appliedResults?[resultID] {
             guard receipt.manifestSHA256 == digest, receipt.receiptID == binding.jobID else { throw ResearchExchangeClientError.resultMismatch }
@@ -648,7 +734,12 @@ final class ResearchExchangeClient {
         case .chooseFiles:
             allowed = ["allowedUTIs", "multiple"]
             if let value = parameters["multiple"], value.researchBool == nil { throw ResearchExchangeClientError.invalidParameters }
-            if let value = parameters["allowedUTIs"], !(value.researchStrings?.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 }) ?? false) { throw ResearchExchangeClientError.invalidParameters }
+            if let value = parameters["allowedUTIs"] {
+                guard let values = value.researchStrings, values.count <= 64,
+                      Set(values).count == values.count, values.allSatisfy(Self.validSelectionUTI) else {
+                    throw ResearchExchangeClientError.invalidParameters
+                }
+            }
         case .ocrFiles:
             allowed = ["languages", "outputs"]
             if let value = parameters["languages"], !(value.researchStrings?.allSatisfy(Self.validLanguage) ?? false) { throw ResearchExchangeClientError.invalidParameters }
@@ -656,6 +747,11 @@ final class ResearchExchangeClient {
         case .openDocument: allowed = []
         }
         guard Set(parameters.keys).isSubset(of: allowed) else { throw ResearchExchangeClientError.invalidParameters }
+    }
+
+    private static func validSelectionUTI(_ value: String) -> Bool {
+        !value.isEmpty && value.utf8.count <= 256
+            && value.rangeOfCharacter(from: CharacterSet.whitespacesAndNewlines.union(.controlCharacters)) == nil
     }
 
     private func validateProvider(_ application: URL, action: ResearchExternalAction,

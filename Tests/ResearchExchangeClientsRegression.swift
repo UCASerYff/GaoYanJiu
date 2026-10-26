@@ -74,11 +74,273 @@ struct ResearchExchangeClientsRegression {
 
     static func main() {
         setvbuf(stdout, nil, _IONBF, 0)
-        do { try runFixtures() }
+        do {
+            let selected = CommandLine.arguments.dropFirst(2).first ?? "all"
+            switch selected {
+            case "all": try runFixtures()
+            case "file-selection-uti-normalization": try fileSelectionUTINormalization()
+            case "ocr-result-repack": try ocrResultRepack()
+            default: throw NSError(domain: "FixtureFailure", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unknown selected client fixture"])
+            }
+        }
         catch {
             fputs("Client fixture stopped after \(checks) checks: \(String(describing: error))\n", stderr)
             exit(1)
         }
+    }
+
+    static func ocrResultRepack() throws {
+        guard let argument = CommandLine.arguments.dropFirst().first else { fatalError("explicit fixture root required") }
+        let root = URL(fileURLWithPath: argument, isDirectory: true).resolvingSymlinksInPath()
+        try expect(root.lastPathComponent == "fixture-data" && root.deletingLastPathComponent().lastPathComponent.hasPrefix("gao-research-exchange-clients."),
+                   "focused fixture must stay inside its explicit temporary directory")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: root) }
+        let client = ResearchExchangeClient(exchangeRoot: root.appendingPathComponent("Exchange"), researchBundleID: researchID,
+                                            providerLookup: { _ in nil }, clock: { fixedNow })
+        let original = root.appendingPathComponent("synthetic.png")
+        try write(Data("public synthetic PNG binding; no OCR engine invoked".utf8), to: original)
+        // Construct a normal bound request without querying LaunchServices UTI
+        // registration from this command-line fixture. The receive/result
+        // validator and semantic APIs below are the actual production path.
+        let input = GaoActionItem(id: "synthetic-input", relativePath: "payload/source.png", uti: "public.png",
+                                  byteCount: 0, sha256: String(repeating: "0", count: 64))
+        let template = GaoActionManifest(sourceBundleID: researchID, targetBundleID: ResearchExternalAction.ocrFiles.providerBundleID,
+                                         action: ResearchExternalAction.ocrFiles.rawValue, items: [input])
+        let requestURL = try GaoActionPackageWriter().write(manifest: template, files: [input.id: original],
+                                                           outgoingRoot: client.exchangeRoot.appendingPathComponent("Outgoing"))
+        let requestManifest = try JSONDecoder().decode(GaoActionManifest.self, from: Data(contentsOf: requestURL.appendingPathComponent("manifest.json")))
+        let fingerprint = try GaoActionFileAccess.fingerprint(at: original)
+        let request = ResearchPreparedExchange(packageURL: requestURL, requestID: requestManifest.requestID, action: .ocrFiles, parameters: [:])
+        let bound = ResearchExchangeSession(requestID: request.requestID, providerBundleID: ResearchExternalAction.ocrFiles.providerBundleID,
+            action: .ocrFiles, requestNonce: requestManifest.nonce, packageURL: requestURL.absoluteString, createdAt: fixedNow,
+            sources: [.init(itemID: input.id, documentID: "synthetic-document", originalFileURL: original.absoluteString,
+                             sha256: fingerprint.sha256, byteCount: fingerprint.byteCount, identity: fingerprint.identity, documentVersion: nil)],
+            state: "prepared", resultIDs: [], importedEditedSHA256: nil)
+        try write(JSONEncoder().encode(bound), to: client.exchangeRoot.appendingPathComponent("Sessions/" + request.requestID + ".json"))
+        let source = try client.loadSession(request.requestID).sources[0]
+        let files = ["txt", "json", "pdf"].map { root.appendingPathComponent("synthetic-output." + $0) }
+        for (index, file) in files.enumerated() { try write(Data("synthetic recognized bytes \(index)".utf8), to: file) }
+        let provenance: [String: GaoJSONValue] = ["sourceItemID": .string(source.itemID), "sourceSHA256": .string(source.sha256),
+            "engine": .string("SyntheticEngine"), "engineVersion": .string("1"), "languages": .array([.string("en-US")]),
+            "networkUsed": .bool(false), "opaqueMetadata": .object(["kept": .string("exact")]),
+            "pages": .array([.object(["pageNumber": .number(1), "status": .string("completed"),
+                                     "text": .string("public synthetic text"), "confidence": .number(0.99)])])]
+        let utis = ["public.utf8-plain-text", "public.json", "com.adobe.pdf"]
+        let firstURL = try result(root: root.appendingPathComponent("Provider"), request: request, action: .ocrFiles,
+                                  status: "completed", outputFiles: files, provenance: provenance, outputUTIs: utis)
+        let first = try client.receiveResult(at: firstURL)
+        let scope = "synthetic-exact-source/folder/version-scope"
+        let legacy = try client.semanticResultFingerprint(first, targetScope: scope)
+        let semantic = try client.semanticResultFingerprintV2(first, targetScope: scope)
+        var refreshed: ResearchValidatedExternalResult!
+        for round in 1...3 {
+            let url = try result(root: root.appendingPathComponent("Provider"), request: request, action: .ocrFiles,
+                                 status: "completed", outputFiles: files, provenance: provenance, outputUTIs: utis)
+            let manifestURL = url.appendingPathComponent("manifest.json")
+            var manifest = try JSONDecoder().decode(GaoActionManifest.self, from: Data(contentsOf: manifestURL))
+            for index in manifest.items.indices {
+                let old = url.appendingPathComponent(manifest.items[index].relativePath)
+                let ext = old.pathExtension
+                let relative = "payload/" + UUID().uuidString + "/nested/" + UUID().uuidString + "." + ext
+                let destination = url.appendingPathComponent(relative)
+                try fm.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true,
+                                       attributes: [.posixPermissions: 0o700])
+                try fm.moveItem(at: old, to: destination)
+                manifest.items[index].relativePath = relative
+            }
+            manifest.nonce = Data(repeating: UInt8(round), count: 32).base64EncodedString()
+            manifest.expiresAt = GaoActionISO8601.string(fixedNow.addingTimeInterval(Double(110 + round)))
+            try write(JSONEncoder().encode(manifest), to: manifestURL)
+            refreshed = try client.receiveResult(at: url)
+            try expect(refreshed.package.manifest.requestID != first.package.manifest.requestID, "each real repack has new wrapper UUID")
+            try expect(refreshed.ocrOutputs.count == 3 && refreshed.package.stagedItems.count == 3, "normal validator copies all three nested outputs")
+            try expect(try client.semanticResultFingerprint(refreshed, targetScope: scope) != legacy, "retained V1 exposes random-path difference")
+            try expect(try client.semanticResultFingerprintV2(refreshed, targetScope: scope) == semantic,
+                       "V2 ignores only physical repack names while binding identical three outputs")
+        }
+        func variant(_ change: (inout GaoActionManifest) -> Void) -> ResearchValidatedExternalResult {
+            var manifest = first.package.manifest; change(&manifest)
+            var value = first
+            value.package = .init(manifest: manifest, stagingDirectory: first.package.stagingDirectory,
+                                  stagedItems: first.package.stagedItems)
+            return value
+        }
+        let mutations: [(String, (inout GaoActionManifest) -> Void)] = [
+            ("extension", { $0.items[0].relativePath = "payload/new-name.md" }),
+            ("UTI", { $0.items[0].uti = "text/markdown" }),
+            ("item ID", { $0.items[0].id = "different-stable-id" }),
+            ("byte count", { $0.items[0].byteCount += 1 }),
+            ("payload SHA", { $0.items[0].sha256 = String(repeating: "a", count: 64) }),
+            ("status", { $0.status = "partial" }),
+            ("parameters", { $0.parameters["new-semantic-value"] = .bool(true) }),
+            ("engine", { $0.provenance?["engine"] = .string("different-engine") }),
+            ("engine version", { $0.provenance?["engineVersion"] = .string("different-version") }),
+            ("languages", { $0.provenance?["languages"] = .array([.string("zh-Hans")]) }),
+            ("network claim", { $0.provenance?["networkUsed"] = .bool(true) }),
+            ("complete opaque provenance", { $0.provenance?["opaqueMetadata"] = .object(["kept": .string("changed")]) }),
+            ("page evidence", { $0.provenance?["pages"] = .array([.object(["pageNumber": .number(1), "status": .string("completed"), "text": .string("changed")])]) })
+        ]
+        for (name, change) in mutations {
+            try expect(try client.semanticResultFingerprintV2(variant(change), targetScope: scope) != semantic,
+                       "V2 preserves " + name + " semantics")
+        }
+        let upper = variant { $0.items[0].relativePath = "payload/random.TXT" }
+        try expect(try client.semanticResultFingerprintV2(upper, targetScope: scope) == semantic, "extension case follows lowercase importer semantics")
+        try expect(try client.semanticResultFingerprintV2(first, targetScope: "other-target") != semantic, "V2 binds exact target scope")
+        var changedSource = first; changedSource.session.sources[0].documentVersion = fixedNow
+        try expect(try client.semanticResultFingerprintV2(changedSource, targetScope: scope) != semantic, "V2 binds source document version")
+        changedSource = first; changedSource.session.sources[0].identity.modifiedAt = "different-source-identity"
+        try expect(try client.semanticResultFingerprintV2(changedSource, targetScope: scope) != semantic, "V2 binds complete source identity")
+        for (name, change) in [("provider", { (m: inout GaoActionManifest) in m.sourceBundleID = "other.provider" }),
+                                ("target", { (m: inout GaoActionManifest) in m.targetBundleID = "other.consumer" }),
+                                ("request", { (m: inout GaoActionManifest) in m.inReplyTo = UUID().uuidString })] {
+            try fails("V2 routing mismatch " + name, expected: .resultMismatch) {
+                _ = try client.semanticResultFingerprintV2(variant(change), targetScope: scope)
+            }
+        }
+        let choose = try client.prepareFileSelection()
+        var chooseValue = first; chooseValue.session = try client.loadSession(choose.requestID)
+        var chooseManifest = first.package.manifest
+        chooseManifest.action = ResearchExternalAction.chooseFiles.rawValue; chooseManifest.inReplyTo = choose.requestID
+        chooseManifest.sourceBundleID = ResearchExternalAction.chooseFiles.providerBundleID
+        chooseValue.package = .init(manifest: chooseManifest, stagingDirectory: first.package.stagingDirectory,
+                                    stagedItems: first.package.stagedItems)
+        try expect(try client.semanticResultFingerprintV2(chooseValue, targetScope: scope) == client.semanticResultFingerprint(chooseValue, targetScope: scope),
+                   "choose V2 entry retains identical V1 algorithm")
+        let chooseBefore = try client.semanticResultFingerprintV2(chooseValue, targetScope: scope)
+        chooseManifest.items[0].relativePath = "payload/different-choice-name.txt"
+        chooseValue.package = .init(manifest: chooseManifest, stagingDirectory: first.package.stagingDirectory,
+                                    stagedItems: first.package.stagedItems)
+        try expect(try client.semanticResultFingerprintV2(chooseValue, targetScope: scope) != chooseBefore,
+                   "choose payload filename remains part of intent")
+        func stableJob(_ fingerprint: String) -> UUID {
+            var bytes = Array(SHA256.hash(data: Data(("exchange-result-v1:" + fingerprint).utf8)).prefix(16))
+            bytes[6] = (bytes[6] & 15) | 80; bytes[8] = (bytes[8] & 63) | 128
+            return UUID(uuid: (bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7],bytes[8],bytes[9],bytes[10],bytes[11],bytes[12],bytes[13],bytes[14],bytes[15]))
+        }
+        let jobID = stableJob(legacy), resultID = first.package.manifest.requestID
+        try client.recordResultIntent(requestID: request.requestID, resultID: resultID, jobID: jobID)
+        let jobURL = client.exchangeRoot.appendingPathComponent("Metadata/ImportJobs/" + jobID.uuidString.lowercased() + ".json")
+        try write(JSONSerialization.data(withJSONObject: ["requestID":jobID.uuidString]), to: jobURL)
+        let jobRaw = try Data(contentsOf: jobURL)
+        try expect(try client.historicalOCRSemanticFingerprintV2(requestID: request.requestID, historicalManifest: first.package.manifest,
+                                                                 targetScope: scope) == semantic, "full historical proof reproduces V1 job before calculating V2")
+        try fails("historical wrong target scope refused by V1 job", expected: .resultMismatch) {
+            _ = try client.historicalOCRSemanticFingerprintV2(requestID: request.requestID, historicalManifest: first.package.manifest, targetScope: "wrong-scope")
+        }
+        try fails("tampered historical full provenance rejected", expected: .resultMismatch) {
+            _ = try client.historicalOCRSemanticFingerprintV2(requestID: request.requestID,
+                historicalManifest: variant { $0.provenance?["opaqueMetadata"] = .bool(false) }.package.manifest, targetScope: scope)
+        }
+        let sessionURL = client.exchangeRoot.appendingPathComponent("Sessions/" + request.requestID + ".json")
+        let ordinarySession = try Data(contentsOf: sessionURL)
+        // Historical evidence is deliberately read-only. These exact numeric
+        // tokens reproduced a real lossy JSONSerialization migration preview;
+        // no decode/re-encode of the session is allowed in the proof API.
+        var precise = String(decoding: ordinarySession, as: UTF8.self)
+        precise.removeLast()
+        precise += #","futureUnknownField":{"precise":814513152.58979,"other":814618359.469376,"large":9007199254740993,"small":1.234567890123456789e-12}}"#
+        let precisionBytes = Data(precise.utf8)
+        try write(precisionBytes, to: sessionURL)
+        for _ in 0..<2 {
+            try expect(try client.historicalOCRSemanticFingerprintV2(requestID: request.requestID,
+                historicalManifest: first.package.manifest, targetScope: scope) == semantic, "pure historical evidence computes full proved V2")
+            try expect(try Data(contentsOf: sessionURL) == precisionBytes, "pure evidence leaves entire raw session and precise numeric tokens untouched")
+        }
+        try fails("wrong historical scope remains read-only", expected: .resultMismatch) {
+            _ = try client.historicalOCRSemanticFingerprintV2(requestID: request.requestID,
+                historicalManifest: first.package.manifest, targetScope: "wrong-scope")
+        }
+        try expect(try Data(contentsOf: sessionURL) == precisionBytes, "historical refusal leaves exact numeric bytes untouched")
+        try write(JSONSerialization.data(withJSONObject: ["requestID":UUID().uuidString]), to: jobURL)
+        try fails("historical proof rejects actual job UUID mismatch", expected: .resultMismatch) {
+            _ = try client.historicalOCRSemanticFingerprintV2(requestID: request.requestID,
+                historicalManifest: first.package.manifest, targetScope: scope)
+        }
+        try expect(try Data(contentsOf: sessionURL) == precisionBytes, "job mismatch never changes session")
+        try write(jobRaw, to: jobURL)
+        let expiredProof = ResearchExchangeClient(exchangeRoot: client.exchangeRoot, researchBundleID: researchID,
+                                                   providerLookup: { _ in nil }, clock: { fixedNow.addingTimeInterval(600) })
+        try expect(try expiredProof.historicalOCRSemanticFingerprintV2(requestID: request.requestID,
+            historicalManifest: first.package.manifest, targetScope: scope) == semantic, "old expiry is comparison evidence only")
+        try expect(try Data(contentsOf: sessionURL) == precisionBytes && Data(contentsOf: jobURL) == jobRaw,
+                   "old evidence never writes session, job, applied receipt or TTL")
+        // Separate normal intent-persistence checks use the original fixture,
+        // not a migration or a rewrite of the precision-preservation sample.
+        try write(ordinarySession, to: sessionURL)
+        try client.recordResultIntent(requestID: request.requestID, resultID: resultID, jobID: jobID, semanticFingerprintV2: semantic)
+        try expect(try client.loadSession(request.requestID).resultIntents?[resultID]?.semanticFingerprintV2 == semantic,
+                   "normal intent records its already verified V2 digest")
+        try fails("known V2 digest cannot be changed", expected: .resultMismatch) {
+            try client.recordResultIntent(requestID: request.requestID, resultID: resultID, jobID: jobID,
+                                           semanticFingerprintV2: String(repeating: "f", count: 64))
+        }
+        try fails("bound job cannot change while adding fingerprint", expected: .resultMismatch) {
+            try client.recordResultIntent(requestID: request.requestID, resultID: resultID, jobID: UUID(), semanticFingerprintV2: semantic)
+        }
+        try client.recordResultIntent(requestID: request.requestID, resultID: resultID, jobID: jobID)
+        try expect(try client.loadSession(request.requestID).resultIntents?[resultID]?.semanticFingerprintV2 == semantic,
+                   "legacy nil call never erases existing V2 digest")
+        let freshID = refreshed.package.manifest.requestID
+        try client.recordResultIntent(requestID: request.requestID, resultID: freshID, jobID: jobID, semanticFingerprintV2: semantic)
+        try expect(try client.loadSession(request.requestID).resultIntents?[freshID]?.jobID == jobID.uuidString,
+                   "fresh result can explicitly bind proved original job")
+        try fm.removeItem(at: jobURL)
+        try fails("historical proof requires actual retained job file") {
+            _ = try client.historicalOCRSemanticFingerprintV2(requestID: request.requestID, historicalManifest: first.package.manifest, targetScope: scope)
+        }
+        let expired = ResearchExchangeClient(exchangeRoot: client.exchangeRoot, researchBundleID: researchID,
+                                               providerLookup: { _ in nil }, clock: { fixedNow.addingTimeInterval(600) })
+        try fails("historical proof never grants expired result execution") { _ = try expired.receiveResult(at: firstURL) }
+        print("PASS ocr-result-repack: \(checks) checks; no provider, GUI, live data or smoke test")
+    }
+
+    static func fileSelectionUTINormalization() throws {
+        guard let argument = CommandLine.arguments.dropFirst().first else { fatalError("explicit fixture root required") }
+        let root = URL(fileURLWithPath: argument, isDirectory: true).resolvingSymlinksInPath()
+        try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: root) }
+        let client = ResearchExchangeClient(exchangeRoot: root.appendingPathComponent("Exchange"), researchBundleID: researchID,
+                                            providerLookup: { _ in nil })
+        let scope = try GaoActionReference.capture(at: root, kind: "directory")
+        let aliases = ["public.jpeg", "public.tiff", "public.yaml", "net.daringfireball.markdown",
+                       "public.jpeg", "public.tiff", "public.yaml", "net.daringfireball.markdown"]
+        let prepared = try client.prepareFileSelection(allowedUTIs: aliases, multiple: false,
+                                                        targetFolderID: "fixture-target-folder", sourceScope: scope)
+        let package = try GaoActionPackageValidator(expectedTargetBundleID: ResearchExternalAction.chooseFiles.providerBundleID)
+            .stagePackage(at: prepared.packageURL, stagingRoot: root.appendingPathComponent("ProviderStaging"))
+        let manifest = package.manifest
+        let expected = ["net.daringfireball.markdown", "public.jpeg", "public.tiff", "public.yaml"]
+        try expect(manifest.parameters["allowedUTIs"] == .array(expected.map(GaoJSONValue.string)), "8 aliases encode as 4 stable sorted UTIs")
+        try expect(prepared.parameters == manifest.parameters, "prepared parameters and validated wire request agree")
+        try expect(manifest.parameters["multiple"] == .bool(false), "multiple=false is retained")
+        try expect(manifest.sourceBundleID == researchID && manifest.targetBundleID == ResearchExternalAction.chooseFiles.providerBundleID
+                   && manifest.action == "files.choose" && manifest.kind == "request", "provider routing identity and action are unchanged")
+        try expect(manifest.items.isEmpty && manifest.references == [scope], "normalization preserves explicit source scope without payload")
+        let session = try client.loadSession(prepared.requestID)
+        try expect(session.targetFolderID == "fixture-target-folder" && session.sourceScope == scope && session.selectionIntentVersion == 1,
+                   "normalization retains local target and selection intent")
+        try expect(manifest.parameters["targetFolderID"] == nil, "local target is not leaked into provider parameters")
+        let empty = try client.prepareFileSelection(allowedUTIs: [], multiple: true, targetFolderID: "empty-target")
+        let emptyManifest = try JSONDecoder().decode(GaoActionManifest.self, from: Data(contentsOf: empty.packageURL.appendingPathComponent("manifest.json")))
+        try expect(emptyManifest.parameters["allowedUTIs"] == nil && emptyManifest.parameters["multiple"] == .bool(true), "empty UTI list is omitted and multiple=true retained")
+        try expect(try client.loadSession(empty.requestID).targetFolderID == "empty-target", "empty UTI selection retains its target")
+        for invalid in [[""], [" \t"], ["public.jpeg\n"], [String(repeating: "a", count: 257)]] {
+            try fails("invalid UTI is rejected before request encoding", expected: .invalidParameters) {
+                _ = try client.prepareFileSelection(allowedUTIs: invalid)
+            }
+        }
+        let maximum = (0..<64).map { "org.gaoseries.fixture.type\($0)" }
+        let bounded = try client.prepareFileSelection(allowedUTIs: maximum)
+        try expect(bounded.parameters["allowedUTIs"] == .array(maximum.sorted().map(GaoJSONValue.string)), "64 unique UTI boundary is retained")
+        try fails("65 unique UTIs rejected", expected: .invalidParameters) {
+            _ = try client.prepareFileSelection(allowedUTIs: maximum + ["org.gaoseries.fixture.excess"])
+        }
+        try fails("empty local folder remains invalid", expected: .invalidSelection) {
+            _ = try client.prepareFileSelection(allowedUTIs: aliases, targetFolderID: "")
+        }
+        print("PASS file-selection-uti-normalization: \(checks) checks; no provider launch, GUI or smoke test")
     }
 
     static func runFixtures() throws {

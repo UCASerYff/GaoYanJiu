@@ -1,6 +1,14 @@
 #!/bin/zsh
 set -euo pipefail
 ROOT=${0:A:h:h}
+# No arguments retains the original library-load suite. The focused OCR cases
+# must be requested explicitly and never starts an application/provider.
+TEST_ARGUMENTS=("$@")
+if (( $# != 0 )); then
+    [[ $# == 2 && "$1" == '--case' && ( "$2" == 'ocr-revision-ordering' || "$2" == 'ocr-result-repack' || "$2" == 'completed-ocr-ordering' ) ]] || {
+        echo 'Usage: scripts/test_library_load.sh [--case ocr-revision-ordering|ocr-result-repack|completed-ocr-ordering]'; exit 2
+    }
+fi
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
 [[ -d "$DEVELOPER_DIR" ]] || { echo 'Library load safety tests require Xcode'; exit 1; }
 TEST_WORK=$(mktemp -d /private/tmp/gao-research-library-load-test.XXXXXXXX)
@@ -52,5 +60,5 @@ if nm -u "$TEST_BUNDLE/Contents/MacOS/LibraryLoadSafetyRegression" | /usr/bin/c+
 fi
 GAO_RESEARCH_DATA_DIR="$TEST_WORK/Data" GAOQINIANSAN_INTEGRATION_TEST=1 \
     GAO_LIBRARY_LOAD_TEST_ROOT="$TEST_WORK/fixtures" TMPDIR="$TEST_WORK/Tmp/" \
-    "$TEST_BUNDLE/Contents/MacOS/LibraryLoadSafetyRegression"
+    "$TEST_BUNDLE/Contents/MacOS/LibraryLoadSafetyRegression" "${TEST_ARGUMENTS[@]}"
 echo 'Library load safety regression passed. No GUI or smoke test was performed.'
