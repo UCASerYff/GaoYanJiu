@@ -150,22 +150,28 @@ struct DocumentLibraryDashboard: View {
                 folderGrid
             }
         }
-        .alert(item: $deleteRequest) { request in
-            Alert(
-                title: Text(AppLocalization.text(request.isFolder ? "删除文件夹？" : "删除文件？")),
-                message: Text(request.isFolder
-                    ? AppLocalization.format("“%@”及其中的文件会移入回收站，可在30天内恢复。", request.name)
-                    : AppLocalization.format("“%@”会移入回收站，可在30天内恢复。", request.name)),
-                primaryButton: .destructive(Text(AppLocalization.text("删除"))) {
-                    if request.isFolder {
-                        if selectedFolderID == request.id { selectedFolderID = nil }
-                        store.deleteDocumentFolder(id: request.id)
-                    } else if let document = store.managedDocuments.first(where: { $0.id == request.id }) {
-                        store.deleteDocument(document)
-                    }
-                },
-                secondaryButton: .cancel(Text(AppLocalization.text("取消")))
-            )
+        .alert(
+            AppLocalization.text(deleteRequest?.isFolder == true ? "删除文件夹？" : "删除文件？"),
+            isPresented: Binding(
+                get: { deleteRequest != nil },
+                set: { if !$0 { deleteRequest = nil } }
+            ),
+            presenting: deleteRequest
+        ) { request in
+            Button(AppLocalization.text("取消"), role: .cancel) { deleteRequest = nil }
+            Button(AppLocalization.text("删除"), role: .destructive) {
+                deleteRequest = nil
+                if request.isFolder {
+                    if selectedFolderID == request.id { selectedFolderID = nil }
+                    store.deleteDocumentFolder(id: request.id)
+                } else if let document = store.managedDocuments.first(where: { $0.id == request.id }) {
+                    store.deleteDocument(document)
+                }
+            }
+        } message: { request in
+            Text(request.isFolder
+                ? AppLocalization.format("“%@”及其中的文件会移入回收站，可在30天内恢复。", request.name)
+                : AppLocalization.format("“%@”会移入回收站，可在30天内恢复。", request.name))
         }
         .sheet(item: $previewDocument) { document in
             QuickLookPreviewSheet(
