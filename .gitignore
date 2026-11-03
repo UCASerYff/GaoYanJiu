@@ -39,4 +39,5 @@ ReconciliationBackups/
 
 .install-lock.noindex/
 .install.noindex.*/
+.install-staging.noindex/
 TestResults/

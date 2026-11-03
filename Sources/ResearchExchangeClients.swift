@@ -13,8 +13,8 @@ enum ResearchExternalAction: String, Codable, CaseIterable {
 
     var providerBundleID: String {
         switch self {
-        case .chooseFiles: return "com.gaoseries.GaoZhengLi"
-        case .ocrFiles: return "com.gaoseries.GaoJieTu"
+        case .chooseFiles: return "com.gaoseries.GaoWenJian"
+        case .ocrFiles: return "com.gaoseries.GaoCaoZuo"
         case .openDocument: return "com.gaoseries.GaoWenJian"
         }
     }
@@ -155,7 +155,7 @@ struct ResearchEditedCopyImport {
 enum ResearchExchangeClientError: LocalizedError, Equatable {
     case invalidCapability, providerUnavailable(String), invalidParameters
     case invalidSelection, requiresLocalSelection, sourceChanged
-    case invalidSession, resultMismatch, invalidOCRMapping, invalidOCRCompletion
+    case invalidSession, providerChanged, resultMismatch, invalidOCRMapping, invalidOCRCompletion
     case invalidEditResult, requestExpired, tooManyItems, alreadyImported, requiresTargetReview
 
     var errorDescription: String? {
@@ -167,6 +167,7 @@ enum ResearchExchangeClientError: LocalizedError, Equatable {
         case .requiresLocalSelection: return "外部引用未授予访问权限或身份信息不完整，请在本应用重新选择该文件。"
         case .sourceChanged: return "文件身份、内容摘要或原版本已经改变，请重新核对原件。"
         case .invalidSession: return "找不到有效的本地交接记录；不会导入或覆盖原件。"
+        case .providerChanged: return "此请求仍绑定旧提供方，不能改发给其他应用。请保留原会话，核对是否仍在处理后，从当前资料文件夹明确发起新请求。"
         case .resultMismatch: return "结果与待处理请求的目标、动作、来源声明或输入摘要不匹配。"
         case .invalidOCRMapping: return "OCR 结果无法明确关联原件，或页码、坐标信息无效。请核对原件。"
         case .invalidOCRCompletion: return "OCR 含失败、取消或低置信度页，不能标记为全部完成。"
@@ -254,8 +255,10 @@ final class ResearchExchangeClient {
                            documentVersion: originalVersion)
     }
 
-    @MainActor
-    func openInProvider(_ prepared: ResearchPreparedExchange) async throws {
+    /// Read-only send gate shared with non-GUI contract tests. Historical
+    /// sessions keep their original provider and may still receive its result;
+    /// a provider migration must never reroute or replay their old request.
+    func validatePreparedRequestForSending(_ prepared: ResearchPreparedExchange) throws {
         let session = try loadSession(prepared.requestID)
         let manifest = try loadManifest(prepared.packageURL)
         guard manifest.requestID == session.requestID, manifest.nonce == session.requestNonce,
@@ -263,7 +266,15 @@ final class ResearchExchangeClient {
               session.action == prepared.action,
               manifest.parameters == prepared.parameters,
               session.packageURL == prepared.packageURL.absoluteString else { throw ResearchExchangeClientError.invalidSession }
+        guard session.providerBundleID == prepared.action.providerBundleID else {
+            throw ResearchExchangeClientError.providerChanged
+        }
         guard let expiry = Self.isoDate(manifest.expiresAt), expiry >= clock() else { throw ResearchExchangeClientError.requestExpired }
+    }
+
+    @MainActor
+    func openInProvider(_ prepared: ResearchPreparedExchange) async throws {
+        try validatePreparedRequestForSending(prepared)
         let provider = availability(for: prepared.action, parameters: prepared.parameters)
         guard provider.isAvailable, let application = provider.applicationURL else {
             throw ResearchExchangeClientError.providerUnavailable(provider.reason)

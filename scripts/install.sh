@@ -23,6 +23,16 @@ OLD_ELECTION=default
 fail() { print -u2 -- "$1"; }
 plist_value() { "$PLISTBUDDY" -c "Print :$2" "$1/Contents/Info.plist"; }
 
+# A dot-prefixed name is not an indexing exclusion. Every extracted App must
+# be below an actual .noindex ancestor before the App directory is created.
+prepare_stage() {
+    local parent="$ROOT/.install-staging.noindex"
+    [[ ! -L "$parent" ]] || { fail '安装暂存目录不能是符号链接'; return 1; }
+    mkdir -p "$parent" || return 1
+    [[ -d "$parent" && ! -L "$parent" ]] || return 1
+    mktemp -d "$parent/XXXXXXXX"
+}
+
 # Leave recovery copies until the caller has verified business data and widgets.
 # This script changes only application bundles and their registrations.
 finish_install() {
@@ -70,7 +80,7 @@ NUMBER=$("$PLISTBUDDY" -c 'Print :CFBundleVersion' "$ROOT/Info.plist")
 SOURCE=${GAO_INSTALL_APP:-"$ROOT/build.noindex/搞研究.app"}
 if [[ ! -d "$SOURCE" ]]; then
     [[ -z "${GAO_INSTALL_APP:-}" ]] || { fail '指定安装包不存在'; exit 1; }
-    STAGE=$(mktemp -d "$ROOT/.install.noindex.XXXXXXXX")
+    STAGE=$(prepare_stage)
     (cd "$ROOT/dist"; shasum -a 256 -c "GaoYanJiu-$VERSION.zip.sha256")
     ditto -x -k "$ROOT/dist/GaoYanJiu-$VERSION.zip" "$STAGE"
     SOURCE="$STAGE/搞研究.app"
@@ -120,7 +130,7 @@ fi
 
 # Remove only missing hosts with this exact bundle identifier. A stale higher
 # version of the integrated app can otherwise supersede the standalone widget.
-STAGE=${STAGE:-$(mktemp -d "$ROOT/.install.noindex.XXXXXXXX")}
+STAGE=${STAGE:-$(prepare_stage)}
 "$LSREGISTER" -dump > "$STAGE/launchservices.txt"
 python3 "$ROOT/scripts/registered_apps.py" "$STAGE/launchservices.txt" "$APP_ID" > "$STAGE/stale-hosts.bin"
 while IFS= read -r -d '' old_host; do
@@ -145,7 +155,15 @@ fi
 # verification is pending. Moving it back on failure preserves the same path
 # used by the rollback trap; do not rename or discard a safety copy to hide it.
 SAFETY="$ROOT/rollback.noindex/搞研究-$(date +%Y%m%d-%H%M%S)-$$.app"
+[[ ! -L "$ROOT/rollback.noindex" ]] || { fail '恢复目录不能是符号链接'; exit 1; }
 mkdir -p "$ROOT/rollback.noindex"
+[[ ! -e "$SAFETY" && ! -L "$SAFETY" ]] || { fail '恢复路径已存在'; exit 1; }
+OLD_IDENTITY=""
+if [[ -e "$TARGET" ]]; then
+    [[ -d "$TARGET" && ! -L "$TARGET" ]] || { fail '旧程序不是常规App目录'; exit 1; }
+    [[ "$(stat -f %d "$TARGET")" == "$(stat -f %d "$ROOT/rollback.noindex")" ]] || { fail '恢复副本必须同卷移动保留原件'; exit 1; }
+    OLD_IDENTITY=$(stat -f '%d:%i' "$TARGET")
+fi
 TRANSACTION_STARTED=1
 if [[ -d "$TARGET" ]]; then
     if [[ -d "$NEW_WIDGET" ]]; then
@@ -157,6 +175,8 @@ if [[ -d "$TARGET" ]]; then
         fi
     fi
     "$LSREGISTER" -u "$TARGET"
+    [[ "$(stat -f '%d:%i' "$TARGET")" == "$OLD_IDENTITY" && ! -e "$SAFETY" && ! -L "$SAFETY" && ! -L "$ROOT/rollback.noindex" ]] || { fail '旧程序或恢复路径在安装期间变化'; exit 1; }
+    [[ "$(stat -f %d "$TARGET")" == "$(stat -f %d "$ROOT/rollback.noindex")" ]] || { fail '恢复目录卷发生变化'; exit 1; }
     /bin/mv "$TARGET" "$SAFETY"
     OLD_MOVED=1
 fi

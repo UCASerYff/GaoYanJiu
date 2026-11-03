@@ -40,8 +40,10 @@ enum ResearchTrashCopyFault {
     }
 }
 
-@MainActor
+#if !RESEARCH_INTEGRATION_COMBINED
 @main
+#endif
+@MainActor
 struct ResearchTrashPersistenceRegression {
     struct Failure: Error, CustomStringConvertible { let description: String }
     enum Injected: Error { case beforeSave, afterSave, unreadableAfterSave }
@@ -314,6 +316,53 @@ struct ResearchTrashPersistenceRegression {
         default: throw Failure(description: "Unknown edge case")
         }
     }
+    static func fundingReadOnly() throws {
+        let repo = FaultingDiskRepository()
+        try repo.disk.initializeNewLibraryAfterUserConfirmation()
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        let active = FundingRecord(id: "original-funding", name: "Public synthetic funding",
+            amount: 123.456789, year: 2026, months: [1, 7, 12], receivingAccount: "Private fixture text",
+            createdAt: date, updatedAt: date)
+        var deleted = active; deleted.id = "deleted-funding"
+        let expired = TrashItem(id: "funding-trash", kind: .funding, title: "Original funding trash",
+            deletedAt: date, funding: deleted)
+        let other = TrashItem(id: "other-trash", kind: .project, title: "Other removable record",
+            deletedAt: Date(timeIntervalSince1970: Date().timeIntervalSince1970.rounded(.down) + 86_400))
+        var initial = try durable(repo)
+        initial.fundingRecords = [active]; initial.trashItems = [expired, other]
+        try repo.disk.saveLibrary(initial)
+        let store = PaperStore(repository: repo)
+        let before = try Data(contentsOf: repo.libraryURL)
+        try require(store.fundingRecords == [active] && store.trashItems == [expired, other], "Fixture baseline differs after the repository ISO8601 round trip")
+        try require(store.trashItems.contains(expired), "Startup expiry purged a funding migration source")
+        for _ in 0..<2 {
+            _ = store.saveFundingRecord(existingID: active.id, name: "Changed", amount: 999, year: 2027, months: [2], receivingAccount: "Changed")
+            _ = store.saveFundingRecord(existingID: nil, name: "New", amount: 999, year: 2027, months: [2], receivingAccount: "New")
+            store.deleteFundingRecord(active); store.moveFundingToTrash(active)
+            store.restoreTrashItem(id: expired.id); store.permanentlyDeleteTrashItem(id: expired.id)
+        }
+        try require(try Data(contentsOf: repo.libraryURL) == before, "Funding mutation path changed durable source")
+        try require(store.fundingRecords == [active] && store.trashItems == [expired, other], "Funding mutation changed memory")
+        try require(store.lastError != nil, "Read-only funding action silently succeeded")
+        repo.failure = .beforeSave
+        store.emptyTrash()
+        try require(try Data(contentsOf: repo.libraryURL) == before && store.trashItems == [expired, other], "Failed nonfunding purge damaged migration source")
+        store.emptyTrash()
+        let final = try durable(repo)
+        try require(final.fundingRecords == [active] && final.trashItems == [expired], "Empty trash removed funding or kept other requested trash")
+        store.purgeExpiredTrash(retentionDays: -90)
+        try require(try durable(repo).fundingRecords == [active] && durable(repo).trashItems == [expired], "Expiry removed protected funding")
+        let reloaded = PaperStore(repository: FaultingDiskRepository())
+        try require(reloaded.fundingRecords == [active] && reloaded.trashItems == [expired], "Restart changed original funding fields or trash")
+        var ambiguous = other; ambiguous.id = expired.id
+        store.trashItems = [ambiguous, expired]
+        try store.saveThrowing()
+        let ambiguousBefore = try Data(contentsOf: repo.libraryURL)
+        store.restoreTrashItem(id: expired.id); store.emptyTrash()
+        store.permanentlyDeleteTrashItem(id: expired.id)
+        try require(try Data(contentsOf: repo.libraryURL) == ambiguousBefore && store.trashItems == [ambiguous, expired], "Duplicate nonfunding wrapper removed protected funding by ID")
+    }
+
     static func main() {
         setbuf(stdout, nil)
         do {
@@ -322,7 +371,8 @@ struct ResearchTrashPersistenceRegression {
                   ProcessInfo.processInfo.environment["GAOQINIANSAN_INTEGRATION_TEST"] == "1", CommandLine.arguments.count == 2 else { throw Failure(description: "Unsafe fixture") }
             UserDefaults.standard.set("zh-Hans", forKey: "gqns.language")
             let name = CommandLine.arguments[1], parts = name.split(separator: ".").map(String.init)
-            if parts[0] == "edge" { try edge(parts[1]) }
+            if name == "funding.readonly" { try fundingReadOnly() }
+            else if parts[0] == "edge" { try edge(parts[1]) }
             else if parts[0] == "purge" { try purge(operation: parts[1], fault: parts[2]) }
             else {
                 guard let kind = Kind(rawValue: parts[0]) else { throw Failure(description: "Unknown fixture kind") }

@@ -194,6 +194,7 @@ extension PaperStore {
     }
 
     func exportWidgetSnapshot(reason: ResearchWidgetExportReason = .dataSaved) {
+        let publicationStarted = ResearchStartupDiagnostics.monotonicTime()
         // CLI product fixtures cannot touch a real shared container.
 #if RESEARCH_WIDGET_STORE_REGRESSION
         let url = ResearchWidgetStoreRegressionHooks.snapshotURL(libraryURL: repository.libraryURL)
@@ -223,7 +224,9 @@ extension PaperStore {
             reloadWidgetsForCurrentRelease(force: changed || wasPending || reason != .dataSaved, reason: reason, state: state)
             NSLog("Research widget publication: schema=%d revision=%@ dataChangedAt=%@ generatedAt=%@",
                   snapshot.schemaVersion, snapshot.revision ?? "legacy", snapshot.dataChangedAt.description, snapshot.generatedAt.description)
+            ResearchStartupDiagnostics.mark("widget-publication-ready", elapsed: ResearchStartupDiagnostics.monotonicTime() - publicationStarted)
         } catch {
+            ResearchStartupDiagnostics.mark("widget-publication-pending", elapsed: ResearchStartupDiagnostics.monotonicTime() - publicationStarted)
             state.pending = true
             let code = (error as? ResearchWidgetStorage.Failure)?.rawValue ?? "decode-or-publish-failed"
             NSLog("Research widget publication pending: reason=%@ failure=%@", reason.rawValue, code)

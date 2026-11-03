@@ -343,8 +343,8 @@ extension DocumentLibraryStore {
 
     // MARK: - 跨 App 交接动作发起与结果落地
 
-    /// 向「搞整理」发起文件选择请求
-    func requestChooseFilesFromZhengLi(targetFolderID: String, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
+    /// 向「搞文件」发起文件选择请求
+    func requestChooseFilesFromWenJian(targetFolderID: String, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
         guard folders.contains(where: { $0.id == targetFolderID }) else { throw ResearchDocumentImportError.invalidTarget }
         let allowed = Self.supportedExtensions.compactMap { UTType(filenameExtension: $0)?.identifier }
         let prepared = try exchangeClient.prepareFileSelection(allowedUTIs: allowed, multiple: true, targetFolderID: targetFolderID)
@@ -352,8 +352,8 @@ extension DocumentLibraryStore {
         onPrepared(prepared, provider)
     }
 
-    /// 向「搞截图」发起扫描 PDF / 图像的文字识别（OCR）
-    func requestOCRViaJieTu(for document: ManagedDocument, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
+    /// 向「搞操作」发起扫描 PDF / 图像的文字识别（OCR）
+    func requestOCRViaCaoZuo(for document: ManagedDocument, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
         let url = managedDocumentURL(document)
         let sourceFile = ResearchExchangeSourceFile(url: url, documentID: document.id)
         let prepared = try exchangeClient.prepareOCR(userSelectedFiles: [sourceFile], languages: ["zh-Hans", "en-US"], outputs: ["text", "json", "searchablePDF"])

@@ -80,6 +80,11 @@ public struct ResearchModuleView: View {
             let target = route.host ?? ""
             if target == "submissions" || target == "works" {
                 NotificationCenter.default.post(name: .appOpenWidgetDeepLink, object: target)
+            } else if target == "funding" {
+                NotificationCenter.default.post(name: .appOpenWidgetDeepLink, object: target)
+                ResearchFundingHandoffClient.open(recordID: ResearchFundingHandoff.legacyRecordID(from: route)) { error in
+                    if let error { store.lastError = error }
+                }
             }
         } else if route.isFileURL && route.pathExtension.lowercased() == "gaoaction" {
             store.handleIncomingPackage(at: route)

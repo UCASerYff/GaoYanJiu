@@ -7,7 +7,22 @@ import Research
 /// They read the existing library and never create a replacement library.
 @main enum StandaloneEntry {
     @MainActor static func main() {
+        ResearchStartupDiagnostics.mark("host-entry")
         let arguments = Array(CommandLine.arguments.dropFirst())
+        if arguments.first == "--startup-diagnostics" {
+            guard arguments.count == 2, let pid = Int32(arguments[1]), pid > 0 else {
+                FileHandle.standardError.write(Data("Usage: --startup-diagnostics <GUI-process-PID>\n".utf8))
+                exit(2)
+            }
+            do {
+                FileHandle.standardOutput.write(try ResearchStartupDiagnostics.readPrivateFile(processID: pid))
+                FileHandle.standardOutput.write(Data("\n".utf8))
+            } catch {
+                FileHandle.standardError.write(Data("Startup timing unavailable or unsafe; no measurement returned.\n".utf8))
+                exit(1)
+            }
+            return
+        }
         if arguments == ["--widget-diagnostics"] {
             FileHandle.standardOutput.write(ResearchWidgetMaintenance.diagnostics())
             FileHandle.standardOutput.write(Data("\n".utf8))
@@ -23,6 +38,9 @@ import Research
             }
             return
         }
+        ResearchStartupDiagnostics.enablePrivateFileOutput(
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "",
+            build: Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "")
         StandaloneApp.main()
     }
 }
@@ -35,10 +53,11 @@ struct StandaloneApp: App {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
     init() {
-        
+        let restoreStarted = ResearchStartupDiagnostics.monotonicTime()
         do { try AppBackupRestore.applyPending() } catch {
             let alert=NSAlert();alert.messageText="数据恢复未完成";alert.informativeText=error.localizedDescription+"\n当前数据和恢复前副本已保留。";alert.runModal();exit(1)
         }
+        ResearchStartupDiagnostics.mark("pending-restore-finished", elapsed: ResearchStartupDiagnostics.monotonicTime() - restoreStarted)
         AppAppearance.current.apply()
         
     }
@@ -51,6 +70,7 @@ struct StandaloneApp: App {
     var body: some Scene {
         Window("搞研究 V\(Bundle.main.object(forInfoDictionaryKey:"CFBundleShortVersionString") as? String ?? "?")",id:"main") {
             ResearchModuleView(route:route,routeRevision:revision)
+                .onAppear { ResearchStartupDiagnostics.mark("content-first-appeared") }
                 .frame(minWidth:1040,minHeight:720)
                 .modifier(WindowToolbarOpaqueBackground())
                 .task {  }
@@ -89,6 +109,7 @@ struct StandaloneApp: App {
 func post(_ name:String) { NotificationCenter.default.post(name:Notification.Name(name),object:nil) }
 final class AppDelegate:NSObject,NSApplicationDelegate,UNUserNotificationCenterDelegate {
     func applicationDidFinishLaunching(_ notification:Notification) { UNUserNotificationCenter.current().delegate=self }
+    func applicationWillTerminate(_ notification:Notification) { ResearchStartupDiagnostics.flushPrivateFileOutput() }
     func applicationShouldTerminate(_ sender:NSApplication)->NSApplication.TerminateReply {
         
         return .terminateNow

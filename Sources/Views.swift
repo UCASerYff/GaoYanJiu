@@ -35,11 +35,6 @@ struct CertificateEditorContext: Identifiable {
     let recordID: String?
 }
 
-struct FundingEditorContext: Identifiable {
-    let id = UUID()
-    let recordID: String?
-}
-
 struct DocumentFolderEditorContext: Identifiable {
     let id = UUID()
     let kind: DocumentLibraryKind
@@ -86,7 +81,6 @@ struct ContentView: View {
     @State private var existingWorkEditorContext: ExistingWorkEditorContext?
     @State private var projectEditorContext: ProjectEditorContext?
     @State private var certificateEditorContext: CertificateEditorContext?
-    @State private var fundingEditorContext: FundingEditorContext?
     @State private var documentFolderEditorContext: DocumentFolderEditorContext?
     @State private var managedDocumentEditorContext: ManagedDocumentEditorContext?
     @State private var draggedPaperID: String?
@@ -217,10 +211,8 @@ struct ContentView: View {
                         }
                         .buttonStyle(ToolbarProminentStyle())
                     } else if filter == .funding {
-                        Button {
-                            fundingEditorContext = FundingEditorContext(recordID: nil)
-                        } label: {
-                            Label(AppLocalization.text("新建资金记录"), systemImage: "plus")
+                        Button { openFundingInSavings() } label: {
+                            Label(AppLocalization.text("在搞积蓄管理"), systemImage: "arrow.up.forward.app")
                         }
                         .buttonStyle(ToolbarProminentStyle())
                     } else if filter == .rewardCity {
@@ -295,12 +287,6 @@ struct ContentView: View {
         .sheet(item: $certificateEditorContext) { context in
             CertificateEditor(
                 record: context.recordID.flatMap { id in store.certificates.first(where: { $0.id == id }) }
-            )
-            .environmentObject(store)
-        }
-        .sheet(item: $fundingEditorContext) { context in
-            FundingEditor(
-                record: context.recordID.flatMap { id in store.fundingRecords.first(where: { $0.id == id }) }
             )
             .environmentObject(store)
         }
@@ -482,6 +468,8 @@ struct ContentView: View {
                 if filter != .all { filter = .all } else { search = "" }
             case "works":
                 if filter != .existing { filter = .existing } else { search = "" }
+            case "funding":
+                if filter != .funding { filter = .funding } else { search = "" }
             default:
                 break
             }
@@ -800,9 +788,7 @@ struct ContentView: View {
                     FundingDashboard(
                         records: displayedFundingRecords,
                         allRecords: store.fundingRecords,
-                        isSearching: !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                        openAction: { fundingEditorContext = FundingEditorContext(recordID: $0.id) },
-                        createAction: { fundingEditorContext = FundingEditorContext(recordID: nil) }
+                        isSearching: !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
                     )
                 } else if filter == .rewardCity {
                     RewardCityDashboard()
@@ -882,13 +868,18 @@ struct ContentView: View {
             || existingWorkEditorContext != nil
             || projectEditorContext != nil
             || certificateEditorContext != nil
-            || fundingEditorContext != nil
             || documentFolderEditorContext != nil
             || managedDocumentEditorContext != nil
             || showingTrash
     }
 
     /// ⌘N：与工具栏「新建」按钮走同一组状态机入口。
+    private func openFundingInSavings() {
+        ResearchFundingHandoffClient.open { error in
+            if let error { store.lastError = error }
+        }
+    }
+
     private func createRecordForCurrentFilter() {
         switch filter {
         case .existing:
@@ -902,7 +893,7 @@ struct ContentView: View {
         case .certificates:
             certificateEditorContext = CertificateEditorContext(recordID: nil)
         case .funding:
-            fundingEditorContext = FundingEditorContext(recordID: nil)
+            openFundingInSavings()
         case .all, .changed, .hidden:
             manualSubmissionContext = ManualSubmissionContext(paperID: nil)
         case .rewardCity:
@@ -926,8 +917,8 @@ struct ContentView: View {
             menuState.newRecordTitle = AppLocalization.text("新建证书记录")
             menuState.canCreateRecord = true
         case .funding:
-            menuState.newRecordTitle = AppLocalization.text("新建资金记录")
-            menuState.canCreateRecord = true
+            menuState.newRecordTitle = AppLocalization.text("在搞积蓄管理")
+            menuState.canCreateRecord = false
         case .all, .changed, .hidden:
             menuState.newRecordTitle = AppLocalization.text("添加在投论文")
             menuState.canCreateRecord = true

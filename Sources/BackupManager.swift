@@ -46,6 +46,7 @@ final class BackupService {
     var libraryLoadFailedProvider: () -> Bool = { false }
 
     private let decoder: JSONDecoder
+    private var automaticBackupTask: Task<Void, Never>?
 
     init() {
         decoder = JSONDecoder()
@@ -178,30 +179,33 @@ final class BackupService {
     }
 
     func createDailyAutomaticBackupIfNeeded() {
-        // 资料库加载失败时不做自动备份（此时内存为空库，备份只会固化损坏状态）。
-        guard !libraryLoadFailedProvider() else { return }
-        let fileManager = FileManager.default
-        guard fileManager.fileExists(atPath: LibraryPaths.library.path) else { return }
-        // 备份前先验证 library.json 可解码，避免把损坏状态备份进轮换、挤掉完好的历史备份。
-        do {
-            let data = try Data(contentsOf: LibraryPaths.library)
-            _ = try decoder.decode(PersistedLibrary.self, from: data)
-        } catch {
-            messageHandler(AppLocalization.language == .english
-                ? "Today’s automatic backup was skipped: the current library file cannot be read (\(error.localizedDescription)). Restore a backup first so the corrupted state does not replace a valid backup."
-                : "已跳过今日自动备份：当前资料库文件无法读取（\(error.localizedDescription)）。请先恢复备份，以免损坏状态覆盖有效备份。")
-            return
-        }
-        do {
-            try fileManager.createDirectory(at: Self.automaticBackupsURL, withIntermediateDirectories: true)
-            let destination = Self.automaticBackupsURL
-                .appendingPathComponent("搞研究-auto-\(LibraryPaths.dayFormatter.string(from: Date())).gaoyanjiu")
-            if !fileManager.fileExists(atPath: destination.path) {
-                try createPortableBackup(at: destination)
+        // A Task created from PaperStore.init still inherits MainActor. The heavy
+        // copy/hash/compression must run in a detached worker, not just in Task {}.
+        guard !libraryLoadFailedProvider(), automaticBackupTask == nil else { return }
+        let plan = AutomaticBackupWorker.Plan(source: LibraryPaths.applicationSupport,
+            destination: Self.automaticBackupsURL.appendingPathComponent("搞研究-auto-\(LibraryPaths.dayFormatter.string(from: Date())).gaoyanjiu"),
+            appVersion: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?",
+            libraryVersion: LibrarySchema.currentVersion)
+        automaticBackupTask = Task { [weak self] in
+            let started = ResearchStartupDiagnostics.monotonicTime()
+            let result = await Task.detached(priority: .utility) {
+                ResearchStartupDiagnostics.mark("daily-backup-worker-start")
+                return Result { try AutomaticBackupWorker.run(plan) }
+            }.value
+            guard let self else { return }
+            self.automaticBackupTask = nil
+            switch result {
+            case .success(let outcome):
+                ResearchStartupDiagnostics.mark("daily-backup-\(outcome.rawValue)", elapsed: ResearchStartupDiagnostics.monotonicTime() - started)
+                // Only a freshly validated, complete backup may rotate history.
+                // A same-day fast path does not revalidate a later external edit.
+                guard outcome == .created, !self.libraryLoadFailedProvider() else { return }
+                do { try self.pruneAutomaticBackups(keeping: 7) }
+                catch { self.messageHandler(AppLocalization.format("自动备份暂未完成：%@", error.localizedDescription)) }
+            case .failure(let error):
+                ResearchStartupDiagnostics.mark("daily-backup-failed", elapsed: ResearchStartupDiagnostics.monotonicTime() - started)
+                self.messageHandler(AppLocalization.format("自动备份暂未完成：%@", error.localizedDescription))
             }
-            try pruneAutomaticBackups(keeping: 7)
-        } catch {
-            messageHandler(AppLocalization.format("自动备份暂未完成：%@", error.localizedDescription))
         }
     }
 

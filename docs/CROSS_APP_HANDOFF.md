@@ -7,8 +7,12 @@
 研究端按明确的 bundle ID 查找应用，核对应用资源内的 `GaoCapabilities.json`、实际版本、动作和参数 schema，再显式指定该应用打开交接包。能力不符或提供方未安装时，发送功能不可执行；私有请求包和本地 session 保留，可导出或在 Finder 显示。不自动安装提供方，不把缺失提供方标为完成。
 
 - `documents.open`：`com.gaoseries.GaoWenJian`。
-- `ocr.files`：`com.gaoseries.GaoJieTu`。
-- `files.choose`：`com.gaoseries.GaoZhengLi`；须以实际安装和能力表为准。
+- `ocr.files`：`com.gaoseries.GaoCaoZuo`。新请求不再调用独立搞截图；OCR 参数、逐页来源和结果审核要求保持不变。
+- `files.choose`：`com.gaoseries.GaoWenJian`；须以实际安装和能力表为准。旧版搞文件只声明文档编辑动作时，文件选择仍会阻断，不自动回退到搞整理。
+
+V4.12 起，新请求的动作归属一并调整：`files.*`、`associations.manage`、`documents.*` 归搞文件；`windows.overview`、`desktop.openSettings` 归搞操作（`com.gaoseries.GaoCaoZuo`）。原搞截图的 `capture.region/window/display`、`ocr.files`、`images.annotate/pin`、`text.translate` 七个动作也统一归搞操作，沿用原参数与结果契约。`downloads.prepare` 与原 `portal.*` 归搞门户的真实 Bundle ID `cn.mendao.launcher`。仓库或内部标签 GaoMenHu 不是 Bundle ID，不构造另一套服务标识。研究没有直接下载调用界面，本处只校验请求动作归属；如新增下载客户端，仍须验证实际安装宿主的能力表并显式指定该应用打开。动作参数、包格式及本人确认边界不变，也不能把动作归属校验当作接收方实现或实际验收完成。
+
+历史 session 保留原提供方、请求、随机数和真实状态，不修改为新提供方，也不自动重发。旧提供方的有效结果仍只能匹配原 session 并经原有审核流程；新提供方不能冒领旧请求。旧请求在发起端再次发送时会明确阻断并提示先核对旧操作，再从当前文件夹本人新建请求。历史已完成回执和导入去重记录继续保留。
 
 请求包有效期为 120 秒。过期后不能绕过校验直接发送旧包。用户可以从当前研究条目明确重新发起，并重新核对当前原件与目标。曾经打开的请求可能仍在提供方执行，不能因关闭窗口、退出应用或没有收到结果就推断失败并自动重复操作。
 

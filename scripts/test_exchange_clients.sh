@@ -9,8 +9,10 @@ if (( $# )); then
     TEST_CASE="$2"
 fi
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
-TEST_WORK=$(mktemp -d "${TMPDIR:-/tmp}/gao-research-exchange-clients.XXXXXXXX")
-trap 'rm -rf "$TEST_WORK"' EXIT INT TERM
+TEST_PARENT=$(mktemp -d "${TMPDIR:-/tmp}/gao-research-exchange-clients.XXXXXXXX")
+TEST_WORK="$TEST_PARENT/fixture.noindex"
+mkdir -p "$TEST_WORK"
+trap 'rm -rf "$TEST_PARENT"' EXIT INT TERM
 SDK=$(xcrun --sdk macosx --show-sdk-path)
 swiftc -swift-version 5 -parse-as-library -Onone -sdk "$SDK" \
     -target "$(uname -m)-apple-macosx14.0" -module-cache-path "$TEST_WORK/cache" \

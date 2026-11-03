@@ -12,7 +12,7 @@ struct RecycleBinView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text(AppLocalization.text("回收站"))
                         .font(.title2.weight(.semibold))
-                    Text(AppLocalization.text("删除的记录和文件保留30天，可恢复到原位置。"))
+                    Text(AppLocalization.text("删除的记录和文件保留30天，可恢复到原位置。原资金回收项作为迁移依据只读保留。"))
                         .font(.callout)
                         .foregroundStyle(.secondary)
                 }
@@ -64,10 +64,14 @@ struct RecycleBinView: View {
                                     .foregroundStyle(.secondary)
                                 }
                                 Spacer()
-                                Button(AppLocalization.text("恢复")) { store.restoreTrashItem(id: item.id) }
-                                    .buttonStyle(.borderedProminent)
-                                Button(AppLocalization.text("彻底删除"), role: .destructive) {
-                                    pendingPermanentDeleteID = item.id
+                                if ResearchFundingHandoff.protectsTrash(kind: item.kind.rawValue, containsFunding: item.funding != nil) {
+                                    Text(AppLocalization.text("资金迁移依据（只读）")).foregroundStyle(.secondary)
+                                } else {
+                                    Button(AppLocalization.text("恢复")) { store.restoreTrashItem(id: item.id) }
+                                        .buttonStyle(.borderedProminent)
+                                    Button(AppLocalization.text("彻底删除"), role: .destructive) {
+                                        pendingPermanentDeleteID = item.id
+                                    }
                                 }
                             }
                             .padding(14)
@@ -85,7 +89,7 @@ struct RecycleBinView: View {
             Button(AppLocalization.text("取消"), role: .cancel) {}
             Button(AppLocalization.text("彻底删除"), role: .destructive) { store.emptyTrash() }
         } message: {
-            Text(AppLocalization.text("回收站中的全部记录和文件将永久删除，无法恢复。"))
+            Text(AppLocalization.text("除原资金迁移依据外，回收站中的记录和文件将永久删除，无法恢复。"))
         }
         .alert(AppLocalization.text("彻底删除该记录？"), isPresented: Binding(
             get: { pendingPermanentDeleteID != nil },

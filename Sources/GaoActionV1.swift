@@ -488,11 +488,11 @@ private enum GaoActionContract {
         guard let keys = schema[m.action] else { throw GaoActionError.unknownAction }
         if m.kind == "request" {
             let owners: [String: String] = [
-                "capture": "com.gaoseries.GaoJieTu", "ocr": "com.gaoseries.GaoJieTu", "images": "com.gaoseries.GaoJieTu", "text": "com.gaoseries.GaoJieTu",
+                "capture": "com.gaoseries.GaoCaoZuo", "ocr": "com.gaoseries.GaoCaoZuo", "images": "com.gaoseries.GaoCaoZuo", "text": "com.gaoseries.GaoCaoZuo",
                 "storage": "com.gaoseries.GaoJiLing", "cleanup": "com.gaoseries.GaoJiLing", "apps": "com.gaoseries.GaoJiLing",
-                "files": "com.gaoseries.GaoZhengLi", "associations": "com.gaoseries.GaoZhengLi", "documents": "com.gaoseries.GaoWenJian",
+                "files": "com.gaoseries.GaoWenJian", "associations": "com.gaoseries.GaoWenJian", "documents": "com.gaoseries.GaoWenJian",
                 "research": "com.academic-achievement.manager", "portal": "cn.mendao.launcher",
-                "windows": "com.gaoseries.GaoZhuoMian", "desktop": "com.gaoseries.GaoZhuoMian", "downloads": "com.gaoseries.GaoXiaZai"
+                "windows": "com.gaoseries.GaoCaoZuo", "desktop": "com.gaoseries.GaoCaoZuo", "downloads": "cn.mendao.launcher"
             ]
             guard let prefix = m.action.split(separator: ".").first, owners[String(prefix)] == m.targetBundleID else { throw GaoActionError.wrongTarget }
         }

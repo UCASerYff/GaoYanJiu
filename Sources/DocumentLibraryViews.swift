@@ -376,8 +376,8 @@ struct DocumentLibraryDashboard: View {
                 .menuStyle(.borderlessButton)
 
                 Menu {
-                    Button(AppLocalization.text("从搞整理选择资料…"), systemImage: "magnifyingglass") {
-                        chooseFromZhengLi(folderID: folder.id)
+                    Button(AppLocalization.text("从搞文件选择资料…"), systemImage: "magnifyingglass") {
+                        chooseFromWenJian(folderID: folder.id)
                     }
                     Button(AppLocalization.text("打开外部交接包…"), systemImage: "shippingbox") {
                         openActionPackageDialog()
@@ -578,8 +578,8 @@ struct DocumentLibraryDashboard: View {
         Button(AppLocalization.text("重命名与标签"), systemImage: "pencil") { editDocumentAction(document) }
         Divider()
         if ["pdf", "png", "jpg", "jpeg", "heic", "tif", "tiff"].contains(document.fileExtension.lowercased()) {
-            Button(AppLocalization.text("送搞截图识别文字（OCR）…"), systemImage: "text.viewfinder") {
-                sendToJieTuOCR(document)
+            Button(AppLocalization.text("送搞操作识别文字（OCR）…"), systemImage: "text.viewfinder") {
+                sendToCaoZuoOCR(document)
             }
         }
         Button(AppLocalization.text("在搞文件中编辑…"), systemImage: "square.and.pencil") {
@@ -649,21 +649,21 @@ struct DocumentLibraryDashboard: View {
         }
     }
 
-    private func chooseFromZhengLi(folderID: String) {
+    private func chooseFromWenJian(folderID: String) {
         do {
-            try store.requestChooseFilesFromZhengLi(targetFolderID: folderID) { prepared, provider in
+            try store.requestChooseFilesFromWenJian(targetFolderID: folderID) { prepared, provider in
                 Task { @MainActor in
                     if provider.isAvailable {
                         do {
                             try await store.documentLibrary.exchangeClient.openInProvider(prepared)
-                            store.exchangeFeedbackMessage = AppLocalization.text("已向搞整理发起文件选择请求，请在搞整理中选择要导入的文件并发送结果。")
+                            store.exchangeFeedbackMessage = AppLocalization.text("已向搞文件发起文件选择请求，请在搞文件中选择要导入的文件并发送结果。")
                         } catch {
                             store.documentLibrary.exchangeClient.revealFallback(prepared)
-                            store.exchangeFeedbackMessage = AppLocalization.format("启动搞整理失败（%@），已在访达中定位交接包。", error.localizedDescription)
+                            store.exchangeFeedbackMessage = AppLocalization.format("启动搞文件失败（%@），已在访达中定位交接包。", error.localizedDescription)
                         }
                     } else {
                         store.documentLibrary.exchangeClient.revealFallback(prepared)
-                        store.exchangeFeedbackMessage = AppLocalization.format("搞整理未就绪（%@）。已在访达中显示交接包，可手动发送。", provider.reason)
+                        store.exchangeFeedbackMessage = AppLocalization.format("搞文件未就绪（%@）。已在访达中显示交接包，可手动发送。", provider.reason)
                     }
                 }
             }
@@ -672,21 +672,21 @@ struct DocumentLibraryDashboard: View {
         }
     }
 
-    private func sendToJieTuOCR(_ document: ManagedDocument) {
+    private func sendToCaoZuoOCR(_ document: ManagedDocument) {
         do {
-            try store.requestOCRViaJieTu(for: document) { prepared, provider in
+            try store.requestOCRViaCaoZuo(for: document) { prepared, provider in
                 Task { @MainActor in
                     if provider.isAvailable {
                         do {
                             try await store.documentLibrary.exchangeClient.openInProvider(prepared)
-                            store.exchangeFeedbackMessage = AppLocalization.format("已将“%@”发送至搞截图进行文字识别（OCR），请在搞截图完成识别后发送结果。", document.displayName)
+                            store.exchangeFeedbackMessage = AppLocalization.format("已将“%@”发送至搞操作进行文字识别（OCR），请在搞操作完成识别后发送结果。", document.displayName)
                         } catch {
                             store.documentLibrary.exchangeClient.revealFallback(prepared)
-                            store.exchangeFeedbackMessage = AppLocalization.format("启动搞截图失败（%@），已在访达中定位交接包。", error.localizedDescription)
+                            store.exchangeFeedbackMessage = AppLocalization.format("启动搞操作失败（%@），已在访达中定位交接包。", error.localizedDescription)
                         }
                     } else {
                         store.documentLibrary.exchangeClient.revealFallback(prepared)
-                        store.exchangeFeedbackMessage = AppLocalization.format("搞截图未就绪（%@）。已在访达中显示交接包，可手动发送。", provider.reason)
+                        store.exchangeFeedbackMessage = AppLocalization.format("搞操作未就绪（%@）。已在访达中显示交接包，可手动发送。", provider.reason)
                     }
                 }
             }

@@ -747,3 +747,24 @@
 "正在同步投稿门户…" = "Syncing submission portals…";
 "%d 个投稿门户" = "%d submission portals";
 "本地存储 · 每日自动备份" = "Stored locally · Daily automatic backups";
+
+/* Research funding handoff */
+"资金（搞积蓄）" = "Funding (Savings)";
+"科研资金在搞积蓄管理" = "Manage research funding in Savings";
+"在搞积蓄管理" = "Manage in Savings";
+"原资金记录（只读）" = "Original funding records (read-only)";
+"计划金额" = "Scheduled amount";
+"资金迁移依据（只读）" = "Funding migration source (read-only)";
+"资金管理已迁至搞积蓄。研究中的原记录与回收项保留为只读恢复依据；请在搞积蓄完成迁移后管理。" = "Funding management has moved to Savings. Original records and trash in Research remain read-only for recovery; manage them in Savings after migration.";
+"以下是研究保留的原始计划，不代表已经到账，也不计入个人余额。实际迁移状态请在搞积蓄核对。" = "These are retained original schedules, not confirmed income or personal balances. Check the actual migration status in Savings.";
+"原记录保留在研究，新增与后续管理请使用搞积蓄。" = "Original records remain in Research. Use Savings for new entries and ongoing management.";
+"请先安装支持科研资金的搞积蓄4.04或更新版本。原资金资料仍完整保留。" = "Install Savings 4.04 or later with research funding support. Original funding data is preserved.";
+"未能打开搞积蓄：%@" = "Could not open Savings: %@";
+"删除的记录和文件保留30天，可恢复到原位置。原资金回收项作为迁移依据只读保留。" = "Deleted records and files can be restored for 30 days. Original funding trash is retained read-only as migration evidence.";
+"除原资金迁移依据外，回收站中的记录和文件将永久删除，无法恢复。" = "Trash records and files will be permanently deleted except the original funding migration source.";
+
+/* OCR handoff after capture consolidation */
+"送搞操作识别文字（OCR）…" = "Recognize Text with Actions (OCR)…";
+"已将“%@”发送至搞操作进行文字识别（OCR），请在搞操作完成识别后发送结果。" = "Sent “%@” to Actions for OCR. Send the results back after recognition in Actions.";
+"启动搞操作失败（%@），已在访达中定位交接包。" = "Could not open Actions (%@). The handoff package is selected in Finder.";
+"搞操作未就绪（%@）。已在访达中显示交接包，可手动发送。" = "Actions is unavailable (%@). The handoff package is shown in Finder for manual transfer.";

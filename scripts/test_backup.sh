@@ -3,8 +3,10 @@ set -euo pipefail
 ROOT=${0:A:h:h}
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
 [[ -d "$DEVELOPER_DIR" ]] || { echo 'Backup test requires Xcode'; exit 1; }
-TEST_WORK=$(mktemp -d "${TMPDIR:-/tmp}/gao-research-backup-test.XXXXXXXX")
-trap 'rm -rf "$TEST_WORK"' EXIT INT TERM
+TEST_PARENT=$(mktemp -d "${TMPDIR:-/tmp}/gao-research-backup-test.XXXXXXXX")
+TEST_WORK="$TEST_PARENT/fixture.noindex"
+mkdir -p "$TEST_WORK"
+trap 'rm -rf "$TEST_PARENT"' EXIT INT TERM
 TEST_APP="$TEST_WORK/BackupSafetyRegression.app"
 mkdir -p "$TEST_APP/Contents/MacOS" "$TEST_WORK/tmp" "$TEST_WORK/cache"
 python3 - "$ROOT/Info.plist" "$TEST_APP/Contents/Info.plist" <<'PY'

@@ -523,12 +523,12 @@ extension PaperStore {
         documentLibrary.revision(for: documentID)
     }
 
-    func requestChooseFilesFromZhengLi(targetFolderID: String, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
-        try documentLibrary.requestChooseFilesFromZhengLi(targetFolderID: targetFolderID, onPrepared: onPrepared)
+    func requestChooseFilesFromWenJian(targetFolderID: String, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
+        try documentLibrary.requestChooseFilesFromWenJian(targetFolderID: targetFolderID, onPrepared: onPrepared)
     }
 
-    func requestOCRViaJieTu(for document: ManagedDocument, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
-        try documentLibrary.requestOCRViaJieTu(for: document, onPrepared: onPrepared)
+    func requestOCRViaCaoZuo(for document: ManagedDocument, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
+        try documentLibrary.requestOCRViaCaoZuo(for: document, onPrepared: onPrepared)
     }
 
     func requestEditViaWenJian(for document: ManagedDocument, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {

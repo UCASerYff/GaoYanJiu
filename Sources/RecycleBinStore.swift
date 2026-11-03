@@ -214,6 +214,10 @@ final class TrashStore: ObservableObject {
 
     func permanentlyDeleteTrashItem(id: String) {
         guard items.contains(where: { $0.id == id }) else { return }
+        guard !items.contains(where: { $0.id == id && ResearchFundingHandoff.protectsTrash(kind: $0.kind.rawValue, containsFunding: $0.funding != nil) }) else {
+            errorHandler(AppLocalization.text(ResearchFundingHandoff.readOnlyMessage))
+            return
+        }
         var committed = false
         do {
             if let item = items.first(where: { $0.id == id }) { try validatePayloadIdentifiers(item) }
@@ -231,11 +235,19 @@ final class TrashStore: ObservableObject {
     func emptyTrash() {
         var committed = false
         do {
-            let ids = items.map(\.id)
-            for item in items { try validatePayloadIdentifiers(item) }
+            // Ambiguous duplicate IDs cannot grant permission to remove a
+            // protected funding item through a different wrapper.
+            let protectedIDs = Set(items.filter { ResearchFundingHandoff.protectsTrash(kind: $0.kind.rawValue, containsFunding: $0.funding != nil) }.map(\.id))
+            let selected = items.filter { !protectedIDs.contains($0.id) }
+            guard !selected.isEmpty else {
+                if !items.isEmpty { errorHandler(AppLocalization.text(ResearchFundingHandoff.readOnlyMessage)) }
+                return
+            }
+            let ids = Set(selected.map(\.id))
+            for item in selected { try validatePayloadIdentifiers(item) }
             try withTransaction {
-                items.removeAll()
-                lastDeletedTrashID = nil
+                items.removeAll { ids.contains($0.id) }
+                if let lastDeletedTrashID, ids.contains(lastDeletedTrashID) { self.lastDeletedTrashID = nil }
             }
             committed = true
             // Unknown/uncommitted safety copies are not part of this request.
@@ -247,7 +259,7 @@ final class TrashStore: ObservableObject {
 
     func purgeExpiredTrash(retentionDays: Int = 30) {
         let cutoff = Calendar.current.date(byAdding: .day, value: -retentionDays, to: Date()) ?? .distantPast
-        for item in items where item.deletedAt < cutoff {
+        for item in items where item.deletedAt < cutoff && !ResearchFundingHandoff.protectsTrash(kind: item.kind.rawValue, containsFunding: item.funding != nil) {
             permanentlyDeleteTrashItem(id: item.id)
         }
     }
@@ -333,9 +345,7 @@ extension PaperStore {
     }
 
     func moveFundingToTrash(_ record: FundingRecord) {
-        guard let record = fundingRecords.first(where: { $0.id == record.id }) else { return }
-        let item = TrashItem(id: UUID().uuidString, kind: .funding, title: record.name, deletedAt: Date(), funding: record)
-        commitDeletion(item) { fundingRecords.removeAll { $0.id == record.id } }
+        lastError = AppLocalization.text(ResearchFundingHandoff.readOnlyMessage)
     }
 
     func moveDocumentFolderToTrash(id: String) {
@@ -392,6 +402,10 @@ extension PaperStore {
 
     func restoreTrashItem(id: String) {
         guard let item = trashItems.first(where: { $0.id == id }) else { return }
+        guard !trashItems.contains(where: { $0.id == id && ResearchFundingHandoff.protectsTrash(kind: $0.kind.rawValue, containsFunding: $0.funding != nil) }) else {
+            lastError = AppLocalization.text(ResearchFundingHandoff.readOnlyMessage)
+            return
+        }
         var restoredDestination: URL?
         var committed = false
         do {

@@ -768,7 +768,7 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
         case .summaryReports: AppLocalization.text("总结报告")
         case .importantLiterature: AppLocalization.text("重要文献")
         case .certificates: AppLocalization.text("证书管理")
-        case .funding: AppLocalization.text("资金管理")
+        case .funding: AppLocalization.text("资金（搞积蓄）")
         case .rewardCity: AppLocalization.text("研究城")
         case .changed: AppLocalization.text("状态更新")
         case .hidden: AppLocalization.text("已归档")

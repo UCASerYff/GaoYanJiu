@@ -26,6 +26,8 @@ enum GaoActionFixtures {
             value.targetBundleID = "com.gaoseries.GaoJiLing"; value.action = "storage.inspect"; value.items = []
             value.references = [try GaoActionReference.capture(at: directory, kind: "directory", displayName: "Fixture directory")]
         case 2:
+            // Fixed historical V1 result fixture: retain its original source.
+            // Current OCR requests route through ResearchExternalAction instead.
             value.kind = "result"; value.sourceBundleID = "com.gaoseries.GaoJieTu"; value.action = "ocr.files"
             value.inReplyTo = requestID(index); value.status = "partial"
             value.provenance = ["sourceItemID": .string("scan"), "sourceSHA256": .string(helloSHA),

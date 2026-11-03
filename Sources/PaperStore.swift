@@ -54,6 +54,8 @@ final class PaperStore: ObservableObject {
     private var cancellables: Set<AnyCancellable> = []
 
     init(repository: LibraryRepository = DiskLibraryRepository()) {
+        let startupStarted = ResearchStartupDiagnostics.monotonicTime()
+        ResearchStartupDiagnostics.mark("store-initializing")
         self.repository = repository
         rewardStore = RewardCityStore()
         trashStore = TrashStore()
@@ -112,10 +114,12 @@ final class PaperStore: ObservableObject {
         load()
         applyTestingCoinGrantIfRequested()
         purgeExpiredTrash()
-        // 每日自动备份挪到启动完成后后台触发，不阻塞首屏（BackupService 内部逻辑不变）。
-        Task { [weak self] in self?.createDailyAutomaticBackupIfNeeded() }
+        // Scheduling is MainActor-only; the backup service's disk worker is detached.
+        createDailyAutomaticBackupIfNeeded()
         scheduleConsistencyScanIfNeeded()
         indexUnindexedDocumentsIfNeeded()
+        ResearchStartupDiagnostics.mark(libraryLoadFailed ? "store-unavailable" : "store-initialized",
+                                        elapsed: ResearchStartupDiagnostics.monotonicTime() - startupStarted)
     }
 
     var visiblePapers: [PaperRecord] {
@@ -525,37 +529,14 @@ final class PaperStore: ObservableObject {
         months: [Int],
         receivingAccount: String
     ) -> String {
-        let now = Date()
-        let normalizedMonths = Array(Set(months.filter { (1...12).contains($0) })).sorted()
-
-        if let existingID, let index = fundingRecords.firstIndex(where: { $0.id == existingID }) {
-            fundingRecords[index].name = clean(name)
-            fundingRecords[index].amount = max(0, amount)
-            fundingRecords[index].year = year
-            fundingRecords[index].months = normalizedMonths
-            fundingRecords[index].receivingAccount = clean(receivingAccount)
-            fundingRecords[index].updatedAt = now
-            save()
-            return existingID
-        }
-
-        let id = UUID().uuidString
-        fundingRecords.append(FundingRecord(
-            id: id,
-            name: clean(name),
-            amount: max(0, amount),
-            year: year,
-            months: normalizedMonths,
-            receivingAccount: clean(receivingAccount),
-            createdAt: now,
-            updatedAt: now
-        ))
-        save()
-        return id
+        // Keep schema32 funding as a read-only migration source. The old
+        // method remains callable but cannot create a second writable copy.
+        lastError = AppLocalization.text(ResearchFundingHandoff.readOnlyMessage)
+        return existingID ?? ""
     }
 
     func deleteFundingRecord(_ record: FundingRecord) {
-        moveFundingToTrash(record)
+        lastError = AppLocalization.text(ResearchFundingHandoff.readOnlyMessage)
     }
 
     func addAttachments(to workID: String) {
@@ -877,7 +858,10 @@ final class PaperStore: ObservableObject {
     // MARK: - 加载与保存（委托 LibraryRepository）
 
     func load() {
-        switch repository.loadLibrary(migratingWith: Self.applyLibraryMigration) {
+        let readStarted = ResearchStartupDiagnostics.monotonicTime()
+        let result = repository.loadLibrary(migratingWith: Self.applyLibraryMigration)
+        ResearchStartupDiagnostics.mark("repository-read-finished", elapsed: ResearchStartupDiagnostics.monotonicTime() - readStarted)
+        switch result {
         case let .loaded(library, originalVersion, migratedLegacyDirectory, migrationBackupError):
             if let migrationBackupError {
                 recordLibraryLoadFailure(.migrationBackupFailed, error: migrationBackupError)
@@ -919,6 +903,7 @@ final class PaperStore: ObservableObject {
                 // a complete successful load. Migration save() publishes on success.
                 exportWidgetSnapshot(reason: .libraryReloaded)
             }
+            ResearchStartupDiagnostics.mark(consecutiveSaveFailures == 0 ? "library-read-ready" : "library-read-unavailable")
         case .empty:
             recordLibraryLoadFailure(.missing, error: LibraryPersistenceError.missing)
         case .futureVersion(let version):
@@ -927,6 +912,7 @@ final class PaperStore: ObservableObject {
             libraryLoadFailed = true
             libraryLoadFailureReason = .futureVersion
             libraryCanInitializeNew = false
+            ResearchStartupDiagnostics.mark("library-read-unavailable")
             lastError = AppLocalization.language == .english
                 ? "The library was created by a newer version of the app (data version \(version)) and cannot be read by this version. Please update the app; your data on disk has not been modified."
                 : "资料库由更新版本的搞研究创建（数据版本 \(version)），当前版本无法读取。请升级 App 后再打开；磁盘上的数据未被改动。"
@@ -948,6 +934,7 @@ final class PaperStore: ObservableObject {
     }
 
     private func recordLibraryLoadFailure(_ reason: LibraryLoadFailureReason, error: Error) {
+        ResearchStartupDiagnostics.mark("library-read-unavailable")
         libraryLoadFailed = true
         libraryLoadFailureReason = reason
         libraryCanInitializeNew = reason == .missing && libraryLastReadAt == nil
