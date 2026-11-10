@@ -41,3 +41,4 @@ ReconciliationBackups/
 .install.noindex.*/
 .install-staging.noindex/
 TestResults/
+.superpowers/
