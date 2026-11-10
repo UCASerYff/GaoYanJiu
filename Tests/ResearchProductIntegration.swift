@@ -797,6 +797,42 @@ struct ResearchProductIntegration {
         try require(LibraryFilter(rawValue: "funding") == nil, "资金模块仍可导航")
     }
 
+    static func existingWorkAnalytics() throws {
+        func work(_ id: String, _ type: ExistingWorkType, _ patent: PatentType? = nil) -> ExistingWork {
+            ExistingWork(
+                id: id, title: id, type: type, venue: "", authors: "",
+                completedAt: Date(timeIntervalSince1970: 0),
+                identifier: "", url: "", notes: "", attachments: [],
+                createdAt: Date(timeIntervalSince1970: 0),
+                updatedAt: Date(timeIntervalSince1970: 0),
+                patentType: patent, journalISSN: nil,
+                journalMetrics: nil, authorPosition: nil
+            )
+        }
+        let works = [
+            work("journal", .journalArticle),
+            work("invention", .patent, .invention),
+            work("utility", .patent, .utilityModel),
+            work("design", .patent, .design),
+            work("other-patent", .patent),
+            work("dataset", .dataset),
+        ]
+        let data = ExistingWorkAnalytics.categories(for: works)
+        try require(data.map(\.count).reduce(0, +) == works.count, "类别合计遗漏成果")
+        try require(data.map(\.id) == [
+            "journalArticle", "patent-invention", "patent-utilityModel",
+            "patent-design", "patent-unspecified", "dataset",
+        ], "类别顺序或专利拆分改变")
+        try require(Set(data.map(\.id)).count == data.count && data.allSatisfy { $0.count > 0 },
+                    "类别 ID 重复或包含空类别")
+        try require(ExistingWorkAnalyticsLayout.chartHeight(categoryCount: 0) == 215,
+                    "空图最小高度改变")
+        try require(ExistingWorkAnalyticsLayout.chartHeight(categoryCount: 12) == 395,
+                    "多类别高度未增长")
+        try require(ExistingWorkAnalyticsLayout.stackCards(width: 800) &&
+                    !ExistingWorkAnalyticsLayout.stackCards(width: 1000), "宽窄布局阈值错误")
+    }
+
     static func portalPresentation() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         func portal(lastChecked: Date?, lastError: String?) -> PortalAccount {
@@ -834,6 +870,7 @@ struct ResearchProductIntegration {
                         "Product fixture must be a plain bundle, never a LaunchServices application host")
             try require(ResearchExchangePaths.bundleID == "com.academic-achievement.manager", "Test bundle does not expose production research routing identity")
             switch name {
+            case "existing-work-analytics": try existingWorkAnalytics()
             case "workspace-navigation": try workspaceNavigation()
             case "portal-presentation": try portalPresentation()
             case "fresh-import": try await freshImport()

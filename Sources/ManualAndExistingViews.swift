@@ -228,26 +228,8 @@ private struct AnalyticsDatum: Identifiable {
 private struct ExistingWorksAnalytics: View {
     let works: [ExistingWork]
 
-    private var typeData: [AnalyticsDatum] {
-        ExistingWorkType.allCases.flatMap { type -> [AnalyticsDatum] in
-            if type == .patent {
-                var patentItems = PatentType.allCases.compactMap { patentType -> AnalyticsDatum? in
-                    let count = works.filter { $0.type == .patent && $0.patentType == patentType }.count
-                    return count == 0 ? nil : AnalyticsDatum(
-                        id: "patent-\(patentType.rawValue)", label: patentType.title, count: count
-                    )
-                }
-                let unspecified = works.filter { $0.type == .patent && $0.patentType == nil }.count
-                if unspecified > 0 {
-                    patentItems.append(AnalyticsDatum(
-                        id: "patent-unspecified", label: AppLocalization.text("未细分专利"), count: unspecified
-                    ))
-                }
-                return patentItems
-            }
-            let count = works.filter { $0.type == type }.count
-            return count == 0 ? [] : [AnalyticsDatum(id: type.rawValue, label: type.title, count: count)]
-        }
+    private var typeData: [ExistingWorkCategoryDatum] {
+        ExistingWorkAnalytics.categories(for: works)
     }
 
     private var authorData: [AnalyticsDatum] {
@@ -276,7 +258,7 @@ private struct ExistingWorksAnalytics: View {
 
     var body: some View {
         VStack(spacing: 14) {
-            HStack(alignment: .top, spacing: 14) {
+            AdaptiveAnalyticsCardStack {
                 AnalyticsCard(title: "成果类别分布", subtitle: "按当前列表中的成果类型统计") {
                     Chart(typeData) { item in
                         BarMark(
@@ -297,7 +279,15 @@ private struct ExistingWorksAnalytics: View {
                             AxisValueLabel()
                         }
                     }
-                    .frame(height: 215)
+                    .chartYAxis {
+                        AxisMarks(position: .leading) {
+                            AxisValueLabel().font(.caption)
+                        }
+                    }
+                    .chartPlotStyle { plot in
+                        plot.padding(.trailing, 28)
+                    }
+                    .frame(height: ExistingWorkAnalyticsLayout.chartHeight(categoryCount: typeData.count))
                     .accessibilityChartDescriptor(ChartAccessibility.descriptor(
                         title: AppLocalization.text("成果类别分布"),
                         summary: AppLocalization.format(
@@ -406,6 +396,30 @@ private struct ExistingWorksAnalytics: View {
                 ))
             }
         }
+    }
+}
+
+private struct AdaptiveAnalyticsCardStack<Content: View>: View {
+    @ViewBuilder let content: Content
+    @State private var availableWidth: CGFloat = 1000
+
+    var body: some View {
+        Group {
+            if ExistingWorkAnalyticsLayout.stackCards(width: availableWidth) {
+                VStack(alignment: .leading, spacing: 14) { content }
+            } else {
+                HStack(alignment: .top, spacing: 14) { content }
+            }
+        }
+        .background(
+            GeometryReader { geometry in
+                Color.clear
+                    .onAppear { availableWidth = geometry.size.width }
+                    .onChange(of: geometry.size.width) { width in
+                        availableWidth = width
+                    }
+            }
+        )
     }
 }
 
