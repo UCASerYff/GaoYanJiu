@@ -305,7 +305,14 @@ struct ContentView: View {
             SubmissionPortalPanel(
                 openPortal: { importContext = ImportContext(publisher: publisher(for: $0)) },
                 addPortal: { importContext = ImportContext(publisher: nil) },
-                deletePortal: { portalToRemove = $0 }
+                deletePortal: { portal in
+                    guard showingPortalSheet, portalToRemove == nil else { return }
+                    showingPortalSheet = false
+                    DispatchQueue.main.async {
+                        guard !showingPortalSheet, portalToRemove == nil else { return }
+                        portalToRemove = portal
+                    }
+                }
             )
             .frame(width: 360, height: 520)
             .environmentObject(store)
@@ -615,15 +622,17 @@ struct ContentView: View {
         .onHover { hovering in hoveredFilter = hovering ? item : nil }
     }
 
-    /// 状态底卡（词元 statusFooter 风格）：门户同步状态 + 存储说明。
+    /// 状态底卡（词元 statusFooter 风格）：在投页显示门户同步状态，始终保留存储说明。
     private var statusFooter: some View {
         VStack(alignment: .leading, spacing: 7) {
-            HStack(spacing: 7) {
-                Circle().fill(store.isRefreshing ? AppTheme.blue : AppTheme.teal).frame(width: 7, height: 7)
-                Text(store.isRefreshing
-                     ? AppLocalization.text("正在同步投稿门户…")
-                     : AppLocalization.format("%d 个投稿门户", store.portals.count)).font(.caption)
-                Spacer(minLength: 0)
+            if filter.isSubmissionFilter {
+                HStack(spacing: 7) {
+                    Circle().fill(store.isRefreshing ? AppTheme.blue : AppTheme.teal).frame(width: 7, height: 7)
+                    Text(store.isRefreshing
+                         ? AppLocalization.text("正在同步投稿门户…")
+                         : AppLocalization.format("%d 个投稿门户", store.portals.count)).font(.caption)
+                    Spacer(minLength: 0)
+                }
             }
             Text(AppLocalization.text("本地存储 · 每日自动备份")).font(.system(size: 10)).foregroundStyle(.tertiary)
         }

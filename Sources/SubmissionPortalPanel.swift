@@ -23,22 +23,28 @@ struct SubmissionPortalPanel: View {
                 Button(AppLocalization.text("从投稿系统导入"), action: addPortal)
                     .buttonStyle(.borderedProminent).tint(AppTheme.accent)
             } else {
-                ForEach(store.portals) { portal in
-                    HStack(spacing: 9) {
-                        Button { openPortal(portal) } label: {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(portal.publisherName).font(.callout.weight(.medium)).lineLimit(1)
-                                Text(portal.lastError == nil ? AppLocalization.text("最近同步正常") : AppLocalization.text("同步有错误"))
-                                    .font(.caption2).foregroundStyle(portal.lastError == nil ? .secondary : AppTheme.clay)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(store.portals) { portal in
+                            HStack(spacing: 9) {
+                                Button { openPortal(portal) } label: {
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(portal.publisherName).font(.callout.weight(.medium)).lineLimit(1)
+                                        Text(portal.lastError == nil ? AppLocalization.text("最近同步正常") : AppLocalization.text("同步有错误"))
+                                            .font(.caption2).foregroundStyle(portal.lastError == nil ? .secondary : AppTheme.clay)
+                                    }
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                }.buttonStyle(.plain)
+                                Button { deletePortal(portal) } label: { Image(systemName: "trash") }
+                                    .buttonStyle(.plain).foregroundStyle(.secondary)
+                                    .disabled(store.isRefreshing).accessibilityLabel(AppLocalization.text("删除门户"))
                             }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }.buttonStyle(.plain)
-                        Button { deletePortal(portal) } label: { Image(systemName: "trash") }
-                            .buttonStyle(.plain).foregroundStyle(.secondary)
-                            .disabled(store.isRefreshing).accessibilityLabel(AppLocalization.text("删除门户"))
+                            Divider().overlay(AppTheme.border)
+                        }
                     }
-                    Divider().overlay(AppTheme.border)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
                 Button(AppLocalization.text(store.isRefreshing ? "刷新中" : "刷新全部")) { store.refreshAll() }
                     .disabled(store.isRefreshing)
             }
