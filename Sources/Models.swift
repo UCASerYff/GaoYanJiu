@@ -769,6 +769,7 @@ enum ResearchNavigationMigration {
         switch filter {
         case .changed: (.all, .changed)
         case .hidden: (.all, .hidden)
+        case .projects: (.all, .all)
         default: (filter, submissionScope)
         }
     }
@@ -802,7 +803,7 @@ enum ResearchSidebarSection: String, CaseIterable, Identifiable {
 
     var filters: [LibraryFilter] {
         switch self {
-        case .workspace: [.all, .existing, .projects]
+        case .workspace: [.all, .existing]
         case .assets: [.experimentData, .summaryReports, .importantLiterature, .certificates]
         case .exploration: [.rewardCity]
         }

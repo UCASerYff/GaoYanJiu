@@ -18,11 +18,6 @@ struct ExistingWorkEditorContext: Identifiable {
     let workID: String?
 }
 
-struct ProjectEditorContext: Identifiable {
-    let id = UUID()
-    let projectID: String?
-}
-
 struct CertificateEditorContext: Identifiable {
     let id = UUID()
     let recordID: String?
@@ -68,12 +63,10 @@ struct ContentView: View {
     @State private var paperPendingDeletion: PaperRecord?
     @State private var selectedPaper: PaperRecord?
     @State private var selectedWork: ExistingWork?
-    @State private var selectedProject: ResearchProject?
     @State private var selectedCertificate: CertificateRecord?
     @State private var importContext: ImportContext?
     @State private var manualSubmissionContext: ManualSubmissionContext?
     @State private var existingWorkEditorContext: ExistingWorkEditorContext?
-    @State private var projectEditorContext: ProjectEditorContext?
     @State private var certificateEditorContext: CertificateEditorContext?
     @State private var documentFolderEditorContext: DocumentFolderEditorContext?
     @State private var managedDocumentEditorContext: ManagedDocumentEditorContext?
@@ -102,10 +95,6 @@ struct ContentView: View {
         store.existingWorks(matching: search)
     }
 
-    private var displayedProjects: [ResearchProject] {
-        store.projects(matching: search)
-    }
-
     private var displayedCertificates: [CertificateRecord] {
         store.certificates(matching: search)
     }
@@ -113,7 +102,6 @@ struct ContentView: View {
     private var searchPrompt: String {
         switch filter {
         case .existing: AppLocalization.text("搜索成果、作者或 DOI")
-        case .projects: AppLocalization.text("搜索项目、内容或步骤")
         case .experimentData, .summaryReports, .importantLiterature: AppLocalization.text("搜索文件夹、文件名称或标签")
         case .certificates: AppLocalization.text("搜索证书名称、标签或附件")
         case .rewardCity: AppLocalization.text("研究城中的物品可在库存中筛选")
@@ -188,13 +176,6 @@ struct ContentView: View {
                             Label(AppLocalization.text("新建成果"), systemImage: "plus")
                         }
                         .buttonStyle(ToolbarProminentStyle())
-                    } else if filter == .projects {
-                        Button {
-                            projectEditorContext = ProjectEditorContext(projectID: nil)
-                        } label: {
-                            Label(AppLocalization.text("新建项目"), systemImage: "plus")
-                        }
-                        .buttonStyle(ToolbarProminentStyle())
                     } else if let kind = filter.documentLibraryKind {
                         Button {
                             documentFolderEditorContext = DocumentFolderEditorContext(kind: kind, folderID: nil)
@@ -261,16 +242,6 @@ struct ContentView: View {
         .sheet(item: $existingWorkEditorContext) { context in
             ExistingWorkEditor(
                 work: context.workID.flatMap { id in store.existingWorks.first(where: { $0.id == id }) }
-            )
-            .environmentObject(store)
-        }
-        .sheet(item: $selectedProject) { project in
-            ProjectDetailView(projectID: project.id)
-                .environmentObject(store)
-        }
-        .sheet(item: $projectEditorContext) { context in
-            ProjectEditor(
-                project: context.projectID.flatMap { id in store.projects.first(where: { $0.id == id }) }
             )
             .environmentObject(store)
         }
@@ -481,9 +452,11 @@ struct ContentView: View {
             search = route.search
         }
         .onAppear {
+            let wasProjectWorkspace = filter == .projects
             let migrated = ResearchNavigationMigration.resolve(filter: filter, submissionScope: submissionScope)
             filter = migrated.filter
             submissionScope = migrated.submissionScope
+            if wasProjectWorkspace { search = "" }
             if searchEscapeMonitor == nil {
                 let searchBinding = $search
                 let focusBinding = $searchFocused
@@ -685,13 +658,6 @@ struct ContentView: View {
                         openAction: { selectedWork = $0 },
                         createAction: { existingWorkEditorContext = ExistingWorkEditorContext(workID: nil) }
                     )
-                } else if filter == .projects {
-                    ProjectDashboard(
-                        projects: displayedProjects,
-                        isSearching: !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-                        openAction: { selectedProject = $0 },
-                        createAction: { projectEditorContext = ProjectEditorContext(projectID: nil) }
-                    )
                 } else if let kind = filter.documentLibraryKind {
                     DocumentLibraryDashboard(
                         kind: kind,
@@ -785,7 +751,7 @@ struct ContentView: View {
         switch item {
         case .all: store.visiblePapers.count
         case .existing: store.existingWorks.count
-        case .projects: store.projects.count
+        case .projects: 0 // 仅为旧场景迁移保留；真实侧栏不再展示项目。
         case .experimentData: store.documentCount(for: .experimentData)
         case .summaryReports: store.documentCount(for: .summaryReports)
         case .importantLiterature: store.documentCount(for: .importantLiterature)
@@ -800,12 +766,10 @@ struct ContentView: View {
     private var hasActiveSheet: Bool {
         selectedPaper != nil
             || selectedWork != nil
-            || selectedProject != nil
             || selectedCertificate != nil
             || importContext != nil
             || manualSubmissionContext != nil
             || existingWorkEditorContext != nil
-            || projectEditorContext != nil
             || certificateEditorContext != nil
             || documentFolderEditorContext != nil
             || managedDocumentEditorContext != nil
@@ -818,15 +782,13 @@ struct ContentView: View {
         switch filter {
         case .existing:
             existingWorkEditorContext = ExistingWorkEditorContext(workID: nil)
-        case .projects:
-            projectEditorContext = ProjectEditorContext(projectID: nil)
         case .experimentData, .summaryReports, .importantLiterature:
             if let kind = filter.documentLibraryKind {
                 documentFolderEditorContext = DocumentFolderEditorContext(kind: kind, folderID: nil)
             }
         case .certificates:
             certificateEditorContext = CertificateEditorContext(recordID: nil)
-        case .all, .changed, .hidden:
+        case .all, .changed, .hidden, .projects:
             manualSubmissionContext = ManualSubmissionContext(paperID: nil)
         case .rewardCity:
             break
@@ -839,16 +801,13 @@ struct ContentView: View {
         case .existing:
             menuState.newRecordTitle = AppLocalization.text("新建成果")
             menuState.canCreateRecord = true
-        case .projects:
-            menuState.newRecordTitle = AppLocalization.text("新建项目")
-            menuState.canCreateRecord = true
         case .experimentData, .summaryReports, .importantLiterature:
             menuState.newRecordTitle = AppLocalization.text("新建文件夹")
             menuState.canCreateRecord = true
         case .certificates:
             menuState.newRecordTitle = AppLocalization.text("新建证书记录")
             menuState.canCreateRecord = true
-        case .all, .changed, .hidden:
+        case .all, .changed, .hidden, .projects:
             menuState.newRecordTitle = AppLocalization.text("添加在投论文")
             menuState.canCreateRecord = true
         case .rewardCity:
@@ -1128,20 +1087,6 @@ private struct DashboardHeader: View {
                         color: AppTheme.teal
                     )
                     StatCard(value: currentYearCount, label: "本年成果", symbol: "calendar", color: AppTheme.clay)
-                } else if filter == .projects {
-                    StatCard(value: store.projects.count, label: "项目总数", symbol: "folder", color: AppTheme.accent)
-                    StatCard(
-                        value: store.projects.reduce(0) { $0 + $1.steps.count },
-                        label: "项目步骤",
-                        symbol: "list.bullet.clipboard",
-                        color: AppTheme.teal
-                    )
-                    StatCard(
-                        value: store.projects.reduce(0) { $0 + $1.completedStepCount },
-                        label: "已完成步骤",
-                        symbol: "checkmark.circle",
-                        color: AppTheme.clay
-                    )
                 } else if let kind = filter.documentLibraryKind {
                     StatCard(
                         value: store.documentFolders.filter { $0.libraryKind == kind }.count,
@@ -1212,12 +1157,6 @@ private struct DashboardHeader: View {
         if filter == .existing {
             guard let date = store.existingWorks.map(\.updatedAt).max() else {
                 return AppLocalization.text("手动建立已发表论文、会议成果和其他学术产出")
-            }
-            return AppLocalization.format("最近更新：%@", Formatters.dateTime.string(from: date))
-        }
-        if filter == .projects {
-            guard let date = store.projects.map(\.updatedAt).max() else {
-                return AppLocalization.text("创建项目并自定义内容、步骤和时间节点")
             }
             return AppLocalization.format("最近更新：%@", Formatters.dateTime.string(from: date))
         }

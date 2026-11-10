@@ -34,10 +34,6 @@ final class NotificationManager {
                 papers: store.visiblePapers,
                 thresholdDays: settings.submissionReminderDays
             ))
-            requests.append(contentsOf: projectRequests(
-                projects: store.projects,
-                leadDays: settings.projectReminderLeadDays
-            ))
             for request in requests.prefix(60) {
                 try await center.add(request)
             }
@@ -69,39 +65,6 @@ final class NotificationManager {
                 repeats: false
             )
             return UNNotificationRequest(identifier: "submission-\(stableIdentifier(paper.id))", content: content, trigger: trigger)
-        }
-    }
-
-    private func projectRequests(projects: [ResearchProject], leadDays: Int) -> [UNNotificationRequest] {
-        let calendar = Calendar.current
-        let now = Date()
-        return projects.flatMap { project in
-            project.steps.compactMap { step in
-                guard !step.isCompleted,
-                      let preferred = calendar.date(byAdding: .day, value: -leadDays, to: step.normalizedEndDate)
-                else { return nil }
-                let notificationDate = nextUsableNotificationDate(preferred: preferred, now: now)
-                let content = UNMutableNotificationContent()
-                content.title = AppLocalization.text("项目节点提醒")
-                let days = calendar.dateComponents(
-                    [.day],
-                    from: calendar.startOfDay(for: now),
-                    to: calendar.startOfDay(for: step.normalizedEndDate)
-                ).day ?? 0
-                content.body = days < 0
-                    ? AppLocalization.format("“%@”的步骤“%@”已逾期 %d 天。", project.title, step.title, abs(days))
-                    : AppLocalization.format("“%@”的步骤“%@”将在 %d 天后截止。", project.title, step.title, days)
-                content.sound = .default
-                let trigger = UNCalendarNotificationTrigger(
-                    dateMatching: calendar.dateComponents([.year, .month, .day, .hour, .minute], from: notificationDate),
-                    repeats: false
-                )
-                return UNNotificationRequest(
-                    identifier: "project-\(stableIdentifier(project.id))-\(stableIdentifier(step.id))",
-                    content: content,
-                    trigger: trigger
-                )
-            }
         }
     }
 

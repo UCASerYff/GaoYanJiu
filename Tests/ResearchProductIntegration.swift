@@ -779,8 +779,11 @@ struct ResearchProductIntegration {
             let migrated = ResearchNavigationMigration.resolve(filter: scope.legacyFilter, submissionScope: .all)
             try require(migrated.filter == .all && migrated.submissionScope == scope, "旧投稿导航未迁入对应在投页签：\(scope)")
         }
+        let migratedProjects = ResearchNavigationMigration.resolve(filter: .projects, submissionScope: .hidden)
+        try require(migratedProjects.filter == .all && migratedProjects.submissionScope == .all,
+                    "旧项目导航未回到在投全部")
         let sidebar = ResearchSidebarSection.allCases.flatMap(\.filters)
-        try require(sidebar == [.all, .existing, .projects, .experimentData, .summaryReports, .importantLiterature, .certificates, .rewardCity], "真实侧栏目录与测试口径不一致")
+        try require(sidebar == [.all, .existing, .experimentData, .summaryReports, .importantLiterature, .certificates, .rewardCity], "真实侧栏仍含项目管理")
         try require(!sidebar.contains(.changed) && !sidebar.contains(.hidden), "侧栏仍含独立投稿页")
         let expectedCounts: [SubmissionScope: Int] = [.all: 2, .changed: 1, .hidden: 1]
         for scope in SubmissionScope.allCases {
