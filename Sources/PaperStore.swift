@@ -153,6 +153,10 @@ final class PaperStore: ObservableObject {
         visiblePapers.filter(\.changed).count
     }
 
+    func submissionCount(for scope: SubmissionScope) -> Int {
+        papers(matching: scope.legacyFilter, search: "").count
+    }
+
     var lastChecked: Date? {
         papers.map(\.checkedAt).max()
     }

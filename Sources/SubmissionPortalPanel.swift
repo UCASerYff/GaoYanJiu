@@ -1,5 +1,42 @@
 import SwiftUI
 
+enum PortalPresentation {
+    enum State {
+        case error, stale, healthy
+    }
+
+    static func state(for portal: PortalAccount, now: Date = Date()) -> State {
+        if portal.lastError != nil { return .error }
+        guard let lastChecked = portal.lastChecked else { return .stale }
+        return now.timeIntervalSince(lastChecked) > 86_400 ? .stale : .healthy
+    }
+
+    static func hostPath(for portal: PortalAccount) -> String {
+        (URL(string: portal.url)?.host ?? portal.name) + "/"
+            + (URL(string: portal.url)?.path.split(separator: "/").first.map(String.init) ?? "")
+    }
+
+    static func statusText(for portal: PortalAccount, now: Date = Date()) -> String {
+        switch state(for: portal, now: now) {
+        case .error:
+            return AppLocalization.text("同步有错误")
+        case .stale:
+            return AppLocalization.text("历史状态，需刷新")
+        case .healthy:
+            guard let lastChecked = portal.lastChecked else { return AppLocalization.text("历史状态，需刷新") }
+            return AppLocalization.format("最近检查：%@", Formatters.dateTime.string(from: lastChecked))
+        }
+    }
+
+    static func accessibilityValue(for portal: PortalAccount, now: Date = Date()) -> String {
+        switch state(for: portal, now: now) {
+        case .error: AppLocalization.text("同步有错误")
+        case .stale: AppLocalization.text("历史状态，需刷新")
+        case .healthy: AppLocalization.text("最近同步正常")
+        }
+    }
+}
+
 struct SubmissionPortalPanel: View {
     @EnvironmentObject private var store: PaperStore
     let openPortal: (PortalAccount) -> Void
@@ -26,18 +63,25 @@ struct SubmissionPortalPanel: View {
                 ScrollView {
                     VStack(alignment: .leading, spacing: 12) {
                         ForEach(store.portals) { portal in
+                            let state = PortalPresentation.state(for: portal)
                             HStack(spacing: 9) {
                                 Button { openPortal(portal) } label: {
                                     VStack(alignment: .leading, spacing: 4) {
                                         Text(portal.publisherName).font(.callout.weight(.medium)).lineLimit(1)
-                                        Text(portal.lastError == nil ? AppLocalization.text("最近同步正常") : AppLocalization.text("同步有错误"))
-                                            .font(.caption2).foregroundStyle(portal.lastError == nil ? .secondary : AppTheme.clay)
+                                        Text(PortalPresentation.hostPath(for: portal))
+                                            .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                                        Text(PortalPresentation.statusText(for: portal))
+                                            .font(.caption2).foregroundStyle(state == .error ? AppTheme.clay : .secondary)
                                     }
                                     .frame(maxWidth: .infinity, alignment: .leading)
-                                }.buttonStyle(.plain)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityValue(PortalPresentation.accessibilityValue(for: portal))
+                                .help(AppLocalization.text("重新打开登录窗口"))
                                 Button { deletePortal(portal) } label: { Image(systemName: "trash") }
                                     .buttonStyle(.plain).foregroundStyle(.secondary)
                                     .disabled(store.isRefreshing).accessibilityLabel(AppLocalization.text("删除门户"))
+                                    .help(AppLocalization.text("删除门户"))
                             }
                             Divider().overlay(AppTheme.border)
                         }

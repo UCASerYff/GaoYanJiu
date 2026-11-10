@@ -775,10 +775,47 @@ struct ResearchProductIntegration {
         try require(store.papers(matching: .changed, search: "").map(\.id) == ["updated"], "状态更新页签口径改变")
         try require(store.papers(matching: .hidden, search: "").map(\.id) == ["archived"], "归档页签口径改变")
         try require(SubmissionScope.changed.legacyFilter == .changed && SubmissionScope.hidden.legacyFilter == .hidden, "页签未映射原筛选")
-        let migrated = ResearchNavigationMigration.resolve(filter: .hidden, submissionScope: .all)
-        try require(migrated.filter == .all && migrated.submissionScope == .hidden, "旧归档导航未迁入在投页签")
-        try require(!LibraryFilter.sidebarCases.contains(.changed) && !LibraryFilter.sidebarCases.contains(.hidden), "侧栏仍含独立投稿页")
+        for scope in [SubmissionScope.changed, .hidden] {
+            let migrated = ResearchNavigationMigration.resolve(filter: scope.legacyFilter, submissionScope: .all)
+            try require(migrated.filter == .all && migrated.submissionScope == scope, "旧投稿导航未迁入对应在投页签：\(scope)")
+        }
+        let sidebar = ResearchSidebarSection.allCases.flatMap(\.filters)
+        try require(sidebar == [.all, .existing, .projects, .experimentData, .summaryReports, .importantLiterature, .certificates, .rewardCity], "真实侧栏目录与测试口径不一致")
+        try require(!sidebar.contains(.changed) && !sidebar.contains(.hidden), "侧栏仍含独立投稿页")
+        let expectedCounts: [SubmissionScope: Int] = [.all: 2, .changed: 1, .hidden: 1]
+        for scope in SubmissionScope.allCases {
+            try require(store.submissionCount(for: scope) == expectedCounts[scope], "投稿页签计数未复用真实筛选：\(scope)")
+            let route = ResearchNavigationMigration.routeWidgetDeepLink(
+                "submissions", filter: .all, submissionScope: scope, search: "unfinished search"
+            )
+            try require(route.filter == .all && route.submissionScope == .all && route.search.isEmpty,
+                        "投稿深链未从 \(scope) 重置到全部并清理搜索")
+        }
         try require(LibraryFilter(rawValue: "funding") == nil, "资金模块仍可导航")
+    }
+
+    static func portalPresentation() throws {
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        func portal(lastChecked: Date?, lastError: String?) -> PortalAccount {
+            PortalAccount(id: UUID().uuidString, publisherID: "fixture", publisherName: "Fixture Publisher",
+                          kind: "ojs", name: "Fallback Portal", url: "https://journals.example.edu/ojs/submissions",
+                          identity: "journals.example.edu/ojs", createdAt: now, lastChecked: lastChecked, lastError: lastError)
+        }
+        let checked = now.addingTimeInterval(-3600)
+        let healthy = portal(lastChecked: checked, lastError: nil)
+        let stale = portal(lastChecked: now.addingTimeInterval(-86401), lastError: nil)
+        let unchecked = portal(lastChecked: nil, lastError: nil)
+        let failed = portal(lastChecked: checked, lastError: "fixture failure")
+        try require(PortalPresentation.state(for: healthy, now: now) == .healthy, "近期成功检查未显示健康状态")
+        try require(PortalPresentation.state(for: stale, now: now) == .stale, "过期检查未显示历史状态")
+        try require(PortalPresentation.state(for: unchecked, now: now) == .stale, "从未检查被误报为健康")
+        try require(PortalPresentation.state(for: failed, now: now) == .error, "门户错误未优先于检查时间")
+        try require(PortalPresentation.hostPath(for: healthy) == "journals.example.edu/ojs", "门户 host/path 身份丢失")
+        try require(PortalPresentation.statusText(for: healthy, now: now) == AppLocalization.format("最近检查：%@", Formatters.dateTime.string(from: checked)), "健康门户未显示实际检查时间")
+        try require(PortalPresentation.statusText(for: stale, now: now) == AppLocalization.text("历史状态，需刷新"), "过期门户未提示刷新")
+        try require(PortalPresentation.accessibilityValue(for: healthy, now: now) == AppLocalization.text("最近同步正常"), "健康门户辅助状态错误")
+        try require(PortalPresentation.accessibilityValue(for: stale, now: now) == AppLocalization.text("历史状态，需刷新"), "过期门户辅助状态错误")
+        try require(PortalPresentation.accessibilityValue(for: failed, now: now) == AppLocalization.text("同步有错误"), "错误门户辅助状态错误")
     }
 
     static func main() async {
@@ -795,6 +832,7 @@ struct ResearchProductIntegration {
             try require(ResearchExchangePaths.bundleID == "com.academic-achievement.manager", "Test bundle does not expose production research routing identity")
             switch name {
             case "workspace-navigation": try workspaceNavigation()
+            case "portal-presentation": try portalPresentation()
             case "fresh-import": try await freshImport()
             case "new-attachment": try await newAttachment()
             case "new-version": try await newVersion()

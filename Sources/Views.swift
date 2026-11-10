@@ -469,18 +469,16 @@ struct ContentView: View {
             guard filter.isSubmissionFilter, !store.portals.isEmpty, !store.isRefreshing else { return }
             store.refreshAll()
         }
-        // 小组件深链：切换到对应模块；搜索词由 onChange(of: filter) 统一清空
+        // 小组件深链：切换到对应模块并清理搜索；投稿始终回到“全部”页签
         .onReceive(NotificationCenter.default.publisher(for: Notification.Name("GaoSeries.research.game"))) { _ in filter = .rewardCity }
         .onReceive(NotificationCenter.default.publisher(for: .appOpenWidgetDeepLink)) { note in
             guard let target = note.object as? String else { return }
-            switch target {
-            case "submissions":
-                if filter != .all { filter = .all } else { search = "" }
-            case "works":
-                if filter != .existing { filter = .existing } else { search = "" }
-            default:
-                break
-            }
+            let route = ResearchNavigationMigration.routeWidgetDeepLink(
+                target, filter: filter, submissionScope: submissionScope, search: search
+            )
+            filter = route.filter
+            submissionScope = route.submissionScope
+            search = route.search
         }
         .onAppear {
             let migrated = ResearchNavigationMigration.resolve(filter: filter, submissionScope: submissionScope)
@@ -531,13 +529,9 @@ struct ContentView: View {
             brandHeader
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    sidebarSection(AppLocalization.text("研究工作台"), filters: [
-                        .all, .existing, .projects,
-                    ])
-                    sidebarSection(AppLocalization.text("资料与资产"), filters: [
-                        .experimentData, .summaryReports, .importantLiterature, .certificates,
-                    ])
-                    sidebarSection(AppLocalization.text("探索"), filters: [.rewardCity])
+                    ForEach(ResearchSidebarSection.allCases) { section in
+                        sidebarSection(section.title, filters: section.filters)
+                    }
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 14)
@@ -582,7 +576,7 @@ struct ContentView: View {
         }
     }
 
-    /// 浮动卡片选中态导航行：accent 底白字 + 柔和投影（深色下投影 opacity 调高），hover 浅灰反馈；计数胶囊保留。
+    /// 浮动卡片选中态导航行：accent 底配动态 onAccent 文字与计数，投影和 hover 反馈保持原主题。
     private func sidebarRow(_ item: LibraryFilter) -> some View {
         let selected = filter == item
         let hovered = hoveredFilter == item
@@ -598,14 +592,14 @@ struct ContentView: View {
                 Spacer(minLength: 0)
                 Text("\(count(for: item))")
                     .font(.caption.monospacedDigit())
-                    .foregroundStyle(selected ? Color.white : Color.secondary)
+                    .foregroundStyle(selected ? AppTheme.onAccent : Color.secondary)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
-                    .background(AppTheme.card.opacity(0.65), in: Capsule())
+                    .background(selected ? AppTheme.onAccent.opacity(0.12) : AppTheme.card.opacity(0.65), in: Capsule())
             }
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity, minHeight: 32)
-            .foregroundStyle(selected ? Color.white : Color.primary)
+            .foregroundStyle(selected ? AppTheme.onAccent : Color.primary)
             .background {
                 if selected {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
@@ -657,9 +651,9 @@ struct ContentView: View {
                 if filter == .all {
                     HStack {
                         SubmissionScopeTabs(selection: $submissionScope, counts: [
-                            .all: store.visiblePapers.count,
-                            .changed: store.changedCount,
-                            .hidden: store.papers.filter(\.hidden).count,
+                            .all: store.submissionCount(for: .all),
+                            .changed: store.submissionCount(for: .changed),
+                            .hidden: store.submissionCount(for: .hidden),
                         ])
                         Spacer()
                     }

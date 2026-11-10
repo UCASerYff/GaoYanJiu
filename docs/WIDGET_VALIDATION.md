@@ -2,12 +2,13 @@
 
 默认不自动运行冒烟测试，不为测试启动应用、浏览器、模拟器或窗口。静态、编译和隔离定向检查不能替代以下实际系统验收。
 
-## V4.13 本轮隔离验证（2026-11-10）
+## V4.13 最终审查修复隔离验证（2026-11-10）
 
-- 源码及构建产物中的应用与 Widget 均为 4.13 / build 14。`test_product.sh workspace-navigation`、备份、资料库加载、回收站持久化、73 项 Widget 断言及 77 项 Widget Store 断言全部通过；这些均为隔离检查，没有启动应用、Widget 宿主或 GUI。
-- `test_consolidation.sh` 仅恢复可执行位为 `100755`，内容未改；规定的直接命令重跑通过，资金只读、启动维护及整合隔离回归完成。
-- `InstallSafetyRegression.py` 的 `stage_cleanup` 故障注入与残留断言已对齐当前 `.install-staging.noindex/XXXXXXXX` 暂存路径，生产安装器未改；完整安装安全回归 12/12 通过，隔离故障注入与锁清理检查完成。
-- 完整构建和打包由控制器在根构建锁 `research-4.13-build` 下执行并均成功，锁已释放。`dist/GaoYanJiu-4.13.zip` 及同名 `.sha256` 已生成；在 `dist` 内运行 `shasum -a 256 -c GaoYanJiu-4.13.zip.sha256` 返回 `GaoYanJiu-4.13.zip: OK`，`codesign --verify --deep --strict build.noindex/搞研究.app` 通过。
+- `./scripts/test_product.sh workspace-navigation portal-presentation` 通过。覆盖真实侧栏目录、changed/hidden 旧状态迁移、三个投稿页签计数、从每个 scope 进入投稿深链后回到“全部”并清理搜索，以及门户 error/stale/healthy、host/path、检查时间和辅助状态；全部使用隔离合成数据。
+- 完整 Task 5 清单已在根构建租约下重跑并通过：工作区导航、整合、备份、15 组资料库加载、回收站持久化、73 项 Widget 断言、77 项 Widget Store 断言，以及安装安全回归 12/12。没有启动应用、Widget 宿主或 GUI，安装安全测试仅使用隔离伪造系统。
+- 深色与浅色侧栏选中态完成源码接线和静态对比度计算：浅色行／计数胶囊为 9.72:1／6.90:1，深色为 11.42:1／9.13:1。门户帮助和辅助状态也完成源码级核对；这些不是视觉验收。
+- `./scripts/build.sh` 与 `./scripts/package.sh` 在根构建租约 `research-4.13-final-fix` 下成功执行，租约已释放。源码及构建产物中的应用与 Widget 均为 4.13 / build 14，四份 plist 均通过 `plutil -lint`；`codesign --verify --deep --strict --verbose=2 build.noindex/搞研究.app` 通过。
+- `dist/GaoYanJiu-4.13.zip` 及同名 `.sha256` 已重新生成。在 `dist` 内运行 `shasum -a 256 -c GaoYanJiu-4.13.zip.sha256` 返回 `GaoYanJiu-4.13.zip: OK`；ZIP SHA-256 为 `ac348d34f9a9500dad662ce95f90685c2142a2a8aa0d7f71e87464312ca7d514`。
 - 未执行真实安装、真实资料备份或核验、清理、应用或浏览器启动、真实投稿门户操作、GUI 冒烟及桌面小组件显示验收。静态、编译、签名、发行包与隔离定向检查不能替代这些实际系统验收。
 
 ## 如何理解时间

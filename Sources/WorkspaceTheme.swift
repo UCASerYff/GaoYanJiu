@@ -13,6 +13,7 @@ public enum AppTheme {
         })
     }
     static let accent = adaptive(light: rgb(0x244b42), dark: rgb(0xa7e6c8))
+    static let onAccent = adaptive(light: rgb(0xffffff), dark: rgb(0x17231e))
     static let blue = accent
     static let indigo = accent
     static let teal = adaptive(light: rgb(0x4f7465), dark: rgb(0x83b79d))

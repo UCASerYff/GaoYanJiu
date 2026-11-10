@@ -772,6 +772,41 @@ enum ResearchNavigationMigration {
         default: (filter, submissionScope)
         }
     }
+
+    static func routeWidgetDeepLink(
+        _ target: String,
+        filter: LibraryFilter,
+        submissionScope: SubmissionScope,
+        search: String
+    ) -> (filter: LibraryFilter, submissionScope: SubmissionScope, search: String) {
+        switch target {
+        case "submissions": (.all, .all, "")
+        case "works": (.existing, submissionScope, "")
+        default: (filter, submissionScope, search)
+        }
+    }
+}
+
+enum ResearchSidebarSection: String, CaseIterable, Identifiable {
+    case workspace, assets, exploration
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .workspace: AppLocalization.text("研究工作台")
+        case .assets: AppLocalization.text("资料与资产")
+        case .exploration: AppLocalization.text("探索")
+        }
+    }
+
+    var filters: [LibraryFilter] {
+        switch self {
+        case .workspace: [.all, .existing, .projects]
+        case .assets: [.experimentData, .summaryReports, .importantLiterature, .certificates]
+        case .exploration: [.rewardCity]
+        }
+    }
 }
 
 enum LibraryFilter: String, CaseIterable, Identifiable {
@@ -787,11 +822,6 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
     case hidden
 
     var id: String { rawValue }
-
-    static let sidebarCases: [LibraryFilter] = [
-        .all, .existing, .projects, .experimentData,
-        .summaryReports, .importantLiterature, .certificates, .rewardCity,
-    ]
 
     var title: String {
         switch self {
