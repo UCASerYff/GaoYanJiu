@@ -771,7 +771,7 @@ struct ResearchProductIntegration {
         store.papers = [paper("ordinary", changed: false, hidden: false),
                         paper("updated", changed: true, hidden: false),
                         paper("archived", changed: true, hidden: true)]
-        try require(store.papers(matching: .all, search: "").map(\.id) == ["ordinary", "updated"], "全部页签包含归档或漏记在投")
+        try require(store.papers(matching: .all, search: "").map(\.id) == ["updated", "ordinary"], "全部页签包含归档或漏记在投")
         try require(store.papers(matching: .changed, search: "").map(\.id) == ["updated"], "状态更新页签口径改变")
         try require(store.papers(matching: .hidden, search: "").map(\.id) == ["archived"], "归档页签口径改变")
         try require(SubmissionScope.changed.legacyFilter == .changed && SubmissionScope.hidden.legacyFilter == .hidden, "页签未映射原筛选")
