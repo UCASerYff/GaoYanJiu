@@ -100,7 +100,7 @@ struct CertificateDashboard: View {
                             Button(record.name) { openAction(record) }
                                 .buttonStyle(.plain)
                                 .font(.callout.weight(.semibold))
-                                .foregroundStyle(AppTheme.blue)
+                                .foregroundStyle(AppTheme.accent)
                                 .lineLimit(2)
                                 .contextMenu { rowContextMenu(for: record) }
                                 .listHoverHighlight(cornerRadius: 6)
@@ -158,8 +158,8 @@ struct CertificateDashboard: View {
                     .tableStyle(.inset(alternatesRowBackgrounds: true))
                 }
                 .padding(16)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
+                .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 24)
@@ -229,21 +229,21 @@ private struct CertificateAnalytics: View {
                         x: .value(AppLocalization.text("年份"), String(item.year)),
                         y: .value(AppLocalization.text("数量"), item.count)
                     )
-                    .foregroundStyle(AppTheme.blue.opacity(0.16))
+                    .foregroundStyle(AppTheme.accent.opacity(0.16))
                     .cornerRadius(5)
 
                     LineMark(
                         x: .value(AppLocalization.text("年份"), String(item.year)),
                         y: .value(AppLocalization.text("数量"), item.count)
                     )
-                    .foregroundStyle(AppTheme.blue)
+                    .foregroundStyle(AppTheme.accent)
                     .lineStyle(StrokeStyle(lineWidth: 2.5))
 
                     PointMark(
                         x: .value(AppLocalization.text("年份"), String(item.year)),
                         y: .value(AppLocalization.text("数量"), item.count)
                     )
-                    .foregroundStyle(AppTheme.blue)
+                    .foregroundStyle(AppTheme.accent)
                     .annotation(position: .top) {
                         Text("\(item.count)")
                             .font(.caption2.monospacedDigit())
@@ -298,8 +298,8 @@ private struct CertificateAnalytics: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
     }
 }
 
@@ -355,7 +355,7 @@ private extension CertificateRecord {
 
 private enum CertificateTagColor {
     private static let palette: [Color] = [
-        AppTheme.blue, AppTheme.teal, .orange, .purple, .pink, .green, .indigo, .red,
+        AppTheme.accent, AppTheme.teal, AppTheme.clay,
     ]
 
     static func color(for tag: String) -> Color {
@@ -441,7 +441,7 @@ struct CertificateEditor: View {
                 Button(AppLocalization.text("保存并添加附件")) { save(addAttachments: true) }
                     .disabled(!isValid)
                 Button(AppLocalization.text("保存")) { save(addAttachments: false) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                     .disabled(!isValid)
                     .keyboardShortcut(.defaultAction)
             }
@@ -563,14 +563,14 @@ struct CertificateDetailView: View {
                             HStack(alignment: .top, spacing: 16) {
                                 Image(systemName: "rectangle.badge.checkmark")
                                     .font(.title2.weight(.medium))
-                                    .foregroundStyle(AppTheme.blue)
+                                    .foregroundStyle(AppTheme.accent)
                                     .frame(width: 48, height: 48)
-                                    .background(AppTheme.blue.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
+                                    .background(AppTheme.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
                                     .accessibilityHidden(true)
                                 VStack(alignment: .leading, spacing: 7) {
                                     Text(AppLocalization.text("证书记录"))
                                         .font(.caption.bold())
-                                        .foregroundStyle(AppTheme.blue)
+                                        .foregroundStyle(AppTheme.accent)
                                     Text(record.name)
                                         .font(.system(size: 25, weight: .bold))
                                     Text(Formatters.longDate.string(from: record.eventDate))
@@ -625,7 +625,7 @@ struct CertificateDetailView: View {
                                             } label: {
                                                 HStack(spacing: 11) {
                                                     Image(systemName: attachment.symbol)
-                                                        .foregroundStyle(attachment.kind == "pdf" ? Color.red : AppTheme.blue)
+                                                        .foregroundStyle(attachment.kind == "pdf" ? Color.red : AppTheme.accent)
                                                         .frame(width: 24)
                                                         .accessibilityHidden(true)
                                                     VStack(alignment: .leading, spacing: 2) {
@@ -688,7 +688,7 @@ struct CertificateDetailView: View {
                                 } label: {
                                     Label(AppLocalization.text("编辑记录"), systemImage: "square.and.pencil")
                                 }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                                 Spacer()
                                 Button(AppLocalization.text("删除记录"), role: .destructive) { confirmDelete = true }
                             }
@@ -752,8 +752,8 @@ private struct CertificateEditorGroup<Content: View>: View {
             content
         }
         .padding(16)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 11))
-        .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 11))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(AppTheme.border))
     }
 }
 

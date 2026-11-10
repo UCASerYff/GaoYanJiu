@@ -121,7 +121,20 @@ final class AppDelegate:NSObject,NSApplicationDelegate,UNUserNotificationCenterD
 }
 private struct WindowToolbarOpaqueBackground:ViewModifier {
     func body(content:Content)->some View {
-        if #available(macOS 15.0,*) { content.toolbarBackground(Color(nsColor:.windowBackgroundColor),for:.windowToolbar).toolbarBackgroundVisibility(.visible,for:.windowToolbar) }
-        else { content.toolbarBackground(Color(nsColor:.windowBackgroundColor),for:.windowToolbar) }
+        if #available(macOS 15.0,*) { content.toolbarBackground(AppTheme.canvas,for:.windowToolbar).toolbarBackgroundVisibility(.visible,for:.windowToolbar) }
+        else { content.toolbarBackground(AppTheme.canvas,for:.windowToolbar) }
     }
+}
+
+// Research.AppTheme is internal to the framework; keep the host toolbar on the same canvas value.
+private enum AppTheme {
+    static let canvas = Color(nsColor: NSColor(name: nil) { appearance in
+        let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+        return NSColor(
+            srgbRed: dark ? 0x17 / 255 : 0xf3 / 255,
+            green: dark ? 0x1b / 255 : 0xf0 / 255,
+            blue: dark ? 0x19 / 255 : 0xe8 / 255,
+            alpha: 1
+        )
+    })
 }

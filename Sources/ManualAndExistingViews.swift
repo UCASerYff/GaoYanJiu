@@ -81,7 +81,7 @@ struct ManualSubmissionEditor: View {
                 Button(AppLocalization.text("取消")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(AppLocalization.text(existingID == nil ? "添加" : "保存")) { save() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                     .disabled(!isValid)
                     .keyboardShortcut(.defaultAction)
             }
@@ -283,7 +283,7 @@ private struct ExistingWorksAnalytics: View {
                             x: .value(AppLocalization.text("数量"), item.count),
                             y: .value(AppLocalization.text("类别"), item.label)
                         )
-                        .foregroundStyle(AppTheme.blue.gradient)
+                        .foregroundStyle(AppTheme.accent.gradient)
                         .cornerRadius(3)
                         .annotation(position: .trailing) {
                             Text("\(item.count)")
@@ -364,21 +364,21 @@ private struct ExistingWorksAnalytics: View {
                         x: .value(AppLocalization.text("年份"), item.label),
                         y: .value(AppLocalization.text("成果数量"), item.count)
                     )
-                    .foregroundStyle(AppTheme.blue.opacity(0.24))
+                    .foregroundStyle(AppTheme.accent.opacity(0.24))
                     .cornerRadius(3)
 
                     LineMark(
                         x: .value(AppLocalization.text("年份"), item.label),
                         y: .value(AppLocalization.text("成果数量"), item.count)
                     )
-                    .foregroundStyle(AppTheme.blue)
+                    .foregroundStyle(AppTheme.accent)
                     .lineStyle(StrokeStyle(lineWidth: 2.5))
 
                     PointMark(
                         x: .value(AppLocalization.text("年份"), item.label),
                         y: .value(AppLocalization.text("成果数量"), item.count)
                     )
-                    .foregroundStyle(AppTheme.blue)
+                    .foregroundStyle(AppTheme.accent)
                     .annotation(position: .top) {
                         Text("\(item.count)")
                             .font(.caption2.monospacedDigit())
@@ -427,8 +427,8 @@ private struct AnalyticsCard<Content: View>: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
     }
 }
 
@@ -450,7 +450,7 @@ private struct ExistingWorkCard: View {
                     HStack(spacing: 8) {
                         Text(work.type == .patent ? (work.patentType?.title ?? work.type.title) : work.type.title)
                             .font(.caption2.weight(.bold))
-                            .foregroundStyle(AppTheme.blue)
+                            .foregroundStyle(AppTheme.accent)
                         Text(Formatters.workDate.string(from: work.completedAt))
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -464,10 +464,10 @@ private struct ExistingWorkCard: View {
                             ForEach(Array(metrics.summaryItems.prefix(3))) { item in
                                 Text(item.displayText)
                                     .font(.caption2.weight(.medium))
-                                    .foregroundStyle(AppTheme.indigo)
+                                    .foregroundStyle(AppTheme.accent)
                                     .padding(.horizontal, 6)
                                     .padding(.vertical, 2)
-                                    .background(AppTheme.blue.opacity(0.08), in: Capsule())
+                                    .background(AppTheme.accent.opacity(0.08), in: Capsule())
                             }
                         }
                         .lineLimit(1)
@@ -498,8 +498,8 @@ private struct ExistingWorkCard: View {
             }
             .padding(17)
             .contentShape(Rectangle())
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
+            .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
         }
         .buttonStyle(.plain)
         .listHoverHighlight()
@@ -592,7 +592,7 @@ struct ExistingWorkEditor: View {
                                             Button { selectJournalSuggestion(suggestion) } label: {
                                                 HStack(spacing: 10) {
                                                     Image(systemName: "books.vertical.fill")
-                                                        .foregroundStyle(AppTheme.blue)
+                                                        .foregroundStyle(AppTheme.accent)
                                                         .accessibilityHidden(true)
                                                     VStack(alignment: .leading, spacing: 2) {
                                                         Text(suggestion.title)
@@ -661,7 +661,7 @@ struct ExistingWorkEditor: View {
                                         Label(AppLocalization.text("自动检索期刊指标"), systemImage: "magnifyingglass")
                                     }
                                 }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                                 .disabled(isLookingUp || metricsQuery.isEmpty || secretKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
 
                                 Text(journalISSN.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
@@ -710,7 +710,7 @@ struct ExistingWorkEditor: View {
                 Button(AppLocalization.text("保存并添加附件")) { save(addAttachments: true) }
                     .disabled(!isValid || isLookingUp)
                 Button(AppLocalization.text("保存")) { save(addAttachments: false) }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                     .disabled(!isValid || isLookingUp)
                     .keyboardShortcut(.defaultAction)
             }
@@ -909,7 +909,7 @@ struct ExistingWorkDetailView: View {
                                 VStack(alignment: .leading, spacing: 7) {
                                     Text(work.type == .patent ? (work.patentType?.title ?? work.type.title) : work.type.title)
                                         .font(.caption.bold())
-                                        .foregroundStyle(AppTheme.blue)
+                                        .foregroundStyle(AppTheme.accent)
                                     Text(work.title)
                                         .font(.system(size: 25, weight: .bold))
                                     if !work.venue.isEmpty {
@@ -983,7 +983,7 @@ struct ExistingWorkDetailView: View {
                                             } label: {
                                                 HStack(spacing: 11) {
                                                     Image(systemName: attachment.symbol)
-                                                        .foregroundStyle(attachment.kind == "pdf" ? Color.red : AppTheme.blue)
+                                                        .foregroundStyle(attachment.kind == "pdf" ? Color.red : AppTheme.accent)
                                                         .frame(width: 24)
                                                         .accessibilityHidden(true)
                                                     VStack(alignment: .leading, spacing: 2) {
@@ -1046,7 +1046,7 @@ struct ExistingWorkDetailView: View {
                                 } label: {
                                     Label(AppLocalization.text("编辑成果"), systemImage: "square.and.pencil")
                                 }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                                 if !work.url.isEmpty {
                                     Button {
                                         if let url = URL(string: work.url) { NSWorkspace.shared.open(url) }
@@ -1160,8 +1160,8 @@ private struct JournalMetricsPanel: View {
             }
         }
         .padding(compact ? 12 : 16)
-        .background(AppTheme.blue.opacity(0.045), in: RoundedRectangle(cornerRadius: 11))
-        .overlay(RoundedRectangle(cornerRadius: 11).stroke(AppTheme.blue.opacity(0.12)))
+        .background(AppTheme.accent.opacity(0.045), in: RoundedRectangle(cornerRadius: 11))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(AppTheme.accent.opacity(0.12)))
     }
 }
 
@@ -1176,8 +1176,8 @@ private struct EditorGroup<Content: View>: View {
             content
         }
         .padding(16)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 11))
-        .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 11))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(AppTheme.border))
     }
 }
 

@@ -412,13 +412,13 @@ struct ContentView: View {
             if store.lastDeletedTrashID != nil {
                 HStack(spacing: 12) {
                     Image(systemName: "trash.fill")
-                        .foregroundStyle(AppTheme.blue)
+                        .foregroundStyle(AppTheme.accent)
                         .accessibilityHidden(true)
                     Text(store.deletionMessage)
                         .font(.callout)
                     Spacer()
                     Button(AppLocalization.text("撤销")) { store.undoLastDeletion() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                     Button {
                         store.lastDeletedTrashID = nil
                     } label: {
@@ -627,7 +627,7 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 7) {
             if filter.isSubmissionFilter {
                 HStack(spacing: 7) {
-                    Circle().fill(store.isRefreshing ? AppTheme.blue : AppTheme.teal).frame(width: 7, height: 7)
+                    Circle().fill(store.isRefreshing ? AppTheme.accent : AppTheme.teal).frame(width: 7, height: 7)
                     Text(store.isRefreshing
                          ? AppLocalization.text("正在同步投稿门户…")
                          : AppLocalization.format("%d 个投稿门户", store.portals.count)).font(.caption)
@@ -678,8 +678,8 @@ struct ContentView: View {
                     }
                     .padding(.horizontal, 16)
                     .padding(.vertical, 11)
-                    .background(AppTheme.blue.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.blue.opacity(0.15)))
+                    .background(AppTheme.accent.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.accent.opacity(0.15)))
                     .padding(.horizontal, 24)
                     .padding(.bottom, 10)
                 }
@@ -901,9 +901,9 @@ private enum SubmissionAlertLevel: String, CaseIterable {
 
     var color: Color {
         switch self {
-        case .overdue: .red
-        case .watch: .orange
-        case .normal: AppTheme.blue
+        case .overdue: AppTheme.clay
+        case .watch: AppTheme.clay
+        case .normal: AppTheme.accent
         case .completed: .secondary
         }
     }
@@ -969,7 +969,7 @@ private struct SubmissionAnalytics: View {
                         x: .value(AppLocalization.text("论文数量"), item.count),
                         y: .value(AppLocalization.text("投稿状态"), item.label)
                     )
-                    .foregroundStyle(AppTheme.blue.gradient)
+                    .foregroundStyle(AppTheme.accent.gradient)
                     .cornerRadius(3)
                     .annotation(position: .trailing) {
                         Text("\(item.count)")
@@ -1020,9 +1020,9 @@ private struct SubmissionAnalytics: View {
                         }
                     }
                     .chartForegroundStyleScale([
-                        SubmissionAlertLevel.overdue.title: Color.red,
-                        SubmissionAlertLevel.watch.title: Color.orange,
-                        SubmissionAlertLevel.normal.title: AppTheme.blue,
+                        SubmissionAlertLevel.overdue.title: AppTheme.clay,
+                        SubmissionAlertLevel.watch.title: AppTheme.clay,
+                        SubmissionAlertLevel.normal.title: AppTheme.accent,
                         SubmissionAlertLevel.completed.title: Color.secondary,
                     ])
                     .chartLegend(position: .top, alignment: .leading, spacing: 14)
@@ -1048,9 +1048,9 @@ private struct SubmissionAnalytics: View {
 
                     HStack(spacing: 14) {
                         Label(AppLocalization.format("超期 %d", overdueCount), systemImage: "exclamationmark.triangle.fill")
-                            .foregroundStyle(overdueCount > 0 ? Color.red : Color.secondary)
+                            .foregroundStyle(overdueCount > 0 ? AppTheme.clay : Color.secondary)
                         Label(AppLocalization.format("关注 %d", watchCount), systemImage: "clock.badge.exclamationmark")
-                            .foregroundStyle(watchCount > 0 ? Color.orange : Color.secondary)
+                            .foregroundStyle(watchCount > 0 ? AppTheme.clay : Color.secondary)
                     }
                     .font(.caption.weight(.medium))
                 }
@@ -1102,8 +1102,8 @@ private struct SubmissionAnalyticsCard<Content: View>: View {
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
     }
 }
 
@@ -1116,7 +1116,7 @@ private struct DashboardHeader: View {
             HStack(alignment: .firstTextBaseline) {
                 VStack(alignment: .leading, spacing: 5) {
                     Text(filter.title)
-                        .font(.system(size: 28, weight: .semibold))
+                        .font(AppTheme.titleFont(30))
                     Text(lastCheckedText)
                         .font(.callout)
                         .foregroundStyle(.secondary)
@@ -1124,18 +1124,18 @@ private struct DashboardHeader: View {
                 Spacer()
             }
 
-            HStack(spacing: 12) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 160), spacing: 12)], spacing: 12) {
                 if filter == .existing {
-                    StatCard(value: store.existingWorks.count, label: "成果总数", symbol: "checkmark.seal", color: AppTheme.blue)
+                    StatCard(value: store.existingWorks.count, label: "成果总数", symbol: "checkmark.seal", color: AppTheme.accent)
                     StatCard(
                         value: store.existingWorks.reduce(0) { $0 + $1.attachments.count },
                         label: "附件",
                         symbol: "paperclip",
                         color: AppTheme.teal
                     )
-                    StatCard(value: currentYearCount, label: "本年成果", symbol: "calendar", color: .orange)
+                    StatCard(value: currentYearCount, label: "本年成果", symbol: "calendar", color: AppTheme.clay)
                 } else if filter == .projects {
-                    StatCard(value: store.projects.count, label: "项目总数", symbol: "folder", color: AppTheme.blue)
+                    StatCard(value: store.projects.count, label: "项目总数", symbol: "folder", color: AppTheme.accent)
                     StatCard(
                         value: store.projects.reduce(0) { $0 + $1.steps.count },
                         label: "项目步骤",
@@ -1146,14 +1146,14 @@ private struct DashboardHeader: View {
                         value: store.projects.reduce(0) { $0 + $1.completedStepCount },
                         label: "已完成步骤",
                         symbol: "checkmark.circle",
-                        color: .orange
+                        color: AppTheme.clay
                     )
                 } else if let kind = filter.documentLibraryKind {
                     StatCard(
                         value: store.documentFolders.filter { $0.libraryKind == kind }.count,
                         label: "文件夹",
                         symbol: "folder",
-                        color: AppTheme.blue
+                        color: AppTheme.accent
                     )
                     StatCard(
                         value: store.documentCount(for: kind),
@@ -1166,10 +1166,10 @@ private struct DashboardHeader: View {
                         value: Set(store.managedDocuments.filter { folderIDs.contains($0.folderID) }.flatMap(\.tags)).count,
                         label: "标签",
                         symbol: "tag",
-                        color: .orange
+                        color: AppTheme.clay
                     )
                 } else if filter == .certificates {
-                    StatCard(value: store.certificates.count, label: "记录总数", symbol: "rectangle.badge.checkmark", color: AppTheme.blue)
+                    StatCard(value: store.certificates.count, label: "记录总数", symbol: "rectangle.badge.checkmark", color: AppTheme.accent)
                     StatCard(
                         value: Set(store.certificates.flatMap(\.tags)).count,
                         label: "标签种类",
@@ -1180,20 +1180,20 @@ private struct DashboardHeader: View {
                         value: store.certificates.reduce(0) { $0 + $1.attachments.count },
                         label: "附件",
                         symbol: "paperclip",
-                        color: .orange
+                        color: AppTheme.clay
                     )
                 } else if filter == .rewardCity {
                     StatCard(
                         value: Int(store.rewardCity.coins + store.pendingRewardCoins()),
                         label: "金币",
                         symbol: "dollarsign.circle",
-                        color: .orange
+                        color: AppTheme.clay
                     )
                     StatCard(
                         value: store.rewardCity.buildingTickets,
                         label: "房屋券",
                         symbol: "ticket",
-                        color: AppTheme.blue
+                        color: AppTheme.accent
                     )
                     StatCard(
                         value: store.rewardCity.decorationTickets,
@@ -1203,11 +1203,10 @@ private struct DashboardHeader: View {
                     )
                 } else {
                     // 3.36：口径拆分——总数是「论文记录」，另列「仍在投 / 已接受」（终态不再算在投）。
-                    StatCard(value: store.visiblePapers.count, label: "论文记录", symbol: "doc.text", color: AppTheme.blue)
+                    StatCard(value: store.visiblePapers.count, label: "论文记录", symbol: "doc.text", color: AppTheme.accent)
                     StatCard(value: store.inReviewPapers.count, label: "仍在投", symbol: "paperplane", color: AppTheme.teal)
-                    StatCard(value: store.acceptedPapers.count, label: "已接受", symbol: "checkmark.seal", color: .green)
-                    StatCard(value: store.changedCount, label: "状态更新", symbol: "bell.badge", color: .orange)
-                    StatCard(value: store.portals.count, label: "投稿门户", symbol: "link", color: AppTheme.teal)
+                    StatCard(value: store.acceptedPapers.count, label: "已接受", symbol: "checkmark.seal", color: AppTheme.accent)
+                    StatCard(value: store.changedCount, label: "状态更新", symbol: "bell.badge", color: AppTheme.clay)
                 }
             }
         }
@@ -1289,8 +1288,8 @@ private struct StatCard: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(13)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.border))
         .accessibilityElement(children: .combine)
     }
 }
@@ -1305,9 +1304,9 @@ private struct EmptyLibraryView: View {
             Spacer()
             Image(systemName: filter == .hidden ? "archivebox.fill" : "doc.badge.plus")
                 .font(.system(size: 34, weight: .medium))
-                .foregroundStyle(AppTheme.blue)
+                .foregroundStyle(AppTheme.accent)
                 .frame(width: 72, height: 72)
-                .background(AppTheme.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+                .background(AppTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
                 .accessibilityHidden(true)
             Text(AppLocalization.text(filter == .hidden ? "归档中没有论文" : filter == .changed ? "暂时没有新的状态变化" : "还没有在投论文"))
                 .font(.system(size: 23, weight: .semibold))
@@ -1323,8 +1322,7 @@ private struct EmptyLibraryView: View {
                     Button(action: manualAction) {
                         Label(AppLocalization.text("手动添加"), systemImage: "square.and.pencil")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(AppTheme.blue)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                     Button(action: importAction) {
                         Label(AppLocalization.text("从投稿系统导入"), systemImage: "safari")
                     }
@@ -1337,8 +1335,8 @@ private struct EmptyLibraryView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(42)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(AppTheme.border))
     }
 }
 
@@ -1354,16 +1352,16 @@ private struct PaperCard: View {
             HStack(spacing: 15) {
                 Image(systemName: paper.changed ? "bell.badge.fill" : "doc.text.fill")
                     .font(.body.weight(.semibold))
-                    .foregroundStyle(paper.changed ? Color.orange : AppTheme.blue)
+                    .foregroundStyle(paper.changed ? AppTheme.clay : AppTheme.accent)
                     .frame(width: 38, height: 38)
-                    .background((paper.changed ? Color.orange : AppTheme.blue).opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+                    .background((paper.changed ? AppTheme.clay : AppTheme.accent).opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
                     .accessibilityHidden(true)
 
                 VStack(alignment: .leading, spacing: 8) {
                     HStack(spacing: 8) {
                         Text(paper.site.uppercased())
                             .font(.caption2.weight(.bold))
-                            .foregroundStyle(AppTheme.blue)
+                            .foregroundStyle(AppTheme.accent)
                         Text("·")
                             .foregroundStyle(.tertiary)
                         Text(paper.displayManuscriptID)
@@ -1374,8 +1372,8 @@ private struct PaperCard: View {
                                 .font(.caption2.bold())
                                 .padding(.horizontal, 7)
                                 .padding(.vertical, 3)
-                                .background(Color.orange.opacity(0.14), in: Capsule())
-                                .foregroundStyle(.orange)
+                                .background(AppTheme.clay.opacity(0.14), in: Capsule())
+                                .foregroundStyle(AppTheme.clay)
                         }
                     }
                     Text(paper.title)
@@ -1393,12 +1391,12 @@ private struct PaperCard: View {
                 VStack(alignment: .trailing, spacing: 7) {
                     Text(paper.status)
                         .font(.callout.weight(.bold))
-                        .foregroundStyle(paper.changed ? Color.orange : AppTheme.indigo)
+                        .foregroundStyle(paper.changed ? AppTheme.clay : AppTheme.accent)
                         .multilineTextAlignment(.trailing)
                         .lineLimit(2)
                         .padding(.horizontal, 10)
                         .padding(.vertical, 5)
-                        .background((paper.changed ? Color.orange : AppTheme.blue).opacity(0.1), in: Capsule())
+                        .background((paper.changed ? AppTheme.clay : AppTheme.accent).opacity(0.1), in: Capsule())
                     Text(AppLocalization.format("此阶段 %@", Formatters.duration(since: paper.statusSince)))
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -1416,9 +1414,9 @@ private struct PaperCard: View {
             }
             .padding(17)
             .contentShape(Rectangle())
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).fill(AppTheme.blue.opacity(hovering ? 0.05 : 0)))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(paper.changed ? Color.orange.opacity(hovering ? 0.42 : 0.28) : Color.primary.opacity(hovering ? 0.16 : 0.07)))
+            .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).fill(AppTheme.accent.opacity(hovering ? 0.05 : 0)))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(paper.changed ? AppTheme.clay.opacity(hovering ? 0.42 : 0.28) : AppTheme.border))
         }
         .buttonStyle(.plain)
         // 悬停反馈：轻微提亮 + 手型指针（推入/弹出成对，避免悬停状态残留）
@@ -1488,7 +1486,7 @@ struct PaperDetailView: View {
                             }
                             .padding(16)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                            .background(AppTheme.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+                            .background(AppTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
 
                             if let submissionHistory = paper.submissionHistory, !submissionHistory.isEmpty {
                                 VStack(alignment: .leading, spacing: 7) {
@@ -1528,7 +1526,7 @@ struct PaperDetailView: View {
                                     } label: {
                                         Label(AppLocalization.text("编辑信息与状态"), systemImage: "square.and.pencil")
                                     }
-                                    .buttonStyle(.borderedProminent)
+                                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                                 }
                                 if !paper.url.isEmpty {
                                     Button {
@@ -1607,7 +1605,7 @@ struct ImportSheetView: View {
                         .foregroundStyle(.secondary)
                     Label(AppLocalization.text("暂不支持中文期刊自动导入跟踪，请手动导入"), systemImage: "info.circle.fill")
                         .font(.caption)
-                        .foregroundStyle(Color.orange)
+                        .foregroundStyle(AppTheme.clay)
                         .padding(.top, 5)
                 }
                 Spacer()
@@ -1626,9 +1624,9 @@ struct ImportSheetView: View {
                             HStack(spacing: 14) {
                                 Image(systemName: publisher.symbol)
                                     .font(.title2)
-                                    .foregroundStyle(AppTheme.blue)
+                                    .foregroundStyle(AppTheme.accent)
                                     .frame(width: 44, height: 44)
-                                    .background(AppTheme.blue.opacity(0.1), in: RoundedRectangle(cornerRadius: 11))
+                                    .background(AppTheme.accent.opacity(0.1), in: RoundedRectangle(cornerRadius: 11))
                                     .accessibilityHidden(true)
                                 VStack(alignment: .leading, spacing: 4) {
                                     Text(publisher.name)
@@ -1646,8 +1644,8 @@ struct ImportSheetView: View {
                             }
                             .padding(14)
                             .contentShape(Rectangle())
-                            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 11))
-                            .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.primary.opacity(0.07)))
+                            .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 11))
+                            .overlay(RoundedRectangle(cornerRadius: 13).stroke(AppTheme.border))
                         }
                         .buttonStyle(.plain)
                     }
@@ -1663,8 +1661,7 @@ struct ImportSheetView: View {
                         TextField(AppLocalization.text("来源名称（例如：期刊名）"), text: $customName)
                         TextField(AppLocalization.text("https://投稿网站地址"), text: $customURL)
                         Button(AppLocalization.text("打开")) { openCustomPortal() }
-                            .buttonStyle(.borderedProminent)
-                            .tint(AppTheme.blue)
+                            .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                             .disabled(customURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                     }
                     Text(AppLocalization.text("适用于期刊自建系统或尚未列出的投稿门户。"))
@@ -1672,8 +1669,8 @@ struct ImportSheetView: View {
                         .foregroundStyle(.secondary)
                 }
                 .padding(16)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 11))
-                .overlay(RoundedRectangle(cornerRadius: 13).stroke(Color.primary.opacity(0.07)))
+                .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 11))
+                .overlay(RoundedRectangle(cornerRadius: 13).stroke(AppTheme.border))
                 .padding(.top, 16)
             }
             .padding(22)
@@ -1700,9 +1697,9 @@ struct ImportSheetView: View {
                 Spacer()
                 Image(systemName: publisher.symbol)
                     .font(.system(size: 34, weight: .medium))
-                    .foregroundStyle(AppTheme.blue)
+                    .foregroundStyle(AppTheme.accent)
                     .frame(width: 72, height: 72)
-                    .background(AppTheme.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+                    .background(AppTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
                     .accessibilityHidden(true)
                 VStack(spacing: 7) {
                     Text(publisher.name)
@@ -1718,8 +1715,7 @@ struct ImportSheetView: View {
                         .textFieldStyle(.roundedBorder)
                         .onSubmit { openJournalPortal(publisher) }
                     Button(AppLocalization.text("打开并登录")) { openJournalPortal(publisher) }
-                        .buttonStyle(.borderedProminent)
-                        .tint(AppTheme.blue)
+                        .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                         .disabled(customURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                 }
                 .frame(maxWidth: 620)
@@ -1791,7 +1787,7 @@ private struct PortalImporterView: View {
                     .accessibilityLabel(AppLocalization.text("返回出版商列表"))
                     .help(AppLocalization.text("返回出版商列表"))
                 Image(systemName: model.publisher.symbol)
-                    .foregroundStyle(AppTheme.blue)
+                    .foregroundStyle(AppTheme.accent)
                     .accessibilityHidden(true)
                 Text(model.publisher.name)
                     .font(.callout.weight(.semibold))
@@ -1836,7 +1832,7 @@ private struct PortalImporterView: View {
                     if !model.credentialMessage.isEmpty {
                         Text(model.credentialMessage)
                             .font(.caption)
-                            .foregroundStyle(AppTheme.blue)
+                            .foregroundStyle(AppTheme.accent)
                             .lineLimit(1)
                     }
                 }
@@ -1869,8 +1865,7 @@ private struct PortalImporterView: View {
                 }
                 .help(model.credentialMessage.isEmpty ? AppLocalization.text("账号密码仅保存在 macOS 钥匙串") : model.credentialMessage)
                 Button(AppLocalization.text("立即导入")) { model.importCurrentPage() }
-                    .buttonStyle(.borderedProminent)
-                    .tint(AppTheme.blue)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                     .disabled(model.isExtracting)
             }
             .padding(12)
@@ -1907,7 +1902,7 @@ private struct PortalCredentialEditor: View {
                 Spacer()
                 Image(systemName: "key.fill")
                     .font(.title2)
-                    .foregroundStyle(AppTheme.blue)
+                    .foregroundStyle(AppTheme.accent)
                     .accessibilityHidden(true)
             }
 
@@ -1918,7 +1913,7 @@ private struct PortalCredentialEditor: View {
                     ForEach(model.savedCredentials) { credential in
                         HStack(spacing: 10) {
                             Image(systemName: "person.crop.circle.fill")
-                                .foregroundStyle(AppTheme.blue)
+                                .foregroundStyle(AppTheme.accent)
                                 .accessibilityHidden(true)
                             Text(credential.username)
                                 .lineLimit(1)
@@ -1989,7 +1984,7 @@ private struct PortalCredentialEditor: View {
                         DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { model.oneClickLogin() }
                     }
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                 .disabled(username.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || password.isEmpty)
             }
         }

@@ -31,7 +31,7 @@ struct DocumentFolderEditor: View {
                 Button(AppLocalization.text("取消")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(AppLocalization.text(folderID == nil ? "创建" : "保存"), action: save)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -91,7 +91,7 @@ struct ManagedDocumentEditor: View {
                 Button(AppLocalization.text("取消")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(AppLocalization.text("保存"), action: save)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                     .keyboardShortcut(.defaultAction)
                     .disabled(displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
@@ -196,7 +196,7 @@ struct DocumentLibraryDashboard: View {
                 if kind == .importantLiterature {
                     HStack(alignment: .top, spacing: 11) {
                         Image(systemName: "info.circle.fill")
-                            .foregroundStyle(AppTheme.blue)
+                            .foregroundStyle(AppTheme.accent)
                         VStack(alignment: .leading, spacing: 3) {
                             Text(AppLocalization.text("轻量文献管理"))
                                 .font(.headline)
@@ -207,8 +207,8 @@ struct DocumentLibraryDashboard: View {
                         Spacer()
                     }
                     .padding(15)
-                    .background(AppTheme.blue.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
-                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.blue.opacity(0.15)))
+                    .background(AppTheme.accent.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
+                    .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.accent.opacity(0.15)))
                 }
 
                 HStack {
@@ -223,7 +223,7 @@ struct DocumentLibraryDashboard: View {
                     Button(action: createFolderAction) {
                         Label(AppLocalization.text("新建文件夹"), systemImage: "folder.badge.plus")
                     }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                 }
 
                 let folders = store.folders(for: kind, search: search)
@@ -257,9 +257,9 @@ struct DocumentLibraryDashboard: View {
                 HStack(spacing: 14) {
                     Image(systemName: "folder.fill")
                         .font(.system(size: 25, weight: .medium))
-                        .foregroundStyle(AppTheme.blue)
+                        .foregroundStyle(AppTheme.accent)
                         .frame(width: 48, height: 48)
-                        .background(AppTheme.blue.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
+                        .background(AppTheme.accent.opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
                     VStack(alignment: .leading, spacing: 6) {
                         Text(folder.name)
                             .font(.headline)
@@ -279,8 +279,8 @@ struct DocumentLibraryDashboard: View {
                 }
                 .padding(16)
                 .frame(maxWidth: .infinity, minHeight: 104, alignment: .leading)
-                .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-                .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
+                .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+                .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
             }
             .buttonStyle(.plain)
 
@@ -337,7 +337,7 @@ struct DocumentLibraryDashboard: View {
                 Divider().frame(height: 24)
 
                 Image(systemName: "folder.fill")
-                    .foregroundStyle(AppTheme.blue)
+                    .foregroundStyle(AppTheme.accent)
                 VStack(alignment: .leading, spacing: 2) {
                     Text(folder.name).font(.headline)
                     Text(AppLocalization.format("%d 个文件", store.documentCount(in: folder.id)))
@@ -392,7 +392,7 @@ struct DocumentLibraryDashboard: View {
                 } label: {
                     Label(AppLocalization.text("上传文件"), systemImage: "square.and.arrow.down")
                 }
-                .buttonStyle(.borderedProminent)
+                .buttonStyle(.borderedProminent).tint(AppTheme.accent)
             }
             .padding(.horizontal, 24)
             .padding(.bottom, 14)
@@ -401,7 +401,7 @@ struct DocumentLibraryDashboard: View {
                 HStack {
                     Label(AppLocalization.format("正在筛选：%@", selectedTag), systemImage: "line.3.horizontal.decrease.circle.fill")
                         .font(.callout)
-                        .foregroundStyle(AppTheme.blue)
+                        .foregroundStyle(AppTheme.accent)
                     Button(AppLocalization.text("清除")) { self.selectedTag = nil }
                         .buttonStyle(.link)
                     Spacer()
@@ -467,10 +467,10 @@ struct DocumentLibraryDashboard: View {
                                 ForEach(document.tags, id: \.self) { tag in
                                     Text(tag)
                                         .font(.caption2.weight(.medium))
-                                        .foregroundStyle(AppTheme.indigo)
+                                        .foregroundStyle(AppTheme.accent)
                                         .padding(.horizontal, 6)
                                         .padding(.vertical, 2)
-                                        .background(AppTheme.blue.opacity(0.08), in: Capsule())
+                                        .background(AppTheme.accent.opacity(0.08), in: Capsule())
                                 }
                             }
                         }
@@ -533,8 +533,8 @@ struct DocumentLibraryDashboard: View {
             }
         }
         .padding(15)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
         .contextMenu { documentMenuContent(document) }
         .onDrag {
             draggedDocumentID = document.id
@@ -598,19 +598,19 @@ struct DocumentLibraryDashboard: View {
         VStack(spacing: 14) {
             Image(systemName: isSearching ? "magnifyingglass" : "folder.badge.plus")
                 .font(.system(size: 32, weight: .medium))
-                .foregroundStyle(AppTheme.blue)
+                .foregroundStyle(AppTheme.accent)
             Text(AppLocalization.text(isSearching ? "没有匹配的文件夹或文件" : "还没有文件夹"))
                 .font(.title3.weight(.semibold))
             Text(AppLocalization.text(isSearching ? "尝试搜索其他名称或标签。" : "先创建一个文件夹，再把相关文件上传到其中。"))
                 .foregroundStyle(.secondary)
             if !isSearching {
                 Button(AppLocalization.text("新建文件夹"), action: createFolderAction)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
             }
         }
         .frame(maxWidth: .infinity, minHeight: 300)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
     }
 
     private func emptyDocumentState(isSearching: Bool, uploadAction: @escaping () -> Void) -> some View {
@@ -618,14 +618,14 @@ struct DocumentLibraryDashboard: View {
             Spacer()
             Image(systemName: isSearching ? "line.3.horizontal.decrease.circle" : "doc.badge.plus")
                 .font(.system(size: 32, weight: .medium))
-                .foregroundStyle(AppTheme.blue)
+                .foregroundStyle(AppTheme.accent)
             Text(AppLocalization.text(isSearching ? "没有匹配的文件" : "文件夹还是空的"))
                 .font(.title3.weight(.semibold))
             Text(AppLocalization.text(isSearching ? "可清除搜索或标签筛选后重试。" : "上传 Word、Excel、PPT、PDF、Markdown、文本等常见格式。"))
                 .foregroundStyle(.secondary)
             if !isSearching {
                 Button(AppLocalization.text("上传文件"), action: uploadAction)
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                 Text(AppLocalization.text("也可以直接从访达拖入文件上传"))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
@@ -804,7 +804,7 @@ struct ActionPackageReviewSheet: View {
             HStack(spacing: 12) {
                 Image(systemName: "shippingbox.fill")
                     .font(.system(size: 28))
-                    .foregroundStyle(AppTheme.blue)
+                    .foregroundStyle(AppTheme.accent)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(AppLocalization.text("审核外部资料交接请求"))
                         .font(.title3.weight(.semibold))
@@ -887,7 +887,7 @@ struct ActionPackageReviewSheet: View {
                     }
                     .disabled(isProcessing)
                     Button(AppLocalization.text("确认导入")) { confirmImport() }
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                         .disabled(selectedFolderID.isEmpty || isProcessing || unsupportedTarget != nil)
                 }
             }
@@ -1095,7 +1095,7 @@ struct ExchangeResultReviewSheet: View {
                 .disabled(isProcessing)
                 if review.canApply {
                     Button("确认导入", action: apply)
-                        .buttonStyle(.borderedProminent)
+                        .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                         .disabled(isProcessing || (review.requiresExplicitReview && !acknowledgedWarnings)
                                   || (review.result.session.action == .chooseFiles && targetFolderID.isEmpty))
                 }

@@ -115,8 +115,8 @@ private enum GanttState: String {
     var color: Color {
         switch self {
         case .completed: AppTheme.teal
-        case .overdue: .red
-        case .active: AppTheme.blue
+        case .overdue: AppTheme.clay
+        case .active: AppTheme.accent
         case .upcoming: .secondary
         }
     }
@@ -234,8 +234,8 @@ struct ProjectGanttChart: View {
                     HStack(spacing: 14) {
                         ForEach([
                             (GanttState.completed.title, AppTheme.teal),
-                            (GanttState.overdue.title, Color.red),
-                            (GanttState.active.title, AppTheme.blue),
+                            (GanttState.overdue.title, AppTheme.clay),
+                            (GanttState.active.title, AppTheme.accent),
                             (GanttState.upcoming.title, Color.secondary),
                         ], id: \.0) { label, color in
                             HStack(spacing: 5) {
@@ -268,12 +268,12 @@ struct ProjectGanttChart: View {
                                 let today = Calendar.current.startOfDay(for: Date())
                                 if Calendar.current.component(.year, from: today) == year {
                                     RuleMark(x: .value(AppLocalization.text("今天"), today))
-                                        .foregroundStyle(Color.orange)
+                                        .foregroundStyle(AppTheme.clay)
                                         .lineStyle(StrokeStyle(lineWidth: 2, dash: [5, 4]))
                                         .annotation(position: .top, alignment: .leading) {
                                             Text(AppLocalization.text("今天"))
                                                 .font(.caption2.weight(.semibold))
-                                                .foregroundStyle(Color.orange)
+                                                .foregroundStyle(AppTheme.clay)
                                         }
                                 }
                             }
@@ -306,8 +306,8 @@ struct ProjectGanttChart: View {
             }
         }
         .padding(16)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
     }
 }
 
@@ -327,15 +327,15 @@ private struct ProjectCard: View {
             HStack(spacing: 15) {
                 Image(systemName: project.isCompleted ? "checkmark.circle.fill" : "calendar.badge.clock")
                     .font(.body.weight(.semibold))
-                    .foregroundStyle(project.isCompleted ? AppTheme.teal : AppTheme.blue)
+                    .foregroundStyle(project.isCompleted ? AppTheme.teal : AppTheme.accent)
                     .frame(width: 38, height: 38)
-                    .background((project.isCompleted ? AppTheme.teal : AppTheme.blue).opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
+                    .background((project.isCompleted ? AppTheme.teal : AppTheme.accent).opacity(0.09), in: RoundedRectangle(cornerRadius: 9))
 
                 VStack(alignment: .leading, spacing: 7) {
                     HStack(spacing: 8) {
                         Text(AppLocalization.text(project.isCompleted ? "已完成" : "进行中"))
                             .font(.caption2.weight(.bold))
-                            .foregroundStyle(project.isCompleted ? AppTheme.teal : AppTheme.blue)
+                            .foregroundStyle(project.isCompleted ? AppTheme.teal : AppTheme.accent)
                         if let start = project.timelineStart, let end = project.timelineEnd {
                             Text("\(ProjectFormatters.shortDate.string(from: start)) – \(ProjectFormatters.shortDate.string(from: end))")
                                 .font(.caption)
@@ -365,7 +365,7 @@ private struct ProjectCard: View {
                     if overdueCount > 0 {
                         Label(AppLocalization.format("%d 项逾期", overdueCount), systemImage: "exclamationmark.triangle.fill")
                             .font(.caption2.weight(.semibold))
-                            .foregroundStyle(.red)
+                            .foregroundStyle(AppTheme.clay)
                     }
                 }
 
@@ -375,8 +375,8 @@ private struct ProjectCard: View {
             }
             .padding(17)
             .contentShape(Rectangle())
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.07)))
+            .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(AppTheme.border))
         }
         .buttonStyle(.plain)
         .listHoverHighlight()
@@ -422,7 +422,7 @@ struct ProjectEditor: View {
                             Button(action: addStep) {
                                 Label(AppLocalization.text("添加步骤"), systemImage: "plus.circle.fill")
                             }
-                            .buttonStyle(.borderedProminent)
+                            .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                         }
 
                         if steps.isEmpty {
@@ -448,7 +448,7 @@ struct ProjectEditor: View {
                 Button(AppLocalization.text("取消")) { dismiss() }
                     .keyboardShortcut(.cancelAction)
                 Button(AppLocalization.text("保存")) { save() }
-                    .buttonStyle(.borderedProminent)
+                    .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                     .disabled(!isValid)
                     .keyboardShortcut(.defaultAction)
             }
@@ -514,7 +514,7 @@ private struct ProjectStepEditor: View {
         }
         .padding(14)
         .background(Color.primary.opacity(0.035), in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.07)))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(AppTheme.border))
         .onChange(of: step.startDate) { newStart in
             if step.endDate < newStart { step.endDate = newStart }
         }
@@ -550,13 +550,13 @@ struct ProjectDetailView: View {
                             HStack(alignment: .top, spacing: 16) {
                                 Image(systemName: project.isCompleted ? "checkmark.circle.fill" : "calendar.badge.clock")
                                     .font(.title2.weight(.medium))
-                                    .foregroundStyle(project.isCompleted ? AppTheme.teal : AppTheme.blue)
+                                    .foregroundStyle(project.isCompleted ? AppTheme.teal : AppTheme.accent)
                                     .frame(width: 48, height: 48)
-                                    .background((project.isCompleted ? AppTheme.teal : AppTheme.blue).opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
+                                    .background((project.isCompleted ? AppTheme.teal : AppTheme.accent).opacity(0.09), in: RoundedRectangle(cornerRadius: 11))
                                 VStack(alignment: .leading, spacing: 7) {
                                     Text(AppLocalization.text(project.isCompleted ? "项目已完成" : "项目进行中"))
                                         .font(.caption.bold())
-                                        .foregroundStyle(project.isCompleted ? AppTheme.teal : AppTheme.blue)
+                                        .foregroundStyle(project.isCompleted ? AppTheme.teal : AppTheme.accent)
                                     Text(project.title)
                                         .font(.system(size: 25, weight: .bold))
                                     if !project.content.isEmpty {
@@ -633,7 +633,7 @@ struct ProjectDetailView: View {
                                 } label: {
                                     Label(AppLocalization.text("编辑项目"), systemImage: "square.and.pencil")
                                 }
-                                .buttonStyle(.borderedProminent)
+                                .buttonStyle(.borderedProminent).tint(AppTheme.accent)
                                 Spacer()
                                 Button(AppLocalization.text("删除项目"), role: .destructive) { confirmDelete = true }
                             }
@@ -674,8 +674,8 @@ private struct ProjectEditorGroup<Content: View>: View {
             content
         }
         .padding(16)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 11))
-        .overlay(RoundedRectangle(cornerRadius: 11).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 11))
+        .overlay(RoundedRectangle(cornerRadius: 11).stroke(AppTheme.border))
     }
 }
 
