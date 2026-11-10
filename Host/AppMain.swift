@@ -125,16 +125,3 @@ private struct WindowToolbarOpaqueBackground:ViewModifier {
         else { content.toolbarBackground(AppTheme.canvas,for:.windowToolbar) }
     }
 }
-
-// Research.AppTheme is internal to the framework; keep the host toolbar on the same canvas value.
-private enum AppTheme {
-    static let canvas = Color(nsColor: NSColor(name: nil) { appearance in
-        let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
-        return NSColor(
-            srgbRed: dark ? 0x17 / 255 : 0xf3 / 255,
-            green: dark ? 0x1b / 255 : 0xf0 / 255,
-            blue: dark ? 0x19 / 255 : 0xe8 / 255,
-            alpha: 1
-        )
-    })
-}
