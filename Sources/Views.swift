@@ -62,6 +62,7 @@ struct ContentView: View {
     @EnvironmentObject private var menuState: MenuCommandState
     @SceneStorage("gqns.page.Research") private var filter: LibraryFilter = .all
     @SceneStorage("gqns.research.search") private var search = ""
+    @SceneStorage("gqns.research.submissionScope") private var submissionScope: SubmissionScope = .all
     @FocusState private var searchFocused: Bool
     @State private var searchEscapeMonitor: Any?
     @State private var paperPendingDeletion: PaperRecord?
@@ -79,6 +80,7 @@ struct ContentView: View {
     @State private var draggedPaperID: String?
     @State private var portalToRemove: PortalAccount?
     @State private var showingTrash = false
+    @State private var showingPortalSheet = false
     @State private var loadFailureAlertDismissed = false
     @State private var confirmingNewLibrary = false
     /// 侧栏隐藏/显示（场景级记忆；键全 app 唯一，与其它模块互不冲突）。
@@ -88,8 +90,12 @@ struct ContentView: View {
     @State private var hoveredFilter: LibraryFilter?
     @Environment(\.colorScheme) private var colorScheme
 
+    private var effectivePaperFilter: LibraryFilter {
+        filter == .all ? submissionScope.legacyFilter : filter
+    }
+
     private var displayedPapers: [PaperRecord] {
-        store.papers(matching: filter, search: search)
+        store.papers(matching: effectivePaperFilter, search: search)
     }
 
     private var displayedWorks: [ExistingWork] {
@@ -104,17 +110,12 @@ struct ContentView: View {
         store.certificates(matching: search)
     }
 
-    private var displayedFundingRecords: [FundingRecord] {
-        store.fundingRecords(matching: search)
-    }
-
     private var searchPrompt: String {
         switch filter {
         case .existing: AppLocalization.text("搜索成果、作者或 DOI")
         case .projects: AppLocalization.text("搜索项目、内容或步骤")
         case .experimentData, .summaryReports, .importantLiterature: AppLocalization.text("搜索文件夹、文件名称或标签")
         case .certificates: AppLocalization.text("搜索证书名称、标签或附件")
-        case .funding: AppLocalization.text("搜索资金名称、年份或收款账户")
         case .rewardCity: AppLocalization.text("研究城中的物品可在库存中筛选")
         default: AppLocalization.text("搜索标题、期刊或稿号")
         }
@@ -133,7 +134,7 @@ struct ContentView: View {
 
     private var baseInterface: some View {
         // 侧栏重设计（对齐词元 2.2/2.3 标杆）：弃用系统 NavigationSplitView 列表侧栏，改自绘——
-        // 品牌头部 + 浮动卡片式选中态导航行 + hover 反馈 + 状态底卡，宽 236、.regularMaterial。
+        // 品牌头部 + 浮动卡片式选中态导航行 + hover 反馈 + 状态底卡，宽 248、AppTheme.sidebar。
         // 统一工具栏契约：.navigation 恰好一个 28×28 侧栏切换按钮（⌃⌘S）；
         // 原有 trailing 按钮全部保留，包在固定宽 360 的右对齐容器里。
         HStack(spacing: 0) {
@@ -168,6 +169,11 @@ struct ContentView: View {
 
                     if filter.isSubmissionFilter {
                         Button {
+                            showingPortalSheet = true
+                        } label: {
+                            Label(AppLocalization.text("门户"), systemImage: "link")
+                        }
+                        Button {
                             store.refreshAll()
                         } label: {
                             Label(AppLocalization.text(store.isRefreshing ? "刷新中" : "刷新全部"), systemImage: "arrow.clockwise")
@@ -201,11 +207,6 @@ struct ContentView: View {
                             certificateEditorContext = CertificateEditorContext(recordID: nil)
                         } label: {
                             Label(AppLocalization.text("新建证书记录"), systemImage: "plus")
-                        }
-                        .buttonStyle(ToolbarProminentStyle())
-                    } else if filter == .funding {
-                        Button { openFundingInSavings() } label: {
-                            Label(AppLocalization.text("在搞积蓄管理"), systemImage: "arrow.up.forward.app")
                         }
                         .buttonStyle(ToolbarProminentStyle())
                     } else if filter == .rewardCity {
@@ -299,6 +300,15 @@ struct ContentView: View {
         .sheet(isPresented: $showingTrash) {
             RecycleBinView()
                 .environmentObject(store)
+        }
+        .sheet(isPresented: $showingPortalSheet) {
+            SubmissionPortalPanel(
+                openPortal: { importContext = ImportContext(publisher: publisher(for: $0)) },
+                addPortal: { importContext = ImportContext(publisher: nil) },
+                deletePortal: { portalToRemove = $0 }
+            )
+            .frame(width: 360, height: 520)
+            .environmentObject(store)
         }
         .confirmationDialog(AppLocalization.text("删除投稿门户？"), isPresented: Binding(get: { portalToRemove != nil }, set: { if !$0 { portalToRemove = nil } }), titleVisibility: .visible, presenting: portalToRemove) { portal in
             Button(AppLocalization.text("删除门户，保留论文"), role: .destructive) {
@@ -461,13 +471,14 @@ struct ContentView: View {
                 if filter != .all { filter = .all } else { search = "" }
             case "works":
                 if filter != .existing { filter = .existing } else { search = "" }
-            case "funding":
-                if filter != .funding { filter = .funding } else { search = "" }
             default:
                 break
             }
         }
         .onAppear {
+            let migrated = ResearchNavigationMigration.resolve(filter: filter, submissionScope: submissionScope)
+            filter = migrated.filter
+            submissionScope = migrated.submissionScope
             if searchEscapeMonitor == nil {
                 let searchBinding = $search
                 let focusBinding = $searchFocused
@@ -506,24 +517,20 @@ struct ContentView: View {
         }
     }
 
-    // MARK: 自绘侧边栏（词元标杆）：品牌头部 + 搜索框 + 浮动卡片选中态导航行 + 投稿门户 + 状态底卡
+    // MARK: 自绘侧边栏：品牌头部 + 分组导航行 + 状态底卡
 
     private var sidebar: some View {
         VStack(spacing: 0) {
             brandHeader
-            searchField
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
-                    // 「有更新」「已归档」紧邻「在投管理」，不再隔在奖励模块之后
-                    sidebarSection(AppLocalization.text("管理模块"), filters: [
-                        .all, .changed, .hidden,
-                        .existing, .projects, .experimentData,
-                        .summaryReports, .importantLiterature, .certificates, .funding,
+                    sidebarSection(AppLocalization.text("研究工作台"), filters: [
+                        .all, .existing, .projects,
                     ])
-                    sidebarSection(AppLocalization.text("奖励模块"), filters: [.rewardCity])
-                    if filter.isSubmissionFilter && !store.portals.isEmpty {
-                        portalSection
-                    }
+                    sidebarSection(AppLocalization.text("资料与资产"), filters: [
+                        .experimentData, .summaryReports, .importantLiterature, .certificates,
+                    ])
+                    sidebarSection(AppLocalization.text("探索"), filters: [.rewardCity])
                 }
                 .padding(.horizontal, 14)
                 .padding(.vertical, 14)
@@ -531,9 +538,9 @@ struct ContentView: View {
             }
             statusFooter
         }
-        .frame(width: 236)
+        .frame(width: 248)
         .frame(maxHeight: .infinity)
-        .background(.regularMaterial)
+        .background(AppTheme.sidebar)
     }
 
     private var brandHeader: some View {
@@ -555,34 +562,6 @@ struct ContentView: View {
         .padding(.top, 14)
         .padding(.bottom, 10)
         .frame(maxWidth: .infinity)
-    }
-
-    /// 搜索框是模块既有功能（⌘F 聚焦、逐筛选换提示语），新侧栏原样保留、仅视觉对齐标杆。
-    private var searchField: some View {
-        HStack(spacing: 6) {
-            Image(systemName: "magnifyingglass")
-                .foregroundStyle(.secondary)
-                .accessibilityHidden(true)
-            TextField(searchPrompt, text: $search)
-                .textFieldStyle(.plain)
-                .focused($searchFocused)
-            if !search.isEmpty {
-                Button {
-                    search = ""
-                    searchFocused = false
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .accessibilityLabel(AppLocalization.text("清除搜索"))
-            }
-        }
-        .padding(.horizontal, 10)
-        .padding(.vertical, 7)
-        .background(Color.primary.opacity(0.06), in: RoundedRectangle(cornerRadius: 8))
-        .padding(.horizontal, 14)
-        .padding(.bottom, 2)
     }
 
     @ViewBuilder private func sidebarSection(_ title: String, filters: [LibraryFilter]) -> some View {
@@ -615,7 +594,7 @@ struct ContentView: View {
                     .foregroundStyle(selected ? Color.white : Color.secondary)
                     .padding(.horizontal, 7)
                     .padding(.vertical, 2)
-                    .background(selected ? Color.white.opacity(0.22) : Color.primary.opacity(0.05), in: Capsule())
+                    .background(AppTheme.card.opacity(0.65), in: Capsule())
             }
             .padding(.horizontal, 10)
             .frame(maxWidth: .infinity, minHeight: 32)
@@ -623,8 +602,8 @@ struct ContentView: View {
             .background {
                 if selected {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
-                        .fill(AppTheme.blue)
-                        .shadow(color: AppTheme.blue.opacity(colorScheme == .dark ? 0.45 : 0.32), radius: 5, y: 2)
+                        .fill(AppTheme.accent)
+                        .shadow(color: AppTheme.accent.opacity(colorScheme == .dark ? 0.45 : 0.32), radius: 5, y: 2)
                 } else if hovered {
                     RoundedRectangle(cornerRadius: 9, style: .continuous)
                         .fill(Color.primary.opacity(0.06))
@@ -634,70 +613,6 @@ struct ContentView: View {
         }
         .buttonStyle(.plain)
         .onHover { hovering in hoveredFilter = hovering ? item : nil }
-    }
-
-    /// 投稿门户分组（仅投稿筛选且有门户时显示）：行内按钮行为与旧 List 版完全一致——
-    /// 点击重新打开登录窗口、右侧垃圾桶删除、右键菜单删除。
-    private var portalSection: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(AppLocalization.text("投稿门户"))
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(.tertiary)
-                .padding(.horizontal, 10)
-                .padding(.bottom, 2)
-            ForEach(store.portals) { portal in
-                let stale = portal.lastChecked.map { Date().timeIntervalSince($0)>86400 } ?? true
-                HStack(spacing: 6) {
-                    Button {
-                        importContext = ImportContext(publisher: publisher(for: portal))
-                    } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: portal.lastError != nil ? "exclamationmark" : stale ? "clock" : "checkmark")
-                                .font(.caption.bold())
-                                .foregroundStyle(.white)
-                                .frame(width: 24, height: 24)
-                                .background(portal.lastError != nil ? Color.orange : stale ? Color.secondary : AppTheme.teal, in: Circle())
-                                .accessibilityHidden(true)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(portal.publisherName)
-                                    .font(.callout.weight(.medium))
-                                    .lineLimit(1)
-                                Text((URL(string: portal.url)?.host ?? portal.name) + "/" + (URL(string: portal.url)?.path.split(separator: "/").first.map(String.init) ?? ""))
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                            }
-                            Spacer()
-                            Image(systemName: "chevron.right")
-                                .font(.caption2.bold())
-                                .foregroundStyle(.tertiary)
-                                .accessibilityHidden(true)
-                        }
-                        .padding(.vertical, 5)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityValue(portal.lastError != nil ? "同步有错误" : stale ? "历史状态，需刷新" : "最近同步正常")
-                    .help(AppLocalization.text("重新打开登录窗口"))
-                    Button {
-                        portalToRemove = portal
-                    } label: {
-                        Image(systemName: "trash")
-                            .frame(width: 28, height: 28)
-                            .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.secondary)
-                    .disabled(store.isRefreshing)
-                    .accessibilityLabel(AppLocalization.text("删除门户"))
-                    .help(AppLocalization.text("删除门户"))
-                }
-                .contextMenu {
-                    Button(AppLocalization.text("删除门户"), role: .destructive) { portalToRemove = portal }
-                        .disabled(store.isRefreshing)
-                }
-            }
-        }
     }
 
     /// 状态底卡（词元 statusFooter 风格）：门户同步状态 + 存储说明。
@@ -722,7 +637,26 @@ struct ContentView: View {
         ZStack {
             AppTheme.canvas.ignoresSafeArea()
             VStack(spacing: 0) {
+                HStack {
+                    Spacer()
+                    WorkspaceSearchField(prompt: searchPrompt, text: $search, focus: $searchFocused)
+                }
+                .padding(.horizontal, 24)
+                .padding(.top, 16)
+
                 DashboardHeader(filter: filter)
+                if filter == .all {
+                    HStack {
+                        SubmissionScopeTabs(selection: $submissionScope, counts: [
+                            .all: store.visiblePapers.count,
+                            .changed: store.changedCount,
+                            .hidden: store.papers.filter(\.hidden).count,
+                        ])
+                        Spacer()
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.bottom, 12)
+                }
                 if filter.isSubmissionFilter && (store.isRefreshing || !store.refreshMessage.isEmpty) {
                     HStack(spacing: 10) {
                         if store.isRefreshing { ProgressView().controlSize(.small) }
@@ -777,59 +711,69 @@ struct ContentView: View {
                         openAction: { selectedCertificate = $0 },
                         createAction: { certificateEditorContext = CertificateEditorContext(recordID: nil) }
                     )
-                } else if filter == .funding {
-                    FundingDashboard(
-                        records: displayedFundingRecords,
-                        allRecords: store.fundingRecords,
-                        isSearching: !search.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-                    )
                 } else if filter == .rewardCity {
                     RewardCityDashboard()
-                } else if displayedPapers.isEmpty {
-                    EmptyLibraryView(
-                        filter: filter,
-                        manualAction: { manualSubmissionContext = ManualSubmissionContext(paperID: nil) },
-                        importAction: { importContext = ImportContext(publisher: nil) }
-                    )
                 } else {
-                    ScrollView {
-                        VStack(spacing: 18) {
-                            if filter == .all {
-                                DisclosureGroup("投稿统计与趋势") { SubmissionAnalytics(papers: displayedPapers) }
-                            }
-
-                            LazyVStack(spacing: 12) {
-                                ForEach(displayedPapers) { paper in
-                                    PaperCard(
-                                        paper: paper,
-                                        action: {
-                                            selectedPaper = paper
-                                            if paper.changed { store.markRead(paper) }
-                                        },
-                                        deleteAction: {
-                                            paperPendingDeletion = paper
-                                        }
-                                    )
-                                    .onDrag {
-                                        draggedPaperID = paper.id
-                                        return NSItemProvider(object: paper.id as NSString)
-                                    }
-                                    .onDrop(
-                                        of: [UTType.plainText],
-                                        delegate: ReorderDropDelegate.paper(
-                                            targetID: paper.id,
-                                            draggedID: $draggedPaperID,
-                                            store: store
-                                        )
-                                    )
-                                }
+                    GeometryReader { proxy in
+                        HStack(alignment: .top, spacing: 16) {
+                            submissionList.frame(maxWidth: .infinity, maxHeight: .infinity)
+                            if proxy.size.width >= 980 {
+                                SubmissionPortalPanel(
+                                    openPortal: { importContext = ImportContext(publisher: publisher(for: $0)) },
+                                    addPortal: { importContext = ImportContext(publisher: nil) },
+                                    deletePortal: { portalToRemove = $0 }
+                                ).frame(width: 250)
                             }
                         }
-                        .frame(maxWidth: 1100)
-                        .padding(.horizontal, 24)
-                        .padding(.bottom, 28)
+                        .padding(.horizontal, 24).padding(.bottom, 24)
                     }
                 }
+            }
+        }
+    }
+
+    @ViewBuilder private var submissionList: some View {
+        if displayedPapers.isEmpty {
+            EmptyLibraryView(
+                filter: effectivePaperFilter,
+                manualAction: { manualSubmissionContext = ManualSubmissionContext(paperID: nil) },
+                importAction: { importContext = ImportContext(publisher: nil) }
+            )
+        } else {
+            ScrollView {
+                VStack(spacing: 18) {
+                    if submissionScope == .all {
+                        DisclosureGroup("投稿统计与趋势") { SubmissionAnalytics(papers: displayedPapers) }
+                    }
+
+                    LazyVStack(spacing: 12) {
+                        ForEach(displayedPapers) { paper in
+                            PaperCard(
+                                paper: paper,
+                                action: {
+                                    selectedPaper = paper
+                                    if paper.changed { store.markRead(paper) }
+                                },
+                                deleteAction: {
+                                    paperPendingDeletion = paper
+                                }
+                            )
+                            .onDrag {
+                                draggedPaperID = paper.id
+                                return NSItemProvider(object: paper.id as NSString)
+                            }
+                            .onDrop(
+                                of: [UTType.plainText],
+                                delegate: ReorderDropDelegate.paper(
+                                    targetID: paper.id,
+                                    draggedID: $draggedPaperID,
+                                    store: store
+                                )
+                            )
+                        }
+                    }
+                }
+                .frame(maxWidth: 1100)
             }
         }
     }
@@ -843,7 +787,6 @@ struct ContentView: View {
         case .summaryReports: store.documentCount(for: .summaryReports)
         case .importantLiterature: store.documentCount(for: .importantLiterature)
         case .certificates: store.certificates.count
-        case .funding: store.fundingRecords.count
         case .rewardCity: store.rewardCity.placements.count
         case .changed: store.changedCount
         case .hidden: store.papers.filter(\.hidden).count
@@ -864,15 +807,10 @@ struct ContentView: View {
             || documentFolderEditorContext != nil
             || managedDocumentEditorContext != nil
             || showingTrash
+            || showingPortalSheet
     }
 
     /// ⌘N：与工具栏「新建」按钮走同一组状态机入口。
-    private func openFundingInSavings() {
-        ResearchFundingHandoffClient.open { error in
-            if let error { store.lastError = error }
-        }
-    }
-
     private func createRecordForCurrentFilter() {
         switch filter {
         case .existing:
@@ -885,8 +823,6 @@ struct ContentView: View {
             }
         case .certificates:
             certificateEditorContext = CertificateEditorContext(recordID: nil)
-        case .funding:
-            openFundingInSavings()
         case .all, .changed, .hidden:
             manualSubmissionContext = ManualSubmissionContext(paperID: nil)
         case .rewardCity:
@@ -909,9 +845,6 @@ struct ContentView: View {
         case .certificates:
             menuState.newRecordTitle = AppLocalization.text("新建证书记录")
             menuState.canCreateRecord = true
-        case .funding:
-            menuState.newRecordTitle = AppLocalization.text("在搞积蓄管理")
-            menuState.canCreateRecord = false
         case .all, .changed, .hidden:
             menuState.newRecordTitle = AppLocalization.text("添加在投论文")
             menuState.canCreateRecord = true
@@ -1240,20 +1173,6 @@ private struct DashboardHeader: View {
                         symbol: "paperclip",
                         color: .orange
                     )
-                } else if filter == .funding {
-                    StatCard(value: store.fundingRecords.count, label: "资金项目", symbol: "banknote", color: AppTheme.blue)
-                    StatCard(
-                        value: Set(store.fundingRecords.map(\.receivingAccount)).count,
-                        label: "收款账户",
-                        symbol: "creditcard",
-                        color: AppTheme.teal
-                    )
-                    StatCard(
-                        value: currentYearFundingCount,
-                        label: "本年安排",
-                        symbol: "calendar",
-                        color: .orange
-                    )
                 } else if filter == .rewardCity {
                     StatCard(
                         value: Int(store.rewardCity.coins + store.pendingRewardCoins()),
@@ -1321,12 +1240,6 @@ private struct DashboardHeader: View {
             }
             return AppLocalization.format("最近更新：%@", Formatters.dateTime.string(from: date))
         }
-        if filter == .funding {
-            guard let date = store.fundingRecords.map(\.updatedAt).max() else {
-                return AppLocalization.text("按年度和月份管理资金组成与收款账户")
-            }
-            return AppLocalization.format("最近更新：%@", Formatters.dateTime.string(from: date))
-        }
         if filter == .rewardCity {
             return AppLocalization.text("让每一份学术积累，长成属于你的绿色研究城")
         }
@@ -1340,11 +1253,6 @@ private struct DashboardHeader: View {
         return store.existingWorks.filter {
             calendar.component(.year, from: $0.completedAt) == year
         }.count
-    }
-
-    private var currentYearFundingCount: Int {
-        let year = Calendar.current.component(.year, from: Date())
-        return store.fundingRecords.filter { $0.year == year }.count
     }
 }
 
@@ -1422,8 +1330,6 @@ private struct EmptyLibraryView: View {
         .padding(42)
         .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.07)))
-        .padding(.horizontal, 24)
-        .padding(.bottom, 24)
     }
 }
 

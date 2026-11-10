@@ -14,6 +14,11 @@
 
 "管理模块" = "Modules";
 "奖励模块" = "Rewards";
+"研究工作台" = "Research Workspace";
+"资料与资产" = "Library & Assets";
+"探索" = "Explore";
+"全部" = "All";
+"门户" = "Portals";
 "收回地皮" = "Return Terrain";
 "旋转或收回背包" = "Rotate or return to backpack";
 "缩小、回到中心、放大" = "Zoom out, center, zoom in";
@@ -725,7 +730,7 @@
 "旋转建筑或摆件" = "Rotate Building or Decoration";
 "收回建筑或摆件" = "Return Building or Decoration to Inventory";
 "同步正常" = "Sync OK";
-"同步有错误" = "Sync Error";
+"同步有错误" = "Sync error";
 "移除标签 %@" = "Remove Tag %@";
 "%d 个附件" = "%d attachments";
 "%d 篇" = "%d papers";
