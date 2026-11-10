@@ -1,21 +1,21 @@
-# 搞研究 V4.12
+# 搞研究 V4.13
 
 独立 macOS 应用，包含本模块完整业务、游戏场景和 WidgetKit 小组件。运行不依赖搞七廿三或其他六个应用；联动功能需要同时安装相关应用。
 
 ## 下载与安装
 
-从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.12.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
+从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.13.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
 
 1. 支持 macOS 14 或更高版本、Apple Silicon；暂未提供 Intel 版本。
 2. 解压 ZIP，将 `搞研究.app` 拖入“应用程序”文件夹。
 3. 如果 macOS 拦截打开，请先确认软件来源，再进入“系统设置 → 隐私与安全性”，允许该应用打开。发行包使用 Apple Development 签名，未做 Apple 公证。
 4. 安装后运行一次，再从系统小组件列表添加本应用的小组件。整合版的小组件需要重新添加。
 
-下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.12.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
+下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.13.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
 
 ## 功能
 
-- 管理论文、成果、项目、证书和投稿状态；科研资金改由搞积蓄管理，研究保留原资金只读历史。
+- 管理论文、成果、项目、证书和投稿状态；科研资金改由搞积蓄管理。
 - 保存与打开 PDF 等研究附件，查看期刊指标。
 - 三维浮空研究城：建筑、扩建与研究进度联动。
 
@@ -49,7 +49,7 @@ V4.0 从整合版拆分时保留业务历史、余额、库存、游戏进度、
 ./scripts/build.sh
 ./scripts/package.sh
 # 退出搞研究后，保存输出中的私有 backup 目录
-python3 scripts/upgrade_data.py snapshot --version 4.12
+python3 scripts/upgrade_data.py snapshot --version 4.13
 ./scripts/install.sh
 # 安装后核验原数据、附件、设置与研究城；本命令不启动应用
 python3 scripts/upgrade_data.py verify-live /path/to/private/backup
@@ -78,6 +78,13 @@ python3 Tests/InstallSafetyRegression.py
 版本以 `Info.plist` 为准。后续更新仅更新受影响的应用，每次版本 +0.01、构建号 +1。先核验用户资料，再安装新程序并检查记录、附件和游戏进度，成功后清理旧程序、安装包与中间构建。程序资源与用户资料须分别处理，不能用清理构建目录的方式删除用户数据。
 
 第三方组件和资源保留各自许可，详情见 `Resources/` 中的许可、来源说明与补丁记录。
+
+## V4.13 更新
+
+- 全新「学术工作室」界面：米白画布、墨绿主色与陶土色提醒，浅色/深色模式分别适配。
+- 状态更新、已归档改为在投管理内部页签；投稿门户并入在投页，窄窗口使用独立门户面板。
+- 删除资金导航和资金页面；历史字段仅继续服务迁移、备份与回收站安全，旧资金深链仍转交搞积蓄。
+- 资料格式保持 schema32，原数据、附件、钥匙串和小组件共享路径不变。
 
 ## V4.12 更新
 

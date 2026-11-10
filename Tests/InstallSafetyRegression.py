@@ -98,7 +98,7 @@ elif name == "rm":
     for value in args:
         if value.startswith("-"): continue
         p = inside(value)
-        if case == "stage_cleanup" and p.name.startswith(".install.noindex."): die()
+        if case == "stage_cleanup" and p.parent == root / ".install-staging.noindex": die()
         if p.is_symlink() or p.is_file(): p.unlink()
         elif p.exists(): shutil.rmtree(p)
 elif name == "rmdir":
@@ -255,7 +255,7 @@ class InstallSafetyRegression(unittest.TestCase):
                 self.assertNotEqual(result.returncode, 0, details)
             lock = root / ".install-lock.noindex"
             self.assertEqual(lock.exists(), case == "lock_exists", details)
-            self.assertEqual(bool(list(root.glob(".install.noindex.*"))), case == "stage_cleanup", details)
+            self.assertEqual(bool(list((root / ".install-staging.noindex").glob("*"))), case == "stage_cleanup", details)
             if succeeds:
                 self.assertEqual((target / "marker").read_text(), "new", details)
                 backups = list((root / "rollback.noindex").glob("*.app"))

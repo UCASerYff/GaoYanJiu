@@ -2,6 +2,14 @@
 
 默认不自动运行冒烟测试，不为测试启动应用、浏览器、模拟器或窗口。静态、编译和隔离定向检查不能替代以下实际系统验收。
 
+## V4.13 本轮隔离验证（2026-11-10）
+
+- 源码及构建产物中的应用与 Widget 均为 4.13 / build 14。`test_product.sh workspace-navigation`、备份、资料库加载、回收站持久化、73 项 Widget 断言及 77 项 Widget Store 断言全部通过；这些均为隔离检查，没有启动应用、Widget 宿主或 GUI。
+- `test_consolidation.sh` 仅恢复可执行位为 `100755`，内容未改；规定的直接命令重跑通过，资金只读、启动维护及整合隔离回归完成。
+- `InstallSafetyRegression.py` 的 `stage_cleanup` 故障注入与残留断言已对齐当前 `.install-staging.noindex/XXXXXXXX` 暂存路径，生产安装器未改；完整安装安全回归 12/12 通过，隔离故障注入与锁清理检查完成。
+- 完整构建和打包由控制器在根构建锁 `research-4.13-build` 下执行并均成功，锁已释放。`dist/GaoYanJiu-4.13.zip` 及同名 `.sha256` 已生成；在 `dist` 内运行 `shasum -a 256 -c GaoYanJiu-4.13.zip.sha256` 返回 `GaoYanJiu-4.13.zip: OK`，`codesign --verify --deep --strict build.noindex/搞研究.app` 通过。
+- 未执行真实安装、真实资料备份或核验、清理、应用或浏览器启动、真实投稿门户操作、GUI 冒烟及桌面小组件显示验收。静态、编译、签名、发行包与隔离定向检查不能替代这些实际系统验收。
+
 ## 如何理解时间
 
 - 资料库写入：真实 `library.json` 文件写入时间，可能是索引、附件或研究城保存，不等于最后一次成果编辑。
