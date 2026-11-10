@@ -77,13 +77,11 @@ struct LibraryLoadSafetyRegression {
         passed += 1
         print("PASS library safety \(name)")
     }
-    static func repository(_ directory: URL, read: ((URL) throws -> Data)? = nil,
-                           backup: ((Int) throws -> Void)? = nil) -> DiskLibraryRepository {
+    static func repository(_ directory: URL, read: ((URL) throws -> Data)? = nil) -> DiskLibraryRepository {
         DiskLibraryRepository(applicationSupportURL: directory.appendingPathComponent("Data"),
                               legacyApplicationSupportURL: directory.appendingPathComponent("Legacy"),
                               migrationBackupsURL: directory.appendingPathComponent("MigrationBackups"),
-                              readData: read ?? { try GaoActionFileAccess.readPrivateData(at: $0, maximumBytes: 16 * 1_048_576) },
-                              migrationBackup: backup)
+                              readData: read ?? { try GaoActionFileAccess.readPrivateData(at: $0, maximumBytes: 16 * 1_048_576) })
     }
     static func fixture(version: Int = 32) -> PersistedLibrary {
         let paper = PaperRecord(key: "fixture-paper", sourceID: "manual", site: "fixture", url: "", manuscriptID: "P-1",
@@ -956,25 +954,21 @@ struct LibraryLoadSafetyRegression {
                 try require(try Data(contentsOf: disk.libraryURL) == data, "invalid structure changed")
             }
             for text in ["{\"papers\":[]}", "{\"version\":31,\"papers\":[]}"] {
-                let disk = repository(directory.appendingPathComponent(UUID().uuidString), backup: { _ in })
+                let disk = repository(directory.appendingPathComponent(UUID().uuidString))
                 try write(Data(text.utf8), disk.libraryURL)
                 try loaded(disk.loadLibrary { _, _ in })
             }
         }
-        try run("migration-backup-failure-stops-before-migrations") { directory in
-            let control = Switch(); control.fail = true
-            let disk = repository(directory, backup: { _ in if control.fail { throw Failure(description: "backup fixture failure") } })
+        try run("migration-does-not-create-backup-artifacts") { directory in
+            let disk = repository(directory)
             let original = try encode(fixture(version: 31)); try write(original, disk.libraryURL)
-            var migrations = 0
-            try failed(disk.loadLibrary { _, _ in migrations += 1 })
-            try require(migrations == 0, "migration ran after failed backup")
             let store = PaperStore(repository: disk)
-            try require(store.libraryLoadFailed && store.libraryLoadFailureReason == .migrationBackupFailed, "backup failure did not block persistence")
-            try require(try Data(contentsOf: disk.libraryURL) == original && modified(disk.libraryURL) == stamp, "failed backup migrated source")
-            control.fail = false; store.load()
-            try require(!store.libraryLoadFailed, "backup retry could not complete")
+            try require(!store.libraryLoadFailed, "migration without a backup failed")
             try intact(store)
-            try require(try DiskLibraryRepository.libraryVersion(in: Data(contentsOf: disk.libraryURL)) == 32, "retry did not persist existing schema")
+            try require(try DiskLibraryRepository.libraryVersion(in: Data(contentsOf: disk.libraryURL)) == 32, "migration did not persist existing schema")
+            try require(!FileManager.default.fileExists(atPath: disk.migrationBackupsURL.path), "migration created a backup directory")
+            let siblings = try FileManager.default.contentsOfDirectory(atPath: directory.path)
+            try require(siblings == ["Data"], "migration created an unexpected sibling artifact")
         }
         try run("save-failure-keeps-disk-and-pending-memory") { directory in
             let disk = repository(directory); let original = try encode(fixture()); try write(original, disk.libraryURL)

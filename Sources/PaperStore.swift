@@ -12,7 +12,6 @@ import WebKit
 // - 研究城全部规则（金币/券/抽奖/地皮/摆放/旋转/地形）→ RewardCityStore
 // - 回收站状态与 TrashStorage 文件操作 → TrashStore（跨集合编排在本文件的扩展里）
 // - 资料库文件夹/文档与全文索引 → DocumentLibraryStore
-// - 每日备份、便携备份导出/恢复 → BackupService
 // 对视图层暴露的 @Published 属性与方法签名全部保留：子对象持有的状态经
 // 计算属性转发，objectWillChange 级联上行，行为与 V4.4 逐字等价。
 
@@ -47,7 +46,6 @@ final class PaperStore: ObservableObject {
     let rewardStore: RewardCityStore
     let trashStore: TrashStore
     let documentLibrary: DocumentLibraryStore
-    let backupService: BackupService
 
     private var refreshCoordinator: PortalRefreshCoordinator?
     private var consecutiveSaveFailures = 0
@@ -60,7 +58,6 @@ final class PaperStore: ObservableObject {
         rewardStore = RewardCityStore()
         trashStore = TrashStore()
         documentLibrary = DocumentLibraryStore()
-        backupService = BackupService()
 
         // 子对象 → 门面的单向回调：落盘与错误提示统一上行。
         rewardStore.persist = { [weak self] in self?.save() }
@@ -93,11 +90,6 @@ final class PaperStore: ObservableObject {
             return data
         }
         documentLibrary.errorHandler = { [weak self] in self?.lastError = $0 }
-        backupService.persist = { [weak self] in self?.save() }
-        backupService.reload = { [weak self] in self?.load() }
-        backupService.messageHandler = { [weak self] in self?.backupMessage = $0 }
-        backupService.errorHandler = { [weak self] in self?.lastError = $0 }
-        backupService.libraryLoadFailedProvider = { [weak self] in self?.libraryLoadFailed ?? false }
 
         // objectWillChange 级联转发：子对象状态变化视同 PaperStore 变化，
         // 视图层只观察门面即可获得与原单类一致的刷新行为。
@@ -114,8 +106,6 @@ final class PaperStore: ObservableObject {
         load()
         applyTestingCoinGrantIfRequested()
         purgeExpiredTrash()
-        // Scheduling is MainActor-only; the backup service's disk worker is detached.
-        createDailyAutomaticBackupIfNeeded()
         scheduleConsistencyScanIfNeeded()
         indexUnindexedDocumentsIfNeeded()
         ResearchStartupDiagnostics.mark(libraryLoadFailed ? "store-unavailable" : "store-initialized",

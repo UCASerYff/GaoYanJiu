@@ -53,13 +53,7 @@ struct StandaloneApp: App {
     @Environment(\.openWindow) private var openWindow
     @Environment(\.openSettings) private var openSettings
     init() {
-        let restoreStarted = ResearchStartupDiagnostics.monotonicTime()
-        do { try AppBackupRestore.applyPending() } catch {
-            let alert=NSAlert();alert.messageText="数据恢复未完成";alert.informativeText=error.localizedDescription+"\n当前数据和恢复前副本已保留。";alert.runModal();exit(1)
-        }
-        ResearchStartupDiagnostics.mark("pending-restore-finished", elapsed: ResearchStartupDiagnostics.monotonicTime() - restoreStarted)
         AppAppearance.current.apply()
-        
     }
     static func activate() {
         NSApp.activate(ignoringOtherApps:true)
@@ -89,12 +83,6 @@ struct StandaloneApp: App {
         .handlesExternalEvents(matching:["*"])
         .commands {
             CommandGroup(after:.newItem) { Button("新增成果") {post("appCreateRecord")}.keyboardShortcut("n");Button("搜索") {post("appFocusSearch")}.keyboardShortcut("f");Button("刷新投稿") {post("appRefreshSubmissions")} }
-            CommandMenu("数据") {
-                Button("导出模块备份…") { post("GaoSeries.research.export") }
-                Button("恢复模块备份…") { post("GaoSeries.research.import") }
-                Divider()
-                Button("完整资料备份与恢复…") { openSettings() }
-            }
         }
         Settings {
             TabView {

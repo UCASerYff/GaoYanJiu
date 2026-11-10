@@ -445,22 +445,7 @@
 "已自动迁移旧版资料库及附件" = "The legacy library and attachments were migrated automatically.";
 "本地资料库保存失败：" = "Failed to save the local library: ";
 "本地资料库读取失败：" = "Failed to read the local library: ";
-"备份导出失败：" = "Backup export failed: ";
 "部分出版商登录状态已失效，请从“已连接门户”重新打开并登录。" = "Some publisher sessions have expired. Reopen the connected portals and sign in again.";
-
-"备份与恢复" = "Backup & Restore";
-"导出完整备份" = "Export Full Backup";
-"从完整备份恢复" = "Restore Full Backup";
-"从完整备份恢复？" = "Restore from a full backup?";
-"选择备份并恢复" = "Choose Backup and Restore";
-"恢复会用备份中的全部记录和附件替换当前资料库；替换前会自动创建安全副本。" = "Restoring replaces the current library with all records and attachments from the backup. A safety copy is created first.";
-"选择搞研究完整备份" = "Choose a Research Manager Full Backup";
-"完整备份已导出，记录、附件和资料文件均已包含。" = "Full backup exported with all records, attachments, and managed files.";
-"完整备份已恢复，记录和附件已经重新载入。" = "Full backup restored; records and attachments have been reloaded.";
-"备份中没有找到有效的资料库。" = "No valid library was found in this backup.";
-"备份数据版本 %d 高于当前应用支持的版本。" = "Backup schema %d is newer than this app supports.";
-"自动备份暂未完成：%@" = "Automatic backup could not be completed: %@";
-"系统压缩工具执行失败。" = "The system archive tool failed.";
 
 "回收站" = "Recycle Bin";
 "回收站（%d）" = "Recycle Bin (%d)";
@@ -621,7 +606,6 @@
 /* V4.5 */
 "数据没有丢失，但资料库文件无法读取。为保护数据，应用已暂停所有写入，直到恢复出可用的资料库。" = "Your data was not lost, but the library file could not be read. To protect your data, the app has paused all saving until a valid library is restored.";
 "无法读取的文件已隔离保存为“%@”。" = "The unreadable file has been set aside as “%@”.";
-"可通过工具栏「备份与恢复 → 从完整备份恢复」选择每日自动备份进行恢复，也可以直接点击下方按钮：" = "Restore a daily automatic backup via the toolbar menu “Backup & Restore” → “Restore from Full Backup”, or use the button below:";
 "保存失败" = "Save Failed";
 "资料库无法读取" = "Library Could Not Be Loaded";
 "从备份恢复…" = "Restore from Backup…";
@@ -751,7 +735,7 @@
 "投稿、成果与研究资产" = "Submissions, works and research assets";
 "正在同步投稿门户…" = "Syncing submission portals…";
 "%d 个投稿门户" = "%d submission portals";
-"本地存储 · 每日自动备份" = "Stored locally · Daily automatic backups";
+"本地存储" = "Stored locally";
 
 /* Research funding handoff */
 "资金（搞积蓄）" = "Funding (Savings)";

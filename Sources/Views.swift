@@ -110,12 +110,12 @@ struct ContentView: View {
     }
 
     private var loadFailureAlertMessage: String {
-        var message = AppLocalization.text("资料库未能成功读取，已暂停写入并保留原文件与最后有效的小组件内容。请重试读取，或从备份恢复。")
+        var message = AppLocalization.text("资料库未能成功读取，已暂停写入并保留原文件与最后有效的小组件内容。请检查磁盘权限和空间后重试读取。")
         if let name = store.quarantinedLibraryFileName {
             message += "\n\n" + AppLocalization.format("无法读取的文件已隔离保存为“%@”。", name)
         }
         if store.libraryCanInitializeNew {
-            message += "\n\n" + AppLocalization.text("此位置未发现既有资料。仅在首次使用且无需恢复旧资料时，确认创建新的资料库。")
+            message += "\n\n" + AppLocalization.text("此位置未发现既有资料。仅在首次使用且没有旧资料时，确认创建新的资料库。")
         }
         return message
     }
@@ -344,10 +344,6 @@ struct ContentView: View {
                 store.load()
                 loadFailureAlertDismissed = false
             }
-            Button(AppLocalization.text("从备份恢复…")) {
-                loadFailureAlertDismissed = true
-                store.chooseAndRestoreFullBackup()
-            }
             if store.libraryCanInitializeNew {
                 Button(AppLocalization.text("创建新的资料库…")) { confirmingNewLibrary = true }
             }
@@ -364,7 +360,7 @@ struct ContentView: View {
                 loadFailureAlertDismissed = false
             }
         } message: {
-            Text(AppLocalization.text("这将开始一份新的空资料库。如果这台 Mac 原有研究资料，请取消并从备份恢复。"))
+            Text(AppLocalization.text("这将开始一份新的空资料库。如果这台 Mac 原有研究资料，请取消，避免把旧资料误认为空白。"))
         }
         .safeAreaInset(edge: .top) {
             if store.libraryLoadFailed {
@@ -601,7 +597,7 @@ struct ContentView: View {
                     Spacer(minLength: 0)
                 }
             }
-            Text(AppLocalization.text("本地存储 · 每日自动备份")).font(.system(size: 10)).foregroundStyle(.tertiary)
+            Text(AppLocalization.text("本地存储")).font(.system(size: 10)).foregroundStyle(.tertiary)
         }
         .padding(12)
         .background(Color.primary.opacity(0.04), in: RoundedRectangle(cornerRadius: 12, style: .continuous))

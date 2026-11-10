@@ -65,13 +65,6 @@ public struct ResearchModuleView: View {
                     store.exchangeFeedbackMessage = nil
                 })
             }
-            // 备份导出/恢复收拢到 app 级「数据」页：模块内入口已移除，能力经通知触发。
-            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("GaoSeries.research.export"))) { _ in
-                store.exportFullBackup()
-            }
-            .onReceive(NotificationCenter.default.publisher(for: Notification.Name("GaoSeries.research.import"))) { _ in
-                store.chooseAndRestoreFullBackup()
-            }
     }
     private func handleRoute() {
         guard routeRevision > handledRevision, let route else { return }

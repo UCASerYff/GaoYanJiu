@@ -2,6 +2,15 @@
 
 默认不自动运行冒烟测试，不为测试启动应用、浏览器、模拟器或窗口。静态、编译和隔离定向检查不能替代以下实际系统验收。
 
+## V4.14 项目移除、类别图与无备份隔离验证（2026-11-10）
+
+- `./scripts/test_product.sh workspace-navigation portal-presentation existing-work-analytics` 通过。覆盖项目旧导航回到在投“全部”、真实侧栏不再包含项目，以及普通成果、三类专利、未细分专利的统计守恒、顺序、唯一 ID、动态图表高度和宽窄布局阈值；全部使用隔离合成数据。静态检查同时拒绝每日备份、手动备份、迁移备份及持久升级快照实现残留。
+- `./scripts/test_consolidation.sh`、`./scripts/test_library_load.sh`、`./scripts/test_trash_persistence.sh` 均通过。资料库加载安全为 15 组隔离检查，其中迁移用例明确确认不会生成备份目录或额外兄弟产物；真实项目字段和回收站兼容实现保留，没有用空资料覆盖真实记录。
+- `./scripts/test_widgets.sh`、`./scripts/test_widget_store.sh` 分别通过 73 项和 77 项定向断言；启动诊断隔离回归通过；`python3 Tests/InstallSafetyRegression.py` 通过 12/12，确认安装成功只保留新版、失败清理半成品、任何情况均不创建旧程序回滚副本。未启动应用、Widget 宿主、浏览器或 GUI，安装安全测试仅使用隔离伪造系统。
+- 原根协调目录及统一 `build_lease.py` 已不存在，本轮未重建锁服务；每次构建前均检查无其他 `swiftc` 或本应用构建进程。`zsh scripts/test_startup_diagnostics.sh`、`./scripts/build.sh` 与 `./scripts/package.sh` 成功，应用和 Widget 均为 4.14 / build 15，plist 与 `codesign --verify --deep --strict build.noindex/搞研究.app` 检查通过。
+- `dist/GaoYanJiu-4.14.zip` 及同名 `.sha256` 已生成，在 `dist` 内校验返回 `GaoYanJiu-4.14.zip: OK`；ZIP SHA-256 为 `413ec04fbe2b3d90070a5ae6229369860ea24930b84c00b8eaf826cb4d49b313`。
+- 此处仅记录构建和隔离验证。真实安装、资料核验、GUI 类别图视觉、真实投稿门户及桌面 Widget 显示验收不以这些结果代替，须按实际完成情况另行记录。
+
 ## V4.13 最终审查修复隔离验证（2026-11-10）
 
 - `./scripts/test_product.sh workspace-navigation portal-presentation` 通过。覆盖真实侧栏目录、changed/hidden 旧状态迁移、三个投稿页签计数、从每个 scope 进入投稿深链后回到“全部”并清理搜索，以及门户 error/stale/healthy、host/path、检查时间和辅助状态；全部使用隔离合成数据。

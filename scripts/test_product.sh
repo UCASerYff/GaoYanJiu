@@ -33,6 +33,15 @@ cp "$ROOT"/GameWorld/*.swift "$SNAPSHOT/GameWorld/"
 for shared in "$ROOT"/Shared/*.swift(N); do cp "$shared" "$SNAPSHOT/Shared/"; done
 cp "$ROOT/Module.swift" "$SNAPSHOT/Module.swift"
 cp "$ROOT/Tests/ResearchProductIntegration.swift" "$SNAPSHOT/Tests/ResearchProductIntegration.swift"
+if /usr/bin/grep -E '项目截止前|项目步骤截止日期' "$SNAPSHOT/Sources/AppSettings.swift"; then
+    echo 'Project reminder controls remain in Settings'; exit 1
+fi
+if /usr/bin/grep -R -E 'createDailyAutomaticBackupIfNeeded|AutomaticBackupWorker|每日自动备份|daily-backup|BackupService|AppBackupExport|AppBackupRestore|DailyBackup|BackupIntegrity|createMigrationBackup|createPortableBackup|restorePortableBackup|exportFullBackup' "$SNAPSHOT/Sources" "$ROOT/Host"; then
+    echo 'Backup creation or restoration remains in production'; exit 1
+fi
+if /usr/bin/grep -E 'commands.add_parser\("snapshot"|def snapshot\(|def verify_backup\(' "$ROOT/scripts/upgrade_data.py"; then
+    echo 'Persistent upgrade snapshot support remains in the verification tool'; exit 1
+fi
 SOURCES=("$SNAPSHOT"/Sources/*.swift "$SNAPSHOT"/Shared/*.swift(N) "$SNAPSHOT"/GameWorld/*.swift "$SNAPSHOT/Module.swift")
 swiftc -swift-version 5 -parse-as-library -Onone -D RESEARCH_PRODUCT_INTEGRATION \
     -sdk "$SDK" -target "$(uname -m)-apple-macosx14.0" \

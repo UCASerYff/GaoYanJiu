@@ -256,16 +256,18 @@ class InstallSafetyRegression(unittest.TestCase):
             lock = root / ".install-lock.noindex"
             self.assertEqual(lock.exists(), case == "lock_exists", details)
             self.assertEqual(bool(list((root / ".install-staging.noindex").glob("*"))), case == "stage_cleanup", details)
+            preflight_preserves_old = case in {
+                "source_missing", "source_identifier", "source_verify", "entitlements", "team", "entrypoint",
+                "archive_checksum", "archive_extract", "running", "target_identity", "target_symlink", "ls_dump",
+                "election_query", "lock_exists", "old_plugin_remove", "old_ls_remove",
+            }
             if succeeds:
                 self.assertEqual((target / "marker").read_text(), "new", details)
-                backups = list((root / "rollback.noindex").glob("*.app"))
-                self.assertEqual(len(backups), 0 if no_old else 1, details)
-                if backups: self.assertEqual((backups[0] / "marker").read_text(), "old", details)
-            elif no_old:
+            elif no_old or not preflight_preserves_old:
                 self.assertFalse(target.exists(), details)
             else:
                 self.assertEqual((target / "marker").read_text(), "old", details)
-                self.assertFalse(list((root / "rollback.noindex").glob("*.app")), details)
+            self.assertFalse((root / "rollback.noindex").exists(), details)
             commands_file = root / "commands.jsonl"
             commands = [json.loads(line) for line in commands_file.read_text().splitlines()] if commands_file.exists() else []
             self.assertFalse(any("UNSAFE" in line for line in (result.stdout, result.stderr)), details)
@@ -282,26 +284,20 @@ class InstallSafetyRegression(unittest.TestCase):
     def test_existing_lock_is_not_removed(self):
         self.run_case("lock_exists")
 
-    def test_recovery_program_is_retained_inside_noindex(self):
+    def test_no_recovery_program_or_backup_is_created(self):
         result, commands, _ = self.run_case("success", succeeds=True)
-        moves = [command for command in commands if command[0] == "mv"]
-        self.assertEqual(len(moves), 1)
-        recovery = Path(moves[0][-1])
-        self.assertEqual(recovery.parent.name, "rollback.noindex")
-        self.assertIn(str(recovery), result.stdout)
-        # Exercise the same retained path in the real rollback control flow.
+        self.assertFalse(any(command[0] == "mv" for command in commands))
+        self.assertIn("未创建旧程序回滚副本或升级备份", result.stdout)
         _, failed_commands, _ = self.run_case("copy")
-        restores = [command for command in failed_commands if command[0] == "mv"]
-        self.assertEqual(len(restores), 2)
-        self.assertEqual(restores[1][1], restores[0][2])
+        self.assertFalse(any(command[0] == "mv" for command in failed_commands))
 
-    def test_transaction_failures_restore_bundle_and_unlock(self):
-        for case in ("old_plugin_remove", "old_ls_remove", "move", "copy", "target_verify", "new_ls_register",
+    def test_transaction_failures_remove_incomplete_bundle_and_unlock(self):
+        for case in ("old_plugin_remove", "old_ls_remove", "copy", "target_verify", "new_ls_register",
                      "new_plugin_add", "new_election", "timeout", "rollback_ls_register", "rollback_plugin_add"):
             with self.subTest(case=case):
                 result, commands, state = self.run_case(case)
-                self.assertIn("安装未完成，正在恢复旧程序", result.stderr)
-                if case.startswith("rollback_"): self.assertIn("自动回滚未完全成功", result.stderr)
+                self.assertIn("安装未完成，正在清理未完成的新程序", result.stderr)
+                self.assertFalse(any(command[0] == "mv" for command in commands))
                 if case == "timeout": self.assertEqual(state["queries"], 30)
 
     def test_registration_must_match_enabled_version_and_path_in_one_record(self):
@@ -314,18 +310,18 @@ class InstallSafetyRegression(unittest.TestCase):
         for case in ("success", "async", "old_plugin_absent", "no_election", "archive_success"):
             with self.subTest(case=case):
                 result, commands, state = self.run_case(case, succeeds=True)
-                self.assertNotIn("正在恢复旧程序", result.stderr)
+                self.assertNotIn("正在清理未完成的新程序", result.stderr)
                 self.assertIn(["pluginkit", "-m", "-A", "-D", "-vv", "-i", APP_ID + ".widgets"], commands)
                 self.assertEqual(state["queries"], 13 if case == "async" else 10)
                 self.assertEqual(state["new_registrations"], 2 if case == "async" else 1)
 
-    def test_late_removal_requires_fresh_stability_and_reregister_failure_rolls_back(self):
+    def test_late_removal_requires_fresh_stability_and_reregister_failure_cleans_up(self):
         result, _, state = self.run_case("late_removal", succeeds=True)
-        self.assertNotIn("正在恢复旧程序", result.stderr)
+        self.assertNotIn("正在清理未完成的新程序", result.stderr)
         self.assertEqual(state["queries"], 13)
         self.assertEqual(state["new_registrations"], 2)
         result, commands, state = self.run_case("late_removal_register_failure")
-        self.assertIn("安装未完成，正在恢复旧程序", result.stderr)
+        self.assertIn("安装未完成，正在清理未完成的新程序", result.stderr)
         self.assertEqual(state["queries"], 3)
         self.assertEqual(state["new_registrations"], 2)
         self.assertIn(["pluginkit", "-e", "use", "-i", APP_ID + ".widgets"], commands)
@@ -334,11 +330,11 @@ class InstallSafetyRegression(unittest.TestCase):
         self.run_case("success", succeeds=True, no_old=True)
         self.run_case("timeout", no_old=True)
 
-    def test_old_ignore_election_restored(self):
+    def test_old_ignore_election_is_replaced_by_use(self):
         _, commands, _ = self.run_case("old_ignore")
-        self.assertIn(["pluginkit", "-e", "ignore", "-i", APP_ID + ".widgets"], commands)
+        self.assertNotIn(["pluginkit", "-e", "ignore", "-i", APP_ID + ".widgets"], commands)
 
-    def test_signals_restore_old_app(self):
+    def test_signals_remove_incomplete_new_app(self):
         for case, status in (("signal_int", 130), ("signal_term", 143)):
             with self.subTest(case=case): self.run_case(case, expected_status=status)
 

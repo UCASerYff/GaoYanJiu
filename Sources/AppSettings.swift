@@ -202,11 +202,6 @@ struct AppSettingsView: View {
                         in: 15...180,
                         step: 5
                     )
-                    Stepper(
-                        AppLocalization.format("项目截止前 %d 天提醒", settings.projectReminderLeadDays),
-                        value: $settings.projectReminderLeadDays,
-                        in: 1...30
-                    )
                     Button(AppLocalization.text("立即更新提醒")) {
                         Task {
                             notificationStatus = await NotificationManager.shared.configure(
@@ -225,7 +220,7 @@ struct AppSettingsView: View {
                 } header: {
                     Text(AppLocalization.text("系统通知"))
                 } footer: {
-                    Text(AppLocalization.text("提醒只在本机生成，包含投稿状态超期和项目步骤截止日期。"))
+                    Text(AppLocalization.text("提醒只在本机生成，包含投稿状态超期。"))
                 }
 
                 Section {

@@ -175,7 +175,6 @@ final class DiskLibraryRepository: LibraryRepository {
     let legacyApplicationSupportURL: URL
     let migrationBackupsURL: URL
     private let readData: (URL) throws -> Data
-    private let migrationBackup: ((Int) throws -> Void)?
     private let snapshotEvidenceURLs: [URL]?
     private var lastReadData: Data?
     private var observedExistingLibrary = false
@@ -185,13 +184,11 @@ final class DiskLibraryRepository: LibraryRepository {
          legacyApplicationSupportURL: URL = LibraryPaths.legacyApplicationSupport,
          migrationBackupsURL: URL = LibraryPaths.migrationBackups,
          readData: @escaping (URL) throws -> Data = { try GaoActionFileAccess.readPrivateData(at: $0, maximumBytes: 128 * 1_048_576) },
-         migrationBackup: ((Int) throws -> Void)? = nil,
          snapshotEvidenceURLs: [URL]? = nil) {
         self.applicationSupportURL = applicationSupportURL
         self.legacyApplicationSupportURL = legacyApplicationSupportURL
         self.migrationBackupsURL = migrationBackupsURL
         self.readData = readData
-        self.migrationBackup = migrationBackup
         if let snapshotEvidenceURLs { self.snapshotEvidenceURLs = snapshotEvidenceURLs }
         else if ProcessInfo.processInfo.environment["GAO_RESEARCH_DATA_DIR"] != nil {
             // An isolated data-root override must never query the user's real App Group.
@@ -222,15 +219,6 @@ final class DiskLibraryRepository: LibraryRepository {
             guard version <= currentVersion else { return .futureVersion(version) }
             try Self.validateStructure(data, version: version)
             var library = try decoder.decode(PersistedLibrary.self, from: data)
-            if library.version < currentVersion {
-                do {
-                    if let migrationBackup { try migrationBackup(library.version) }
-                    else { try createMigrationBackup(from: library.version) }
-                } catch {
-                    throw LibraryPersistenceError.backupFailed(error)
-                }
-            }
-
             let originalVersion = library.version
             for threshold in migrationThresholds where originalVersion < threshold {
                 migrate(&library, threshold)
@@ -415,48 +403,5 @@ final class DiskLibraryRepository: LibraryRepository {
         }
         try fileManager.moveItem(at: staging, to: applicationSupportURL)
         return true
-    }
-
-    private func createMigrationBackup(from libraryVersion: Int) throws {
-        let fileManager = FileManager.default
-        guard try pathExists(libraryURL) else { throw LibraryPersistenceError.missing }
-
-        try fileManager.createDirectory(
-            at: migrationBackupsURL,
-            withIntermediateDirectories: true
-        )
-        let sourceRelease = LibrarySchema.releaseName(forLibraryVersion: libraryVersion)
-        let folderName = "\(sourceRelease)-before-\(LibrarySchema.marketingVersion)-\(LibraryPaths.migrationTimestampFormatter.string(from: Date()))-\(UUID().uuidString.prefix(8))"
-        let destination = migrationBackupsURL.appendingPathComponent(folderName, isDirectory: true)
-        try fileManager.copyItem(at: applicationSupportURL, to: destination)
-        if migrationBackupsURL == LibraryPaths.migrationBackups { MigrationBackupHousekeeping.prune(keeping: 5) }
-    }
-}
-
-// MARK: - 迁移/恢复前备份目录容量治理
-
-/// MigrationBackups 目录保留策略：按修改时间保留最近若干份，多余的删最旧。
-/// 只清理备份目录本身，用户数据本体绝不动。
-enum MigrationBackupHousekeeping {
-    static func prune(keeping limit: Int = 5) {
-        let fileManager = FileManager.default
-        guard let entries = try? fileManager.contentsOfDirectory(
-            at: LibraryPaths.migrationBackups,
-            includingPropertiesForKeys: [.contentModificationDateKey],
-            options: [.skipsHiddenFiles]
-        ) else { return }
-        let sorted = entries.sorted {
-            let left = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            let right = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            return left > right
-        }
-        for url in sorted.dropFirst(max(1, limit)) {
-            do {
-                try fileManager.removeItem(at: url)
-                NSLog("Migration backup pruned (keep %d): %@", limit, url.lastPathComponent)
-            } catch {
-                NSLog("Failed to prune migration backup %@: %@", url.lastPathComponent, error.localizedDescription)
-            }
-        }
     }
 }

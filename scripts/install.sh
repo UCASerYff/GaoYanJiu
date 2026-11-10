@@ -11,15 +11,11 @@ PLISTBUDDY=/usr/libexec/PlistBuddy
 NEW_WIDGET="$TARGET/Contents/PlugIns/ResearchWidgets.appex"
 LOCK="$ROOT/.install-lock.noindex"
 STAGE=""
-SAFETY=""
 TRANSACTION_STARTED=0
-OLD_MOVED=0
 TARGET_WRITTEN=0
 COMMITTED=0
-OLD_ELECTION=default
 
-# Callers explicitly exit/return. A failed function under zsh ERR_EXIT can
-# bypass EXIT traps, which would leave a replacement without its rollback.
+# Callers explicitly exit/return. No old-application or rollback copy is created.
 fail() { print -u2 -- "$1"; }
 plist_value() { "$PLISTBUDDY" -c "Print :$2" "$1/Contents/Info.plist"; }
 
@@ -33,35 +29,21 @@ prepare_stage() {
     mktemp -d "$parent/XXXXXXXX"
 }
 
-# Leave recovery copies until the caller has verified business data and widgets.
-# This script changes only application bundles and their registrations.
+# On failure, remove only an incomplete new bundle. The installer never moves
+# or retains the previous application as a rollback or safety copy.
 finish_install() {
-    local exit_code=$1 rollback_ok=1
+    local exit_code=$1 cleanup_ok=1
     set +e
     trap - EXIT INT TERM
     if (( TRANSACTION_STARTED && ! COMMITTED )); then
-        print -u2 -- '安装未完成，正在恢复旧程序和小组件登记…'
+        print -u2 -- '安装未完成，正在清理未完成的新程序；不会创建旧版回滚副本…'
         if (( TARGET_WRITTEN )); then
             pluginkit -r "$NEW_WIDGET" >/dev/null 2>&1 || true
             "$LSREGISTER" -u "$TARGET" >/dev/null 2>&1 || true
-            /bin/rm -rf "$TARGET" || rollback_ok=0
+            /bin/rm -rf "$TARGET" || cleanup_ok=0
         fi
-        if (( OLD_MOVED )); then
-            if [[ ! -e "$TARGET" && -d "$SAFETY" ]]; then
-                /bin/mv "$SAFETY" "$TARGET" || rollback_ok=0
-            else
-                rollback_ok=0
-            fi
-        fi
-        if [[ -d "$TARGET" ]]; then
-            "$LSREGISTER" -f -R "$TARGET" || rollback_ok=0
-            if [[ -d "$NEW_WIDGET" ]]; then
-                pluginkit -a "$NEW_WIDGET" || rollback_ok=0
-                pluginkit -e "$OLD_ELECTION" -i "$WIDGET_ID" || rollback_ok=0
-            fi
-        fi
-        if (( ! rollback_ok )); then
-            print -u2 -- "自动回滚未完全成功；请保留恢复副本：$SAFETY"
+        if (( ! cleanup_ok )); then
+            print -u2 -- "未完成的新程序清理失败，请检查：$TARGET"
             exit_code=1
         fi
     fi
@@ -146,24 +128,6 @@ if ! ELECTIONS=$(pluginkit -m -A -D -i "$WIDGET_ID" 2> "$STAGE/election-error.tx
         fail '无法读取现有小组件登记，停止替换'; exit 1
     fi
 fi
-if [[ "$ELECTIONS" == *$'\n-'* || "$ELECTIONS" == -* ]]; then
-    OLD_ELECTION=ignore
-elif [[ "$ELECTIONS" == *$'\n+'* || "$ELECTIONS" == +* ]]; then
-    OLD_ELECTION=use
-fi
-# Keep the recoverable old host outside Spotlight discovery while business
-# verification is pending. Moving it back on failure preserves the same path
-# used by the rollback trap; do not rename or discard a safety copy to hide it.
-SAFETY="$ROOT/rollback.noindex/搞研究-$(date +%Y%m%d-%H%M%S)-$$.app"
-[[ ! -L "$ROOT/rollback.noindex" ]] || { fail '恢复目录不能是符号链接'; exit 1; }
-mkdir -p "$ROOT/rollback.noindex"
-[[ ! -e "$SAFETY" && ! -L "$SAFETY" ]] || { fail '恢复路径已存在'; exit 1; }
-OLD_IDENTITY=""
-if [[ -e "$TARGET" ]]; then
-    [[ -d "$TARGET" && ! -L "$TARGET" ]] || { fail '旧程序不是常规App目录'; exit 1; }
-    [[ "$(stat -f %d "$TARGET")" == "$(stat -f %d "$ROOT/rollback.noindex")" ]] || { fail '恢复副本必须同卷移动保留原件'; exit 1; }
-    OLD_IDENTITY=$(stat -f '%d:%i' "$TARGET")
-fi
 TRANSACTION_STARTED=1
 if [[ -d "$TARGET" ]]; then
     if [[ -d "$NEW_WIDGET" ]]; then
@@ -175,10 +139,10 @@ if [[ -d "$TARGET" ]]; then
         fi
     fi
     "$LSREGISTER" -u "$TARGET"
-    [[ "$(stat -f '%d:%i' "$TARGET")" == "$OLD_IDENTITY" && ! -e "$SAFETY" && ! -L "$SAFETY" && ! -L "$ROOT/rollback.noindex" ]] || { fail '旧程序或恢复路径在安装期间变化'; exit 1; }
-    [[ "$(stat -f %d "$TARGET")" == "$(stat -f %d "$ROOT/rollback.noindex")" ]] || { fail '恢复目录卷发生变化'; exit 1; }
-    /bin/mv "$TARGET" "$SAFETY"
-    OLD_MOVED=1
+    TARGET_WRITTEN=1
+    # The owner explicitly prohibits retained rollback copies. Remove only the
+    # verified old bundle at the exact installation path, then install fresh.
+    /bin/rm -rf "$TARGET"
 fi
 TARGET_WRITTEN=1
 ditto "$SOURCE" "$TARGET"
@@ -232,4 +196,4 @@ COMMITTED=1
 # registration. Do not restart shared widget/Notification Center processes.
 print -- "已安装 $TARGET（V$VERSION，构建 $NUMBER）；小组件入口、签名和登记检查通过。"
 print -- '系统小组件的实际显示需在用户桌面确认；本安装过程未启动应用或执行冒烟测试。'
-if (( OLD_MOVED )); then print -- "旧程序恢复副本：$SAFETY"; fi
+print -- '未创建旧程序回滚副本或升级备份。'

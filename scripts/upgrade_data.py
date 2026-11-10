@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-"""Private, read-only upgrade snapshots and post-install data verification.
+"""Read-only pre/post-install verification without snapshots or backup files.
 
-Examples (quit the app before snapshotting):
-  python3 scripts/upgrade_data.py snapshot --version 4.09
-  python3 scripts/upgrade_data.py verify-live /path/returned/as/backup
+Run before and after installation, then compare the complete JSON output:
 
-Snapshots keep the original data paths. This tool never restores, migrates,
-installs, or deletes live data. A failed check always has a nonzero exit status.
-Only aggregate counts are printed; file names, IDs, settings and credentials
-remain in the private snapshot. Fixture paths can be supplied for local tests.
+  python3 scripts/upgrade_data.py inspect
+
+The original data paths never change. This tool does not restore, migrate,
+install, delete, or copy live data into persistent storage. SQLite checks use
+automatically deleted temporary copies. Only aggregate counts and SHA-256
+integrity digests are printed; business content and credentials stay private.
 """
 
 from __future__ import annotations
@@ -473,168 +473,49 @@ def public_counts(listings: dict, summary: dict, sqlite_count: int) -> dict:
             "reward_city_fields": summary["reward_city_fields"]}
 
 
-def verify_backup(backup: Path) -> dict:
-    if backup.is_symlink() or not backup.is_dir():
-        fail("invalid_backup_directory")
-    data = read_file(backup / MANIFEST)
-    if read_file(backup / "manifest.sha256").decode("ascii").strip() != digest(data):
-        fail("backup_manifest_checksum_failed")
-    manifest = parse_json(data)
-    if not isinstance(manifest, dict) or manifest.get("format") != FORMAT or manifest.get("app_id") != APP_ID:
-        fail("unsupported_backup_format")
-    actual = inventory(backup)
-    actual["files"].pop(MANIFEST, None)
-    actual["files"].pop("manifest.sha256", None)
-    if actual != manifest["archive"]:
-        fail("backup_file_checksum_failed")
-    roots = {name: backup / "payload" / name for name in manifest["roots"]}
-    listings = {name: inventory(root) for name, root in roots.items()}
-    if listings != manifest["sources"]:
-        fail("backup_source_inventory_failed")
-    if library_summary(roots["research"], listings["research"]) != manifest["library"]:
-        fail("backup_business_integrity_failed")
-    for key in manifest["sqlite"]:
-        check_sqlite(backup / "sqlite-consistent" / key)
-    return manifest
-
-
-def snapshot(args) -> dict:
-    if not re.fullmatch(r"V?[0-9]+(?:\.[0-9]+){1,2}", args.version):
-        fail("invalid_version")
+def inspect_live(args) -> dict:
+    """Validate every live file without writing a snapshot, manifest or backup."""
     roots = resolve_roots(args)
     preferences_dir = Path(args.preferences_dir).expanduser().resolve() if args.preferences_dir else None
-    backup_root = Path(args.backup_root).expanduser().resolve() if args.backup_root else (
-        Path.home() / "Library/Application Support/GaoSeries/UpgradeBackups/Research")
-    project = Path(__file__).resolve().parents[1]
-    if backup_root == project or project in backup_root.parents:
-        fail("backup_must_not_enter_source_repository")
-    if any(backup_root == root or root in backup_root.parents or backup_root in root.parents for root in roots.values()):
-        fail("backup_must_not_overlap_live_data")
     listings = {name: inventory(root) for name, root in roots.items()}
     summary = library_summary(roots["research"], listings["research"])
+    settings = preferences(preferences_dir)
+    setting_hashes = {domain: None if value is None else preference_digest(value)
+                      for domain, value in settings.items()}
+    statistics = None
     if "statistics.json" in listings["app_group"]["files"]:
-        statistics_digest(roots["app_group"] / "statistics.json")
-    settings = preferences(preferences_dir)
-    backup_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-    os.chmod(backup_root, 0o700)
-    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
-    final = backup_root / (stamp + "-V" + args.version.lstrip("V"))
-    stage = Path(tempfile.mkdtemp(prefix=".incomplete-", dir=backup_root))
-    try:
-        copied_roots = {}
-        for name, root in roots.items():
-            copied_roots[name] = stage / "payload" / name
-            mirror(root, copied_roots[name], listings[name])
-        for domain, value in settings.items():
-            if value is not None:
-                private_write(stage / "preferences" / (domain + ".plist"),
-                              plistlib.dumps(value, fmt=plistlib.FMT_BINARY, sort_keys=True))
-        databases = sqlite_snapshots(copied_roots, listings, stage / "sqlite-consistent")
-        if {name: inventory(root) for name, root in roots.items()} != listings:
-            fail("live_data_changed_during_snapshot")
-        if preferences(preferences_dir) != settings:
-            fail("preferences_changed_during_snapshot")
-        manifest = {"format": FORMAT, "app_id": APP_ID, "target_version": args.version,
-                    "created_at": stamp, "roots": {name: str(root) for name, root in roots.items()},
-                    "preferences_dir": str(preferences_dir) if preferences_dir else None,
-                    "preferences_present": {domain: value is not None for domain, value in settings.items()},
-                    "sources": listings, "library": summary, "sqlite": databases,
-                    "archive": inventory(stage)}
-        encoded = canonical(manifest)
-        private_write(stage / MANIFEST, encoded)
-        private_write(stage / "manifest.sha256", (digest(encoded) + "\n").encode("ascii"))
-        verify_backup(stage)
-        os.rename(stage, final)
-        return {"ok": True, "command": "snapshot", "backup": str(final),
-                "counts": public_counts(listings, summary, len(databases))}
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
-
-
-def verify_live(args) -> dict:
-    backup = Path(args.backup).expanduser().resolve()
-    manifest = verify_backup(backup)
-    roots = resolve_roots(args, manifest["roots"])
-    preferences_dir = (Path(args.preferences_dir).expanduser().resolve() if args.preferences_dir else
-                       Path(manifest["preferences_dir"]) if manifest.get("preferences_dir") else None)
-    listings = {name: inventory(root) for name, root in roots.items()}
-    summary = library_summary(roots["research"], listings["research"])
-    differences = {"business_collections": 0, "record_ids_or_counts": 0, "reward_city": 0,
-                   "library_other_fields": 0, "attachments": 0, "files_added": 0,
-                   "files_missing": 0, "files_changed": 0, "directories": 0,
-                   "preferences": 0, "widget_statistics": 0}
-    previous = manifest["library"]
-    for name in COLLECTIONS:
-        old, new = previous["collections"][name], summary["collections"][name]
-        differences["business_collections"] += int(old["records_sha256"] != new["records_sha256"])
-        differences["record_ids_or_counts"] += int((old["count"], old["ids_sha256"]) != (new["count"], new["ids_sha256"]))
-    differences["reward_city"] = int(previous["reward_city_sha256"] != summary["reward_city_sha256"])
-    differences["library_other_fields"] = int(previous["library_sha256"] != summary["library_sha256"])
-    differences["attachments"] = int(previous["attachments"] != summary["attachments"])
-    for name, root in roots.items():
-        old, new = manifest["sources"][name], listings[name]
-        old_files, new_files = old["files"], new["files"]
-        differences["files_added"] += len(new_files.keys() - old_files.keys())
-        differences["files_missing"] += len(old_files.keys() - new_files.keys())
-        differences["directories"] += len(set(old["directories"]) ^ set(new["directories"]))
-        for relative in old_files.keys() & new_files.keys():
-            if name == "research" and relative == LIBRARY_REL:
-                continue  # JSON order/whitespace are immaterial; full values checked above.
-            if name == "app_group" and relative == "statistics.json":
-                differences["widget_statistics"] += int(statistics_digest(backup / "payload" / name / relative) != statistics_digest(root / relative))
-                continue
-            path = Path(relative)
-            if path.suffix == ".plist" and path.stem in DOMAINS:
-                before = parse_preferences(read_file(backup / "payload" / name / relative))
-                after = parse_preferences(read_file(root / relative))
-                differences["preferences"] += int(preference_digest(before, allowed_change=True) != preference_digest(after, allowed_change=True))
-                continue
-            differences["files_changed"] += int(old_files[relative] != new_files[relative])
-    settings = preferences(preferences_dir)
-    for domain, current in settings.items():
-        present = manifest["preferences_present"][domain]
-        original = parse_preferences(read_file(backup / "preferences" / (domain + ".plist"))) if present else None
-        # A previously absent domain may acquire only the release marker.
-        before = preference_digest(original or {}, allowed_change=True)
-        after = preference_digest(current or {}, allowed_change=True)
-        differences["preferences"] += int(before != after)
-    # This checks current SQLite + WAL in disposable copies, and preserves all
-    # existing live paths. Physical journal changes are still reported above.
-    with tempfile.TemporaryDirectory(prefix="gao-research-verify-") as scratch:
+        statistics = statistics_digest(roots["app_group"] / "statistics.json")
+    # SQLite integrity checks use disposable temporary copies because read-only
+    # recovery can update WAL/SHM sidecars. The temporary directory is deleted.
+    with tempfile.TemporaryDirectory(prefix="gao-research-inspect-") as scratch:
         databases = sqlite_snapshots(roots, listings, Path(scratch) / "sqlite")
     if {name: inventory(root) for name, root in roots.items()} != listings:
-        fail("live_data_changed_during_verification")
+        fail("live_data_changed_during_inspection")
     if preferences(preferences_dir) != settings:
-        fail("preferences_changed_during_verification")
-    return {"ok": not any(differences.values()), "command": "verify-live",
-            "counts": public_counts(listings, summary, len(databases)), "difference_counts": differences}
+        fail("preferences_changed_during_inspection")
+    integrity = digest(canonical({"sources": listings, "library": summary,
+                                  "preferences": setting_hashes, "widget_statistics": statistics}))
+    return {"ok": True, "command": "inspect", "integrity_sha256": integrity,
+            "counts": public_counts(listings, summary, len(databases))}
 
 
 def main() -> int:
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     commands = parser.add_subparsers(dest="command", required=True)
-    make = commands.add_parser("snapshot", help="Validate and privately snapshot existing data")
-    make.add_argument("--version", required=True, help="Target app version, e.g. 4.09")
-    make.add_argument("--backup-root", help="Private backup parent; never a source repository")
-    check = commands.add_parser("verify-live", help="Verify snapshot and compare all live data")
-    check.add_argument("backup", help="Snapshot directory returned by snapshot")
-    for command in (make, check):
-        command.add_argument("--research-root", help="Override data root for fixtures")
-        command.add_argument("--group-root", help="Override App Group root for fixtures")
-        command.add_argument("--preferences-dir", help="Read fixture plists instead of macOS defaults")
+    check = commands.add_parser("inspect", help="Read-only integrity digest; creates no backup or manifest")
+    check.add_argument("--research-root", help="Override data root for fixtures")
+    check.add_argument("--group-root", help="Override App Group root for fixtures")
+    check.add_argument("--preferences-dir", help="Read fixture plists instead of macOS defaults")
     args = parser.parse_args()
     try:
-        result = snapshot(args) if args.command == "snapshot" else verify_live(args)
+        result = inspect_live(args)
         print(json.dumps(result, ensure_ascii=False, sort_keys=True))
-        return 0 if result["ok"] else 1
+        return 0
     except SafetyError as error:
         print(json.dumps({"ok": False, "command": args.command, "error": str(error)}), file=sys.stderr)
         return 1
     except (OSError, sqlite3.Error, ValueError, KeyError, TypeError) as error:
-        # Do not leak user filenames, business content, or credentials through
-        # exception text into shell logs or eventual GitHub descriptions.
         print(json.dumps({"ok": False, "command": args.command,
                           "error": "read_or_integrity_check_failed", "error_type": type(error).__name__}), file=sys.stderr)
         return 1

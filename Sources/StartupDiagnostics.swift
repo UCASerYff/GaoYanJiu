@@ -9,7 +9,6 @@ public enum ResearchStartupDiagnostics {
         "host-entry", "pending-restore-finished", "store-initializing", "repository-read-finished",
         "library-read-ready", "library-read-unavailable", "widget-publication-ready", "widget-publication-pending",
         "store-initialized", "store-unavailable", "content-first-appeared", "startup-data-ready",
-        "daily-backup-worker-start", "daily-backup-created", "daily-backup-alreadyExistsNotRevalidated", "daily-backup-failed",
     ]
     private struct Event: Codable {
         let phase: String
