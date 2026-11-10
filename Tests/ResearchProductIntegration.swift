@@ -758,6 +758,29 @@ struct ResearchProductIntegration {
         }
         _ = try durable(store)
     }
+    static func workspaceNavigation() throws {
+        let (store, _) = try makeStore()
+        let now = Date()
+        func paper(_ id: String, changed: Bool, hidden: Bool) -> PaperRecord {
+            PaperRecord(key: id, sourceID: "manual", site: "fixture", url: "", manuscriptID: id,
+                        title: "Workspace " + id, journal: "Fixture Journal", status: "Under Review",
+                        checkedAt: now, statusSince: now, statusSinceSource: "fixture",
+                        previousStatus: nil, changed: changed, hidden: hidden,
+                        history: [], submissionHistory: nil)
+        }
+        store.papers = [paper("ordinary", changed: false, hidden: false),
+                        paper("updated", changed: true, hidden: false),
+                        paper("archived", changed: true, hidden: true)]
+        try require(store.papers(matching: .all, search: "").map(\.id) == ["ordinary", "updated"], "全部页签包含归档或漏记在投")
+        try require(store.papers(matching: .changed, search: "").map(\.id) == ["updated"], "状态更新页签口径改变")
+        try require(store.papers(matching: .hidden, search: "").map(\.id) == ["archived"], "归档页签口径改变")
+        try require(SubmissionScope.changed.legacyFilter == .changed && SubmissionScope.hidden.legacyFilter == .hidden, "页签未映射原筛选")
+        let migrated = ResearchNavigationMigration.resolve(filter: .hidden, submissionScope: .all)
+        try require(migrated.filter == .all && migrated.submissionScope == .hidden, "旧归档导航未迁入在投页签")
+        try require(!LibraryFilter.sidebarCases.contains(.changed) && !LibraryFilter.sidebarCases.contains(.hidden), "侧栏仍含独立投稿页")
+        try require(LibraryFilter(rawValue: "funding") == nil, "资金模块仍可导航")
+    }
+
     static func main() async {
         setbuf(stdout, nil)
         do {
@@ -771,6 +794,7 @@ struct ResearchProductIntegration {
                         "Product fixture must be a plain bundle, never a LaunchServices application host")
             try require(ResearchExchangePaths.bundleID == "com.academic-achievement.manager", "Test bundle does not expose production research routing identity")
             switch name {
+            case "workspace-navigation": try workspaceNavigation()
             case "fresh-import": try await freshImport()
             case "new-attachment": try await newAttachment()
             case "new-version": try await newVersion()

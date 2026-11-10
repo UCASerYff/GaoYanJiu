@@ -744,6 +744,36 @@ struct ImportOutcome {
     let portal: PortalAccount
 }
 
+enum SubmissionScope: String, CaseIterable, Identifiable {
+    case all, changed, hidden
+    var id: String { rawValue }
+    var title: String {
+        switch self {
+        case .all: AppLocalization.text("全部")
+        case .changed: AppLocalization.text("状态更新")
+        case .hidden: AppLocalization.text("已归档")
+        }
+    }
+    var legacyFilter: LibraryFilter {
+        switch self {
+        case .all: .all
+        case .changed: .changed
+        case .hidden: .hidden
+        }
+    }
+}
+
+enum ResearchNavigationMigration {
+    static func resolve(filter: LibraryFilter, submissionScope: SubmissionScope)
+        -> (filter: LibraryFilter, submissionScope: SubmissionScope) {
+        switch filter {
+        case .changed: (.all, .changed)
+        case .hidden: (.all, .hidden)
+        default: (filter, submissionScope)
+        }
+    }
+}
+
 enum LibraryFilter: String, CaseIterable, Identifiable {
     case all
     case existing
@@ -752,12 +782,16 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
     case summaryReports
     case importantLiterature
     case certificates
-    case funding
     case rewardCity
     case changed
     case hidden
 
     var id: String { rawValue }
+
+    static let sidebarCases: [LibraryFilter] = [
+        .all, .existing, .projects, .experimentData,
+        .summaryReports, .importantLiterature, .certificates, .rewardCity,
+    ]
 
     var title: String {
         switch self {
@@ -768,7 +802,6 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
         case .summaryReports: AppLocalization.text("总结报告")
         case .importantLiterature: AppLocalization.text("重要文献")
         case .certificates: AppLocalization.text("证书管理")
-        case .funding: AppLocalization.text("资金（搞积蓄）")
         case .rewardCity: AppLocalization.text("研究城")
         case .changed: AppLocalization.text("状态更新")
         case .hidden: AppLocalization.text("已归档")
@@ -784,7 +817,6 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
         case .summaryReports: "doc.text.fill"
         case .importantLiterature: "books.vertical.fill"
         case .certificates: "rectangle.badge.checkmark"
-        case .funding: "banknote.fill"
         case .rewardCity: "building.2.crop.circle.fill"
         case .changed: "bell.badge.fill"
         case .hidden: "archivebox.fill"
@@ -794,7 +826,7 @@ enum LibraryFilter: String, CaseIterable, Identifiable {
     var isSubmissionFilter: Bool {
         switch self {
         case .all, .changed, .hidden: true
-        case .existing, .projects, .experimentData, .summaryReports, .importantLiterature, .certificates, .funding, .rewardCity: false
+        case .existing, .projects, .experimentData, .summaryReports, .importantLiterature, .certificates, .rewardCity: false
         }
     }
 

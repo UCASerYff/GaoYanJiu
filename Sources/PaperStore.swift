@@ -170,8 +170,6 @@ final class PaperStore: ObservableObject {
             base = []
         case .certificates:
             base = []
-        case .funding:
-            base = []
         case .rewardCity:
             base = []
         case .changed:
