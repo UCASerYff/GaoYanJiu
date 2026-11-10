@@ -3,13 +3,6 @@ import Charts
 import SwiftUI
 import UniformTypeIdentifiers
 
-enum AppTheme {
-    static let indigo = Color(red: 0.08, green: 0.20, blue: 0.43)
-    static let blue = Color(red: 0.10, green: 0.36, blue: 0.78)
-    static let teal = Color(red: 0.08, green: 0.58, blue: 0.54)
-    static let canvas = Color(nsColor: .windowBackgroundColor)
-}
-
 struct ImportContext: Identifiable {
     let id = UUID()
     let publisher: PublisherDefinition?

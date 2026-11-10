@@ -128,9 +128,9 @@ struct ListEmptyStateView: View {
             Spacer()
             Image(systemName: icon)
                 .font(.system(size: 34, weight: .medium))
-                .foregroundStyle(AppTheme.blue)
+                .foregroundStyle(AppTheme.accent)
                 .frame(width: 72, height: 72)
-                .background(AppTheme.blue.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
+                .background(AppTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 16))
                 .accessibilityHidden(true)
             Text(title)
                 .font(.system(size: 23, weight: .semibold))
@@ -145,13 +145,14 @@ struct ListEmptyStateView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
+                .tint(AppTheme.accent)
             }
             Spacer()
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .padding(42)
-        .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.07)))
+        .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 14))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(AppTheme.border))
         .padding(.horizontal, embedded ? 0 : 24)
         .padding(.bottom, embedded ? 0 : 24)
     }
