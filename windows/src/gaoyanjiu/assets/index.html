@@ -1,0 +1,41 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="gao-token" content="__GAO_TOKEN__">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>搞研究</title>
+  <link rel="stylesheet" href="/assets/style.css">
+</head>
+<body data-theme="system">
+  <header class="topbar">
+    <div class="brand">
+      <span class="mark" aria-hidden="true">研</span>
+      <div>
+        <strong id="brand-name">搞研究</strong>
+        <small id="brand-version"></small>
+      </div>
+    </div>
+    <label class="search">
+      <span data-i18n="search">搜索</span>
+      <input id="search" type="search" autocomplete="off">
+    </label>
+    <button id="quit" type="button" data-i18n="quit">退出</button>
+  </header>
+  <section id="gate" class="gate" hidden>
+    <div class="gate-card">
+      <p class="eyebrow">GaoYanJiu</p>
+      <h1>搞研究</h1>
+      <p id="gate-text"></p>
+      <button id="gate-create" type="button" hidden data-i18n="createLibrary">创建我的资料库</button>
+    </div>
+  </section>
+  <div id="shell" class="shell" hidden>
+    <nav id="nav" class="nav"></nav>
+    <main id="main" class="main"></main>
+  </div>
+  <dialog id="editor"></dialog>
+  <div id="toast" class="toast" role="status"></div>
+  <script src="/assets/app.js"></script>
+</body>
+</html>

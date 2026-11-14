@@ -178,3 +178,7 @@ python3 Tests/InstallSafetyRegression.py
 修复从整合版拆分后小组件不出现在列表的问题：系统仍登记已删除的 V4.6 搞研究宿主，导致 WidgetKit 忽略独立版扩展。安装时精确注销本应用已失效的旧宿主登记，再注册、启用新扩展；失败时恢复旧程序与插件登记。构建保留 Xcode 生成的扩展元数据，并核验标准扩展入口、签名、应用与小组件版本一致。
 
 增加私有升级备份与核验工具：逐文件 SHA-256、SQLite WAL 一致快照、业务记录与研究城状态对比、附件引用和文件完整性检查。V4.0 → V4.01 资料格式未变，沿用原数据路径；原系统钥匙串凭据继续使用。私有备份保存在 `~/Library/Application Support/GaoSeries/UpgradeBackups/Research/`，不提交到仓库。核验工具严格报告新增、删除和修改；首次启动产生的每日自动备份也会列为差异，须核实新增备份并保留轮换前的旧备份，不能忽略业务或附件差异。核验成功后清理旧程序、旧安装包与中间构建，保留个人资料及备份。
+
+## Windows 版
+
+Windows 10/11 x64 的独立版本在 [`windows/`](windows/README.md)。它使用 Python 标准库和本机浏览器界面，资料格式仍是 schema 32 的 `library.json`，构建由 GitHub Actions 的 `windows-latest` 完成。功能对齐、运行方式和已知差异见 [windows/README.md](windows/README.md)。Windows 版使用 `%APPDATA%\GaoSeries\Research\`，不读取 macOS 钥匙串，也不修改 Mac 版源码。
