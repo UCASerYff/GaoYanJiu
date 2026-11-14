@@ -31,7 +31,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 - `GaoYanJiu.exe`：打开界面的窗口程序
 - `GaoYanJiu-cli.exe`：命令行，用于检查资料和生成统计快照
 
-GitHub Actions 工作流 `.github/workflows/windows.yml` 在 `windows-latest` 上执行同一套步骤，再以后台方式启动 `GaoYanJiu.exe`（不打开浏览器），确认本机页面和 `/api/bootstrap` 有响应后退出，并把两个 exe 作为 artifact `GaoYanJiu-Windows-4.14` 上传。这个工作流不会创建 GitHub Release。
+GitHub Actions 工作流 `.github/workflows/windows.yml` 在 `windows-latest` 上执行同一套步骤。打包之后会用临时目录后台启动 `GaoYanJiu.exe`（`--serve --no-browser --port --data-dir`，不打开浏览器），轮询到本机 HTTP 200，再通过该服务新建并读回一次 `library.json`，然后结束进程。两个 exe 作为 artifact `GaoYanJiu-Windows-4.14` 上传。这个工作流不会创建 GitHub Release。
 
 只跑测试：
 
@@ -60,7 +60,22 @@ PYTHONPATH=src python3 launch.py --data-dir /tmp/gaoyanjiu-dev --no-browser --po
 
 第一次打开时需要本人确认“创建我的资料库”。程序不会在资料缺失、损坏或版本更高时用空库覆盖原文件，也不会写自动备份。
 
-命令行：
+`GaoYanJiu.exe` 与 `GaoYanJiu-cli.exe` 使用同一组参数。不带参数时会打开系统浏览器。后台启动不打开浏览器：
+
+```powershell
+.\GaoYanJiu.exe --data-dir $env:TEMP\GaoYanJiuSmoke --serve --no-browser --port 18765
+```
+
+| 参数 | 作用 |
+| --- | --- |
+| `--data-dir` | 资料目录。不设时使用 `%APPDATA%\GaoSeries\Research\AcademicAchievementManager\`，也可用环境变量 `GAO_RESEARCH_DATA_DIR` |
+| `--serve` | 启动只监听 `127.0.0.1` 的本地服务。无其他命令时也会启动服务 |
+| `--no-browser` | 不调用系统浏览器 |
+| `--port` | 服务端口。`0` 表示由系统分配 |
+| `--create-empty` | 在空目录明确新建 schema 32 资料库后退出；与 `--serve` 同时使用时新建后继续服务 |
+| `--inspect` | 只读打印记录条数，不打印标题或正文 |
+| `--widget-snapshot` | 写出只含计数的 `widget-snapshot.json` |
+| `--version` | 打印 `4.14+1` |
 
 ```powershell
 .\GaoYanJiu-cli.exe --version
