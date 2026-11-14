@@ -31,7 +31,7 @@ powershell -ExecutionPolicy Bypass -File .\build.ps1
 - `GaoYanJiu.exe`：打开界面的窗口程序
 - `GaoYanJiu-cli.exe`：命令行，用于检查资料和生成统计快照
 
-GitHub Actions 工作流 `.github/workflows/windows.yml` 在 `windows-latest` 上执行同一套步骤，并把两个 exe 作为 artifact `GaoYanJiu-Windows-4.14` 上传。这个工作流不会创建 GitHub Release。
+GitHub Actions 工作流 `.github/workflows/windows.yml` 在 `windows-latest` 上执行同一套步骤，再以后台方式启动 `GaoYanJiu.exe`（不打开浏览器），确认本机页面和 `/api/bootstrap` 有响应后退出，并把两个 exe 作为 artifact `GaoYanJiu-Windows-4.14` 上传。这个工作流不会创建 GitHub Release。
 
 只跑测试：
 

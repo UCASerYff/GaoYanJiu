@@ -17,12 +17,51 @@ jobs:
           python-version: "3.12"
       - name: Test and build executables
         run: powershell -ExecutionPolicy Bypass -File .\build.ps1
-      - name: Smoke-test the packaged CLI
+      - name: Smoke-test the packaged app
         run: |
-          $dest = Join-Path $env:TEMP "gaoyanjiu-ci"
-          New-Item -ItemType Directory -Force -Path $dest | Out-Null
-          .\dist\GaoYanJiu-cli.exe --data-dir $dest --create-empty
-          .\dist\GaoYanJiu-cli.exe --data-dir $dest --inspect
+          $ErrorActionPreference = "Stop"
+          $dest = Join-Path $env:TEMP "gaoyanjiu-smoke"
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          $inspect = Join-Path $env:TEMP "gaoyanjiu-inspect"
+          if (Test-Path $inspect) { Remove-Item -Recurse -Force $inspect }
+          .\dist\GaoYanJiu-cli.exe --data-dir $inspect --create-empty
+          if ($LASTEXITCODE -ne 0) { throw "create-empty failed: $LASTEXITCODE" }
+          .\dist\GaoYanJiu-cli.exe --data-dir $inspect --inspect
+          if ($LASTEXITCODE -ne 0) { throw "inspect failed: $LASTEXITCODE" }
+
+          $port = 18765
+          $exe = Join-Path (Get-Location) "dist\GaoYanJiu.exe"
+          $proc = Start-Process -FilePath $exe -ArgumentList @(
+            "--data-dir", $dest, "--create-empty", "--serve", "--no-browser", "--port", "$port"
+          ) -PassThru -WindowStyle Hidden
+          $page = $null
+          try {
+            $deadline = (Get-Date).AddSeconds(90)
+            do {
+              if ($proc.HasExited) { throw "GaoYanJiu.exe exited early with code $($proc.ExitCode)" }
+              try {
+                $page = Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing -TimeoutSec 3 -NoProxy
+                if ($page.StatusCode -eq 200 -and $page.Content -match 'name="gao-token"') { break }
+                $page = $null
+              } catch { $page = $null }
+              Start-Sleep -Seconds 1
+            } while ((Get-Date) -lt $deadline)
+            if (-not $page) { throw "packaged exe did not serve http://127.0.0.1:$port/" }
+            $token = [regex]::Match($page.Content, 'name="gao-token" content="([^"]+)"').Groups[1].Value
+            if (-not $token) { throw "served page did not include a session token" }
+            $boot = Invoke-RestMethod -Uri "http://127.0.0.1:$port/api/bootstrap" -Headers @{ "X-Gao-Token" = $token } -NoProxy
+            if ($boot.name -ne "搞研究" -or $boot.status -ne "ready") {
+              throw "bootstrap was not ready: $($boot | ConvertTo-Json -Compress)"
+            }
+            Write-Output "smoke ok: $($boot.name) $($boot.version)+$($boot.build) $($boot.status)"
+            try {
+              Invoke-RestMethod -Method POST -Uri "http://127.0.0.1:$port/api/shutdown" -Headers @{ "X-Gao-Token" = $token } -ContentType "application/json" -Body "{}" -NoProxy | Out-Null
+            } catch {}
+            $exitDeadline = (Get-Date).AddSeconds(20)
+            while (-not $proc.HasExited -and (Get-Date) -lt $exitDeadline) { Start-Sleep -Milliseconds 500 }
+          } finally {
+            if (-not $proc.HasExited) { & taskkill.exe /PID $proc.Id /T /F | Out-Null }
+          }
           Get-ChildItem .\dist\*.exe | ForEach-Object { Write-Output ("{0}`t{1}" -f $_.Name, $_.Length) }
       - uses: actions/upload-artifact@v4
         with:
