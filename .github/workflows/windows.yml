@@ -1,0 +1,33 @@
+name: Windows
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  package:
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: windows
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test and build executables
+        run: powershell -ExecutionPolicy Bypass -File .\build.ps1
+      - name: Smoke-test the packaged CLI
+        run: |
+          $dest = Join-Path $env:TEMP "gaoyanjiu-ci"
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          .\dist\GaoYanJiu-cli.exe --data-dir $dest --create-empty
+          .\dist\GaoYanJiu-cli.exe --data-dir $dest --inspect
+          Get-ChildItem .\dist\*.exe | ForEach-Object { Write-Output ("{0}`t{1}" -f $_.Name, $_.Length) }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GaoYanJiu-Windows-4.14
+          if-no-files-found: error
+          path: |
+            windows/dist/GaoYanJiu.exe
+            windows/dist/GaoYanJiu-cli.exe
