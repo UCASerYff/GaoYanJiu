@@ -572,21 +572,24 @@ final class ResearchExchangeClient {
             }
             for key in ["outputs", "sources", "pages"] {
                 guard let values = provenance[key]?.researchArray else { continue }
-                provenance[key] = .array(values.map { value in
+                var normalized: [GaoJSONValue] = values.map { value -> GaoJSONValue in
                     guard var object = value.researchObject else { return value }
                     if let outputs = object["outputItemIDs"]?.researchStrings {
-                        object["outputItemIDs"] = .array(outputs.sorted().map(GaoJSONValue.string))
+                        let orderedIDs: [GaoJSONValue] = outputs.sorted().map(GaoJSONValue.string)
+                        object["outputItemIDs"] = .array(orderedIDs)
                     }
                     if let pages = object["pages"]?.researchArray {
-                        object["pages"] = .array(pages.sorted { ($0.researchObject?["pageNumber"]?.researchNumber ?? 0) < ($1.researchObject?["pageNumber"]?.researchNumber ?? 0) })
+                        let orderedPages = pages.sorted { Self.semanticPageNumber($0) < Self.semanticPageNumber($1) }
+                        object["pages"] = .array(orderedPages)
                     }
                     return .object(object)
-                }.sorted { left, right in
-                    if key == "pages" { return (left.researchObject?["pageNumber"]?.researchNumber ?? 0) < (right.researchObject?["pageNumber"]?.researchNumber ?? 0) }
-                    let a = left.researchObject ?? [:], b = right.researchObject ?? [:]
-                    return (a["resultItemID"]?.researchString ?? a["itemID"]?.researchString ?? a["sourceItemID"]?.researchString ?? "")
-                        < (b["resultItemID"]?.researchString ?? b["itemID"]?.researchString ?? b["sourceItemID"]?.researchString ?? "")
-                })
+                }
+                if key == "pages" {
+                    normalized.sort { Self.semanticPageNumber($0) < Self.semanticPageNumber($1) }
+                } else {
+                    normalized.sort { Self.semanticItemID($0) < Self.semanticItemID($1) }
+                }
+                provenance[key] = .array(normalized)
             }
             manifest.provenance = provenance
         }
@@ -612,6 +615,16 @@ final class ResearchExchangeClient {
         })
         let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
         return SHA256.hash(data: try encoder.encode(intent)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func semanticPageNumber(_ value: GaoJSONValue) -> Double {
+        value.researchObject?["pageNumber"]?.researchNumber ?? 0
+    }
+
+    private static func semanticItemID(_ value: GaoJSONValue) -> String {
+        let object = value.researchObject
+        return object?["resultItemID"]?.researchString ?? object?["itemID"]?.researchString
+            ?? object?["sourceItemID"]?.researchString ?? ""
     }
 
     /// Comparison evidence only: this never validates an expired envelope for
