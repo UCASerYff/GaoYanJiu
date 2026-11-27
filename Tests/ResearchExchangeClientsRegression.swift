@@ -1,6 +1,7 @@
 import AppKit
-import Foundation
 import CryptoKit
+import Darwin
+import Foundation
 
 // Isolated consumer-contract fixtures. Fake app manifests do not prove an
 // installed provider, GUI permission, real OCR engine or editing end-to-end.
@@ -90,12 +91,32 @@ struct ResearchExchangeClientsRegression {
         }
     }
 
-    static func ocrAutoReturn() throws {
+    private static func isolatedFixtureRoot() throws -> URL {
         guard let argument = CommandLine.arguments.dropFirst().first else { fatalError("explicit fixture root required") }
-        let root = URL(fileURLWithPath: argument, isDirectory: true).resolvingSymlinksInPath()
-        try expect(root.lastPathComponent == "fixture-data" &&
-                   root.deletingLastPathComponent().lastPathComponent.hasPrefix("gao-research-exchange-clients."),
-                   "auto return fixture must remain isolated")
+        let root = URL(fileURLWithPath: argument, isDirectory: true)
+        let work = root.deletingLastPathComponent()
+        let container = work.deletingLastPathComponent()
+        let configuredTemp = ProcessInfo.processInfo.environment["TMPDIR"].flatMap { $0.isEmpty ? nil : $0 } ?? "/tmp"
+        let temp = URL(fileURLWithPath: configuredTemp, isDirectory: true).resolvingSymlinksInPath()
+        let actualTemp = container.deletingLastPathComponent().resolvingSymlinksInPath()
+        try expect(root.lastPathComponent == "fixture-data" && work.lastPathComponent == "fixture.noindex" &&
+                   container.lastPathComponent.hasPrefix("gao-research-exchange-clients.") && actualTemp.path == temp.path,
+                   "client fixture must stay in its temporary work directory")
+
+        let scratch = temp.appendingPathComponent(container.lastPathComponent, isDirectory: true)
+        let scratchFD = try GaoSecureFD.openDirectory(scratch, requireOwnedFinal: true)
+        defer { close(scratchFD) }
+        try GaoSecureFD.checkPrivatePermissions(scratchFD)
+        let workFD = try GaoSecureFD.openChildDirectory(at: scratchFD, name: "fixture.noindex", owned: true)
+        defer { close(workFD) }
+        let existing = try GaoSecureFD.openChildDirectory(at: workFD, name: "fixture-data", owned: true, allowMissing: true)
+        if existing >= 0 { close(existing) }
+        try expect(existing < 0, "client fixture requires a fresh data directory")
+        return scratch.appendingPathComponent("fixture.noindex/fixture-data", isDirectory: true)
+    }
+
+    static func ocrAutoReturn() throws {
+        let root = try isolatedFixtureRoot()
         try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? fm.removeItem(at: root) }
         let mailbox = ResearchOCRReturns(root: root.appendingPathComponent("GaoSeries/GaoAction/OcrReturns-v1", isDirectory: true))
@@ -230,10 +251,7 @@ struct ResearchExchangeClientsRegression {
     }
 
     static func ocrResultRepack() throws {
-        guard let argument = CommandLine.arguments.dropFirst().first else { fatalError("explicit fixture root required") }
-        let root = URL(fileURLWithPath: argument, isDirectory: true).resolvingSymlinksInPath()
-        try expect(root.lastPathComponent == "fixture-data" && root.deletingLastPathComponent().lastPathComponent.hasPrefix("gao-research-exchange-clients."),
-                   "focused fixture must stay inside its explicit temporary directory")
+        let root = try isolatedFixtureRoot()
         try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? fm.removeItem(at: root) }
         let client = ResearchExchangeClient(exchangeRoot: root.appendingPathComponent("Exchange"), researchBundleID: researchID,
@@ -437,8 +455,7 @@ struct ResearchExchangeClientsRegression {
     }
 
     static func fileSelectionUTINormalization() throws {
-        guard let argument = CommandLine.arguments.dropFirst().first else { fatalError("explicit fixture root required") }
-        let root = URL(fileURLWithPath: argument, isDirectory: true).resolvingSymlinksInPath()
+        let root = try isolatedFixtureRoot()
         try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? fm.removeItem(at: root) }
         let client = ResearchExchangeClient(exchangeRoot: root.appendingPathComponent("Exchange"), researchBundleID: researchID,
@@ -484,8 +501,7 @@ struct ResearchExchangeClientsRegression {
     }
 
     static func runFixtures() throws {
-        guard let argument = CommandLine.arguments.dropFirst().first else { fatalError("explicit fixture root required") }
-        let root = URL(fileURLWithPath: argument, isDirectory: true).resolvingSymlinksInPath()
+        let root = try isolatedFixtureRoot()
         try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         defer { try? fm.removeItem(at: root) }
         let client = ResearchExchangeClient(exchangeRoot: root.appendingPathComponent("Exchange"), researchBundleID: researchID,
