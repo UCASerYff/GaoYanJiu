@@ -9,6 +9,7 @@ import json
 import msilib
 import os
 import re
+import stat
 import struct
 import subprocess
 import tempfile
@@ -70,6 +71,21 @@ def check_x64(executable: Path) -> None:
         offset, = struct.unpack("<I", binary.read(4))
         binary.seek(offset)
         assert binary.read(6) == b"PE\0\0\x64\x86"
+
+
+def require_data_dir(profile: Path, reported: object) -> None:
+    if not isinstance(reported, str) or "\x00" in reported or not Path(reported).is_absolute():
+        raise AssertionError(f"Bootstrap dataDir must be an absolute path, got {reported!r}")
+    paths = f"expected {str(profile)!r}, reported {reported!r}"
+    try:
+        expected = profile.stat()
+        actual = Path(reported).stat()
+    except OSError as exc:
+        raise AssertionError(f"Could not verify the bootstrap data directory ({paths})") from exc
+    if not (stat.S_ISDIR(expected.st_mode) and stat.S_ISDIR(actual.st_mode)):
+        raise AssertionError(f"Bootstrap data paths must both be directories ({paths})")
+    if not os.path.samestat(expected, actual):
+        raise AssertionError(f"Bootstrap returned a different data directory ({paths})")
 
 
 def legacy_fixture(profile: Path) -> dict:
@@ -138,7 +154,7 @@ def exercise(install: Path, profile: Path, fixture: dict, env: dict, release: st
         second = subprocess.run([str(cli), "gaoyanjiu://works", "--no-browser"], env=env, creationflags=NO_WINDOW,
                                 capture_output=True, timeout=35, check=True)
         assert second.stdout == b"" and process.poll() is None
-        assert request("/api/bootstrap")["dataDir"] == str(profile)
+        require_data_dir(profile, request("/api/bootstrap").get("dataDir"))
 
         paper = request("/api/papers", {"title": "隔离安装论文", "venue": "Nature", "status": "Under Review",
                                          "statusSince": "2026-11-14"})["key"]
