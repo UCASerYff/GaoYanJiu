@@ -1,13 +1,13 @@
 #!/bin/zsh
 set -euo pipefail
 ROOT=${0:A:h:h}
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
+export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
 BUILD="${GAO_BUILD_DIR:-$ROOT/build.noindex}"
 mkdir -p "$BUILD/PlugIns" "$BUILD/widget-cache"
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Info.plist")
 NUMBER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Info.plist")
 
-xcodebuild -quiet -project "$ROOT/Widgets/ResearchWidgets.xcodeproj" -target ResearchWidgets -configuration Release CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES SYMROOT="$BUILD/widget-products" OBJROOT="$BUILD/widget-objects" CLANG_MODULE_CACHE_PATH="$BUILD/widget-cache" build
+xcrun xcodebuild -quiet -project "$ROOT/Widgets/ResearchWidgets.xcodeproj" -target ResearchWidgets -configuration Release CODE_SIGNING_ALLOWED=NO ARCHS=arm64 ONLY_ACTIVE_ARCH=YES SYMROOT="$BUILD/widget-products" OBJROOT="$BUILD/widget-objects" CLANG_MODULE_CACHE_PATH="$BUILD/widget-cache" build
 ditto "$BUILD/widget-products/Release/ResearchWidgets.appex" "$BUILD/PlugIns/ResearchWidgets.appex"
 /usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $VERSION" "$BUILD/PlugIns/ResearchWidgets.appex/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NUMBER" "$BUILD/PlugIns/ResearchWidgets.appex/Contents/Info.plist"

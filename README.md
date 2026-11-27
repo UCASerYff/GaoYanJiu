@@ -65,7 +65,7 @@ python3 Tests/InstallSafetyRegression.py
 
 通过环境变量 `GAO_SIGNING_IDENTITY` 可指定签名证书。修改团队后也需调整 `scripts/install.sh` 中的团队检查。`dist/` 存放本地发行 ZIP 和校验文件，不提交到 Git；上传到 GitHub Releases。
 
-Apple Silicon Mac 或 GitHub Actions 的 `macos-15` runner 可用以下命令验证源码。验证会在临时目录编译宿主、框架和 WidgetKit 扩展，核对版本，然后运行隔离夹具。发行签名仍由正式构建流程处理。
+Apple Silicon Mac 或 GitHub Actions 的 `macos-15` runner 可用以下命令验证源码。验证需要 macOS 26 或更新版本的 SDK，并在临时目录编译宿主、框架和 WidgetKit 扩展，再核对版本并运行隔离夹具。可以用 `DEVELOPER_DIR` 指定 Xcode。未指定时先找 Xcode 26.3，再使用 `xcode-select` 当前指向的 Xcode。发行签名仍由正式构建流程处理。
 
 ```bash
 bash scripts/verify_macos_arm64.sh

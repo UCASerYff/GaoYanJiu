@@ -14,7 +14,7 @@ TEST_WORK="$TEST_PARENT/fixture.noindex"
 mkdir -p "$TEST_WORK"
 trap 'rm -rf "$TEST_PARENT"' EXIT INT TERM
 SDK=$(xcrun --sdk macosx --show-sdk-path)
-swiftc -swift-version 5 -parse-as-library -Onone -sdk "$SDK" \
+xcrun --sdk macosx swiftc -swift-version 5 -parse-as-library -Onone -sdk "$SDK" \
     -target "$(uname -m)-apple-macosx14.0" -module-cache-path "$TEST_WORK/cache" \
     -framework AppKit -framework CryptoKit -framework UniformTypeIdentifiers -framework Security \
     "$ROOT/Sources/GaoActionV1.swift" "$ROOT/Sources/ResearchExchangeClients.swift" "$ROOT/Sources/ResearchOCRReturns.swift" \

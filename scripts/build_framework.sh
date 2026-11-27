@@ -1,13 +1,12 @@
 #!/bin/zsh
 set -euo pipefail
 ROOT=${0:A:h:h}
-XCODE=/Applications/Xcode.app
-if [[ ! -d "$XCODE/Contents/Developer" ]]; then
-    echo "error: 未找到 Xcode（$XCODE）。构建需要完整 Xcode 工具链（SwiftUI 宏插件只随 Xcode 分发），" >&2
+export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
+if [[ ! -x "$DEVELOPER_DIR/usr/bin/xcodebuild" ]]; then
+    echo "error: 未找到 Xcode（$DEVELOPER_DIR）。构建需要完整 Xcode 工具链（SwiftUI 宏插件只随 Xcode 分发），" >&2
     echo "       请安装 Xcode 后重试；仅用 Command Line Tools 无法构建。" >&2
     exit 1
 fi
-export DEVELOPER_DIR="$XCODE/Contents/Developer"
 NAME=Research
 SOURCE="$ROOT"
 [[ -d "$SOURCE/Sources" && -f "$SOURCE/Module.swift" ]] || { echo "Unknown module: $NAME" >&2; exit 1; }
@@ -20,7 +19,7 @@ SDK=$(xcrun --sdk macosx --show-sdk-path)
 MACROS="$DEVELOPER_DIR/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib"
 [[ -f "$MACROS" ]] || { echo "error: SwiftUI 宏插件缺失：$MACROS（Xcode 安装不完整？）" >&2; exit 1; }
 SOURCES=("$SOURCE"/Sources/*.swift "$SOURCE"/Shared/*.swift(N) "$ROOT"/GameWorld/*.swift "$SOURCE/Module.swift")
-swiftc -swift-version 5 -parse-as-library -O -emit-library -emit-module \
+xcrun --sdk macosx swiftc -swift-version 5 -parse-as-library -O -emit-library -emit-module \
     -module-name "$NAME" -sdk "$SDK" -target arm64-apple-macosx14.0 \
     -module-cache-path "$BUILD/cache" -load-plugin-library "$MACROS" \
     -framework SwiftUI -framework AppKit -framework WidgetKit -framework Charts \

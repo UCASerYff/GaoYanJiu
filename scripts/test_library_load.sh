@@ -43,7 +43,7 @@ cp "$ROOT/Module.swift" "$SNAPSHOT/Module.swift"
 cp "$ROOT/Tests/LibraryLoadSafetyRegression.swift" "$SNAPSHOT/Tests/LibraryLoadSafetyRegression.swift"
 cp "$ROOT/Tests/ResearchOCRReviewRegression.swift" "$SNAPSHOT/Tests/ResearchOCRReviewRegression.swift"
 SOURCES=("$SNAPSHOT"/Sources/*.swift "$SNAPSHOT"/Shared/*.swift(N) "$SNAPSHOT"/GameWorld/*.swift "$SNAPSHOT/Module.swift")
-swiftc -swift-version 5 -parse-as-library -Onone -D LIBRARY_LOAD_SAFETY_TEST \
+xcrun --sdk macosx swiftc -swift-version 5 -parse-as-library -Onone -D LIBRARY_LOAD_SAFETY_TEST \
     -sdk "$SDK" -target "$(uname -m)-apple-macosx14.0" \
     -module-cache-path "$TEST_WORK/cache" -load-plugin-library "$MACROS" \
     -framework SwiftUI -framework AppKit -framework WidgetKit -framework Charts \

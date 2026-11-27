@@ -5,9 +5,33 @@ if [[ $(uname -s) != Darwin || $(uname -m) != arm64 ]]; then
     echo 'Run this verification on an arm64 macOS runner.' >&2
     exit 1
 fi
-export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-[[ -d "$DEVELOPER_DIR" ]] || { echo '完整 Xcode 工具链不可用。' >&2; exit 1; }
-xcodebuild -version
+if [[ -z ${DEVELOPER_DIR:-} ]]; then
+    preferred=/Applications/Xcode_26.3.app/Contents/Developer
+    if [[ -x "$preferred/usr/bin/xcodebuild" ]]; then
+        DEVELOPER_DIR=$preferred
+    elif ! DEVELOPER_DIR=$(xcode-select --print-path); then
+        echo '找不到 Xcode。请安装完整 Xcode 或显式设置 DEVELOPER_DIR。' >&2
+        exit 1
+    fi
+fi
+DEVELOPER_DIR=${DEVELOPER_DIR%/}
+if [[ $DEVELOPER_DIR == *.app ]]; then
+    DEVELOPER_DIR=$DEVELOPER_DIR/Contents/Developer
+fi
+export DEVELOPER_DIR
+if [[ ! -x "$DEVELOPER_DIR/usr/bin/xcodebuild" ]]; then
+    echo "完整 Xcode 工具链不可用：$DEVELOPER_DIR" >&2
+    exit 1
+fi
+echo "DEVELOPER_DIR=$DEVELOPER_DIR"
+xcrun xcodebuild -version
+sdk_version=$(xcrun --sdk macosx --show-sdk-version)
+sdk_major=${sdk_version%%.*}
+if [[ ! $sdk_major =~ ^[1-9][0-9]*$ ]] || (( sdk_major < 26 )); then
+    echo "验证需要 macOS 26 或更新版本的 SDK，当前为 $sdk_version。请设置 DEVELOPER_DIR 指向合适的 Xcode。" >&2
+    exit 1
+fi
+echo "macOS SDK $sdk_version"
 WORK=$(mktemp -d /private/tmp/gao-research-macos-verify.XXXXXXXX)
 trap 'rm -rf -- "$WORK"' EXIT
 trap 'exit 130' INT
