@@ -393,6 +393,8 @@ struct LibraryLoadSafetyRegression {
             let first = try await fixture.store.documentLibrary.applyExchangeResult(firstReview, userApproved: true)
             try require(first.importedCount == 3 && first.duplicateCount == 0 && !first.replayed && Set(first.documentIDs).count == 3,
                         "first approved OCR did not import exactly3 unique derived IDs")
+            try require(!FileManager.default.fileExists(atPath: ResearchExchangePaths.root.appendingPathComponent("Snapshots").path),
+                        "Approved OCR created a recovery snapshot")
             let firstIntent = try unwrap(fixture.store.documentLibrary.exchangeClient.loadSession(request.requestID)
                 .resultIntents?[firstReview.id], "first OCR semantic intent absent")
             let fingerprint = try unwrap(firstIntent.semanticFingerprintV2, "first OCR did not durably bind v2 semantic fingerprint")
@@ -825,6 +827,11 @@ struct LibraryLoadSafetyRegression {
         if arguments == ["--case", "completed-ocr-ordering"] {
             try await completedOCROrdering()
             print("Completed OCR ordering: \(passed) isolated groups, \(assertions) assertions passed; no GUI, live data or real preferences were used.")
+            return
+        }
+        if arguments == ["--case", "ocr-auto-return"] {
+            try await automaticOCRReview()
+            print("Automatic OCR review: \(passed) isolated groups, \(assertions) assertions passed; no GUI, live data or real preferences were used.")
             return
         }
         try require(arguments.isEmpty, "unknown focused test case")

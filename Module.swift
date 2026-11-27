@@ -15,6 +15,7 @@ enum ResearchBundle {
 }
 
 public struct ResearchModuleView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @ObservedObject private var store = ResearchRuntime.store
     @ObservedObject private var settings = ResearchRuntime.settings
     @ObservedObject private var menuState = ResearchRuntime.menuState
@@ -31,7 +32,17 @@ public struct ResearchModuleView: View {
             .environmentObject(settings)
             .environmentObject(menuState)
             .environment(\.locale, settings.language.locale)
-            .onAppear(perform: handleRoute)
+            .onAppear {
+                handleRoute()
+                store.documentLibrary.setOCRReturnActive(scenePhase == .active)
+            }
+            .onDisappear { store.documentLibrary.setOCRReturnActive(false) }
+            .onChange(of: scenePhase) { _, phase in
+                store.documentLibrary.setOCRReturnActive(phase == .active)
+            }
+            .onChange(of: store.libraryLoadFailed) { _, failed in
+                if !failed { store.documentLibrary.resumeOCRReturnsIfActive() }
+            }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
                 store.exportWidgetSnapshot(reason: .activation)
             }

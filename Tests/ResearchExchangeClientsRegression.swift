@@ -77,9 +77,10 @@ struct ResearchExchangeClientsRegression {
         do {
             let selected = CommandLine.arguments.dropFirst(2).first ?? "all"
             switch selected {
-            case "all": try runFixtures()
+            case "all": try runFixtures(); try ocrAutoReturn()
             case "file-selection-uti-normalization": try fileSelectionUTINormalization()
             case "ocr-result-repack": try ocrResultRepack()
+            case "ocr-auto-return": try ocrAutoReturn()
             default: throw NSError(domain: "FixtureFailure", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unknown selected client fixture"])
             }
         }
@@ -87,6 +88,145 @@ struct ResearchExchangeClientsRegression {
             fputs("Client fixture stopped after \(checks) checks: \(String(describing: error))\n", stderr)
             exit(1)
         }
+    }
+
+    static func ocrAutoReturn() throws {
+        guard let argument = CommandLine.arguments.dropFirst().first else { fatalError("explicit fixture root required") }
+        let root = URL(fileURLWithPath: argument, isDirectory: true).resolvingSymlinksInPath()
+        try expect(root.lastPathComponent == "fixture-data" &&
+                   root.deletingLastPathComponent().lastPathComponent.hasPrefix("gao-research-exchange-clients."),
+                   "auto return fixture must remain isolated")
+        try fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        defer { try? fm.removeItem(at: root) }
+        let mailbox = ResearchOCRReturns(root: root.appendingPathComponent("GaoSeries/GaoAction/OcrReturns-v1", isDirectory: true))
+        var clockOffset: TimeInterval = 0
+        let client = ResearchExchangeClient(exchangeRoot: root.appendingPathComponent("Exchange"), researchBundleID: researchID,
+                                            providerLookup: { _ in nil }, clock: { Date().addingTimeInterval(clockOffset) },
+                                            ocrReturns: mailbox)
+        let original = root.appendingPathComponent("synthetic.png")
+        let originalData = Data("synthetic input".utf8)
+        try write(originalData, to: original)
+        let files = [ResearchExchangeSourceFile(url: original, documentID: "original")]
+        let manual = try client.prepareOCR(userSelectedFiles: files)
+        try expect(!manual.autoReturnEnabled && !fm.fileExists(atPath: mailbox.root.path),
+                   "manual preparation has no mailbox output")
+        let request = try client.prepareOCR(userSelectedFiles: files, autoReturn: true)
+        try expect(request.autoReturnEnabled, "explicit persisted OCR request enables auto return")
+        let session = try client.loadSession(request.requestID)
+        guard let ticket = session.ocrAutoReturn, let source = session.sources.first else {
+            throw ResearchExchangeClientError.invalidSession
+        }
+        let slot = mailbox.root.appendingPathComponent(request.requestID.lowercased(), isDirectory: true)
+        let ticketURL = slot.appendingPathComponent("request.json")
+        let ticketBytes = try Data(contentsOf: ticketURL)
+        let rawRequest = try Data(contentsOf: request.packageURL.appendingPathComponent("manifest.json"))
+        try expect(try JSONDecoder().decode(ResearchOCRReturnTicket.self, from: ticketBytes) == ticket &&
+                   ticket.requestManifestSHA256 == ResearchOCRReturns.sha256(rawRequest) &&
+                   ticket.requestID == request.requestID, "ticket preserves native UUID and pins raw bytes")
+        try expect(try client.ocrReturnSessions().map(\.requestID) == [request.requestID],
+                   "hydration finds the opted-in OCR request")
+        try expect(try client.receiveReturnedOCR(requestID: request.requestID) == nil, "missing result is waiting")
+        try expect(try client.receiveReturnedOCR(requestID: manual.requestID) == nil, "manual request cannot consume returns")
+
+        let producerID = UUID().uuidString
+        let text = root.appendingPathComponent("fixture.txt")
+        let json = root.appendingPathComponent("fixture.json")
+        try write(Data("recognized fixture".utf8), to: text)
+        let outputs: [GaoActionItem] = [
+            .init(id: "text", relativePath: "payload/review.txt", uti: "public.utf8-plain-text", byteCount: 0, sha256: String(repeating: "0", count: 64)),
+            .init(id: "json", relativePath: "payload/review.json", uti: "public.json", byteCount: 0, sha256: String(repeating: "0", count: 64))
+        ]
+        let sourceIdentity: [String: GaoJSONValue] = [
+            "sourceID": .string(producerID), "sourceItemID": .string(source.itemID), "sourceSHA256": .string(source.sha256)
+        ]
+        var sourceRow = sourceIdentity
+        sourceRow["outputItemIDs"] = .array(outputs.map { .string($0.id) })
+        sourceRow["pages"] = .array([.object(["pageNumber": .number(1), "status": .string("completed")])])
+        let outputRows: [GaoJSONValue] = outputs.map { item in
+            var row = sourceIdentity
+            row["resultItemID"] = .string(item.id)
+            row["format"] = .string(item.id)
+            return .object(row)
+        }
+        let result = GaoActionManifest(kind: "result", sourceBundleID: ticket.targetBundleID, targetBundleID: researchID,
+                                       action: ticket.action, items: outputs, inReplyTo: request.requestID, status: "completed",
+                                       provenance: ["requestManifestSHA256": .string(ticket.requestManifestSHA256),
+                                                    "sources": .array([.object(sourceRow)]), "outputs": .array(outputRows)])
+        let destination = slot.appendingPathComponent("result.gaoaction", isDirectory: true)
+        func package(pageNumber: Int, manifest: GaoActionManifest? = nil) throws -> URL {
+            let content: [String: GaoJSONValue] = [
+                "schemaVersion": .number(1), "sources": .array([.object(["id": .string(producerID), "sha256": .string(source.sha256)])]),
+                "pages": .array([.object(["sourceID": .string(producerID), "pageNumber": .number(Double(pageNumber)),
+                                          "originalSHA256": .string(source.sha256), "status": .string("completed"),
+                                          "lines": .array([.object(["text": .string("recognized fixture")])])])])
+            ]
+            try write(JSONEncoder().encode(content), to: json)
+            return try GaoActionPackageWriter().write(manifest: manifest ?? result, files: ["text": text, "json": json],
+                                                       outgoingRoot: root.appendingPathComponent(UUID().uuidString))
+        }
+        let valid = try package(pageNumber: 1)
+        try fm.createSymbolicLink(at: destination, withDestinationURL: valid)
+        try fails("linked result directory") { _ = try client.receiveReturnedOCR(requestID: request.requestID) }
+        try fm.removeItem(at: destination)
+        let wrongPages = try package(pageNumber: 2)
+        try fm.moveItem(at: wrongPages, to: destination)
+        try fails("mismatched JSON page", expected: .invalidOCRMapping) {
+            _ = try client.receiveReturnedOCR(requestID: request.requestID)
+        }
+        try fm.removeItem(at: destination)
+        var wrongHash = result
+        wrongHash.provenance?["requestManifestSHA256"] = .string(String(repeating: "0", count: 64))
+        try fm.moveItem(at: package(pageNumber: 1, manifest: wrongHash), to: destination)
+        try fails("unbound reply digest", expected: .resultMismatch) {
+            _ = try client.receiveReturnedOCR(requestID: request.requestID)
+        }
+        try fm.removeItem(at: destination)
+        try expect(try client.loadSession(request.requestID).resultIDs.isEmpty, "invalid slots leave no received session")
+        try fm.moveItem(at: valid, to: destination)
+        let wrongCaseSlot = mailbox.root.appendingPathComponent(request.requestID.uppercased(), isDirectory: true)
+        let parkedSlot = mailbox.root.appendingPathComponent("parked-fixture", isDirectory: true)
+        if wrongCaseSlot.lastPathComponent != slot.lastPathComponent {
+            try fm.moveItem(at: slot, to: parkedSlot)
+            try fm.moveItem(at: parkedSlot, to: wrongCaseSlot)
+            // APFS volume policy may either reject lookup or resolve an alias.
+            // Neither result may yield a review from a misnamed request slot.
+            let invalid = try? client.receiveReturnedOCR(requestID: request.requestID)
+            try expect(invalid == nil, "a case-folded slot cannot yield a return")
+            try fm.moveItem(at: wrongCaseSlot, to: parkedSlot)
+            try fm.moveItem(at: parkedSlot, to: slot)
+        }
+        let rawRequestURL = request.packageURL.appendingPathComponent("manifest.json")
+        try write(rawRequest + Data("\n".utf8), to: rawRequestURL)
+        try fails("raw request digest changed despite equal decoded contents", expected: .resultMismatch) {
+            _ = try client.receiveReturnedOCR(requestID: request.requestID)
+        }
+        try write(rawRequest, to: rawRequestURL)
+        try write(Data([0xef, 0xbb, 0xbf]) + ticketBytes, to: ticketURL)
+        try fails("BOM in the fixed ticket") { _ = try client.receiveReturnedOCR(requestID: request.requestID) }
+        try write(ticketBytes, to: ticketURL)
+        guard let accepted = try client.receiveReturnedOCR(requestID: request.requestID) else {
+            throw ResearchExchangeClientError.invalidSession
+        }
+        try expect(!accepted.businessApplied && !accepted.duplicate && accepted.ocrOutputs.count == 2,
+                   "verified outputs enter private review without applying")
+        try expect(try client.receiveReturnedOCR(requestID: request.requestID)?.duplicate == true,
+                   "same result reuses its private staging")
+        var rewrap = accepted
+        var rewrappedManifest = accepted.package.manifest
+        rewrappedManifest.provenance?.removeValue(forKey: "requestManifestSHA256")
+        rewrap.package = .init(manifest: rewrappedManifest, stagingDirectory: accepted.package.stagingDirectory,
+                               stagedItems: accepted.package.stagedItems)
+        let canonical = try client.semanticResultFingerprintV2(accepted, targetScope: "folder")
+        try expect(try client.semanticResultFingerprintV2(rewrap, targetScope: "folder") == canonical &&
+                   client.compatibleOCRFingerprintsV2(rewrap, targetScope: "folder", current: canonical) ==
+                   client.compatibleOCRFingerprintsV2(accepted, targetScope: "folder", current: canonical),
+                   "same OCR result deduplicates across transport hash changes and legacy V2")
+        try fm.removeItem(at: destination)
+        clockOffset = 125
+        try expect(try client.stagedReturnedOCR(requestID: request.requestID)?.ocrOutputs.count == 2,
+                   "locally accepted review survives the original expired transport")
+        try expect(try Data(contentsOf: original) == originalData, "original source remains unchanged")
+        print("OCR fixed return contract fixture passed")
     }
 
     static func ocrResultRepack() throws {

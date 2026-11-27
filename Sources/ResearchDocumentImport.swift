@@ -337,8 +337,8 @@ extension DocumentLibraryStore {
     }
 
     var exchangeClient: ResearchExchangeClient {
-        ResearchExchangeClient(exchangeRoot: ResearchExchangePaths.root,
-                               researchBundleID: ResearchExchangePaths.bundleID)
+        exchangeClientOverride ?? ResearchExchangeClient(exchangeRoot: ResearchExchangePaths.root,
+                                                          researchBundleID: ResearchExchangePaths.bundleID)
     }
 
     // MARK: - 跨 App 交接动作发起与结果落地
@@ -356,7 +356,9 @@ extension DocumentLibraryStore {
     func requestOCRViaCaoZuo(for document: ManagedDocument, onPrepared: @escaping (ResearchPreparedExchange, ResearchProviderAvailability) -> Void) throws {
         let url = managedDocumentURL(document)
         let sourceFile = ResearchExchangeSourceFile(url: url, documentID: document.id)
-        let prepared = try exchangeClient.prepareOCR(userSelectedFiles: [sourceFile], languages: ["zh-Hans", "en-US"], outputs: ["text", "json", "searchablePDF"])
+        let prepared = try exchangeClient.prepareOCR(userSelectedFiles: [sourceFile], languages: ["zh-Hans", "en-US"],
+                                                      outputs: ["text", "json", "searchablePDF"], autoReturn: true)
+        trackOCRReturn(prepared)
         let provider = exchangeClient.availability(for: .ocrFiles, parameters: prepared.parameters)
         onPrepared(prepared, provider)
     }
@@ -429,7 +431,6 @@ extension DocumentLibraryStore {
                                                 operation: asNewVersion ? .update : .revision, expectedOriginal: expected,
                                                 recordVersion: Self.importRecordVersion(updated.updatedAt),
                                                 originalRecordData: try Self.encodeImportRecord(.init(document: current, folder: nil)))
-        try await preserveLibrarySnapshot(jobID: jobID, originals: [current])
         _ = try await journal.submit(requestID: jobID, items: [input])
         try client.markEditedCopyImported(prepared)
     }
@@ -442,6 +443,7 @@ extension DocumentLibraryStore {
                              reselectedReferences: [String: URL] = [:]) async throws -> ResearchImportJournal.Outcome {
         guard userApproved else { throw ResearchDocumentImportError.approvalRequired }
         let result = review.result, manifest = result.package.manifest
+        guard result.ocrSourcesCurrent else { throw ResearchExchangeClientError.sourceChanged }
         guard ["completed", "partial"].contains(manifest.status ?? ""), result.session.action != .openDocument else {
             throw ResearchDocumentImportError.resultNotApplicable
         }
@@ -462,6 +464,7 @@ extension DocumentLibraryStore {
                     throw ResearchDocumentImportError.versionConflict
                 }
                 try validateCompletedOCRReplay(completed, result: result, journal: journal)
+                removePendingOCRResult(resultID: manifest.requestID)
             }
             return .init(documentIDs: receipt.importedDocumentIDs, importedCount: 0,
                          duplicateCount: receipt.importedDocumentIDs.count, replayed: true)
@@ -481,6 +484,9 @@ extension DocumentLibraryStore {
         let targetScope = try resultTargetScope(result, chosenFolder: chosenFolder)
         var ocrFingerprintV2 = session.action == .ocrFiles
             ? try client.semanticResultFingerprintV2(result, targetScope: targetScope) : nil
+        let compatibleOCRFingerprints = try ocrFingerprintV2.map {
+            try client.compatibleOCRFingerprintsV2(result, targetScope: targetScope, current: $0)
+        } ?? []
         // Before V4.04 jobs used the envelope UUID. Their journal does not
         // retain the full result manifest, so a new envelope cannot prove the
         // same intent from partial saved page metadata. Exact UUID recovery
@@ -490,7 +496,8 @@ extension DocumentLibraryStore {
         if let boundID, try journal.job(requestID: boundID) != nil {
             if let currentFingerprintV2 = ocrFingerprintV2 {
                 if let stored = session.resultIntents?[manifest.requestID]?.semanticFingerprintV2 {
-                    guard stored == currentFingerprintV2 else { throw ResearchDocumentImportError.resultIntentConflict }
+                    guard compatibleOCRFingerprints.contains(stored) else { throw ResearchDocumentImportError.resultIntentConflict }
+                    ocrFingerprintV2 = stored
                 } else if boundID == envelopeID {
                     // Pre-semantic journals used the exact envelope UUID.
                     // The received full manifest is already bound by both
@@ -531,9 +538,9 @@ extension DocumentLibraryStore {
             let fingerprint = try ocrFingerprintV2 ?? client.semanticResultFingerprint(result, targetScope: targetScope,
                                                                                        verifiedSelections: verifiedSelections)
             let semanticID = Self.stableImportID("exchange-result-v1:" + fingerprint)
-            if let ocrFingerprintV2 {
+            if ocrFingerprintV2 != nil {
                 let matching = session.resultIDs.compactMap { session.resultIntents?[$0] }
-                    .filter { $0.semanticFingerprintV2 == ocrFingerprintV2 }
+                    .filter { $0.semanticFingerprintV2.map(compatibleOCRFingerprints.contains) == true }
                 let jobIDs = Set(matching.map(\.jobID))
                 guard jobIDs.count <= 1 else { throw ResearchDocumentImportError.resultIntentConflict }
                 if let storedID = jobIDs.first {
@@ -649,16 +656,15 @@ extension DocumentLibraryStore {
                 }
             case .openDocument: throw ResearchDocumentImportError.resultNotApplicable
             }
-            let originalIDs = Set(inputs.compactMap { $0.expectedOriginal?.documentID })
-            try await preserveLibrarySnapshot(jobID: jobID, originals: documents.filter { originalIDs.contains($0.id) })
             try client.recordResultIntent(requestID: session.requestID, resultID: manifest.requestID, jobID: jobID,
                                           semanticFingerprintV2: ocrFingerprintV2)
             outcome = try await journal.submit(requestID: jobID, items: inputs)
         }
         _ = try client.markResultApplied(requestID: session.requestID, resultID: manifest.requestID,
                                         importedDocumentIDs: outcome.documentIDs, receiptID: jobID.uuidString)
+        if session.action == .ocrFiles { removePendingOCRResult(resultID: manifest.requestID) }
         pendingExchangeResultReview = nil
-        exchangeFeedbackMessage = "交接已导入 \(outcome.importedCount) 项；原件与恢复快照保留。"
+        exchangeFeedbackMessage = "交接已导入 \(outcome.importedCount) 项，原件已保留。"
         return outcome
     }
 
@@ -747,43 +753,6 @@ extension DocumentLibraryStore {
 
     private func destinationPath(folder: DocumentFolder, stored: String) -> String {
         "\(folder.libraryKind.rawValue)/\(URL(fileURLWithPath: folder.id).lastPathComponent)/\(stored)"
-    }
-
-    private func preserveLibrarySnapshot(jobID: UUID, originals: [ManagedDocument]) async throws {
-        let directory = ResearchExchangePaths.root.appendingPathComponent("Snapshots/" + jobID.uuidString)
-        let snapshot = directory.appendingPathComponent("library-before.json")
-        if FileManager.default.fileExists(atPath: snapshot.path) {
-            _ = try GaoActionFileAccess.readPrivateData(at: snapshot, maximumBytes: 128 * 1_048_576)
-        } else {
-            guard let read = readDurableLibraryData else { throw ResearchDocumentImportError.unavailableLibrary }
-            let data = try read()
-            // Decode before preserving; unreadable/too-new libraries never become blank snapshots.
-            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-            let library = try decoder.decode(PersistedLibrary.self, from: data)
-            guard library.version <= LibrarySchema.currentVersion else { throw ResearchDocumentImportError.unavailableLibrary }
-            try GaoActionFileAccess.writePrivateData(data, to: snapshot)
-            guard try GaoActionFileAccess.readPrivateData(at: snapshot, maximumBytes: 128 * 1_048_576) == data else { throw GaoActionError.checksumMismatch }
-        }
-        let copies = try originals.map { document in
-            (managedDocumentURL(document), directory.appendingPathComponent(Self.stableImportID("original:" + document.id).uuidString + ".data"),
-             try Self.encodeImportRecord(.init(document: document, folder: nil)))
-        }
-        try await Task.detached(priority: .utility) {
-            for (source, destination, record) in copies {
-                let expected = try GaoActionFileAccess.fingerprint(at: source)
-                if FileManager.default.fileExists(atPath: destination.path) {
-                    let previous = try GaoActionFileAccess.fingerprint(at: destination)
-                    guard previous.sha256 == expected.sha256 else { throw GaoActionError.checksumMismatch }
-                } else {
-                    let copied = try GaoActionFileAccess.copyRegularFile(at: source, to: destination)
-                    guard copied.sha256 == expected.sha256 else { throw GaoActionError.sourceChanged }
-                }
-                let recordURL = destination.deletingPathExtension().appendingPathExtension("record.json")
-                if FileManager.default.fileExists(atPath: recordURL.path) {
-                    guard try GaoActionFileAccess.readPrivateData(at: recordURL, maximumBytes: 16 * 1_048_576) == record else { throw GaoActionError.sourceChanged }
-                } else { try GaoActionFileAccess.writePrivateData(record, to: recordURL) }
-            }
-        }.value
     }
 
     private static func stableImportID(_ value: String) -> UUID {

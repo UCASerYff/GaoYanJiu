@@ -158,16 +158,7 @@ struct ResearchProductIntegration {
         try require(updated.contentText?.contains("replacement-needle") == true, "New version index was overwritten with stale record state")
         try require(store.documentRevision(for: original.id)?.originalSHA256 == originalSHA, "Revision lacks prior digest")
         let snapshotRoot = ResearchExchangePaths.root.appendingPathComponent("Snapshots")
-        let snapshots = (FileManager.default.enumerator(at: snapshotRoot, includingPropertiesForKeys: nil)?.allObjects as? [URL]) ?? []
-        let oldCopy = try unwrap(snapshots.first(where: { $0.pathExtension == "data" }), "Private old attachment snapshot missing")
-        try require(try GaoActionFileAccess.fingerprint(at: oldCopy).sha256 == originalSHA, "Private old attachment snapshot hash mismatch")
-        let oldRecordURL = oldCopy.deletingPathExtension().appendingPathExtension("record.json")
-        let oldRecord = try JSONSerialization.jsonObject(with: GaoActionFileAccess.readPrivateData(at: oldRecordURL)) as? [String: Any]
-        try require((oldRecord?["document"] as? [String: Any])?["storedName"] as? String == original.storedName, "Private original record snapshot missing")
-        for url in [oldCopy, oldRecordURL] {
-            let mode = try FileManager.default.attributesOfItem(atPath: url.path)[.posixPermissions] as? NSNumber
-            try require(mode?.intValue == 0o600, "Old attachment/record snapshot not private")
-        }
+        try require(!FileManager.default.fileExists(atPath: snapshotRoot.path), "Edited version created a recovery snapshot")
         _ = try durable(store)
     }
     static func repeatedRequest() async throws {
@@ -833,6 +824,113 @@ struct ResearchProductIntegration {
                     !ExistingWorkAnalyticsLayout.stackCards(width: 1000), "宽窄布局阈值错误")
     }
 
+    static func submissionActions() throws {
+        let (store, repository) = try makeStore()
+        let calendar = SubmissionActionDay.localCalendar(timeZone: try unwrap(TimeZone(identifier: "America/Los_Angeles"), "Fixture time zone"))
+        let now = try unwrap(GaoActionISO8601.date("2026-03-08T07:55:00Z"), "Fixture instant")
+        let sameDay = try unwrap(SubmissionActionDay(date: now, calendar: calendar), "Fixture local day")
+        try require(sameDay.rawValue == "2026-03-07", "Submission action used a UTC date")
+        try require(SubmissionActionDay(rawValue: "2024-02-29") != nil && SubmissionActionDay(rawValue: "2026-02-29") == nil &&
+                    SubmissionActionDay(rawValue: "2026-3-07") == nil, "Invalid dates escaped exact validation")
+
+        func manual(_ title: String, status: String = "Under Review", key: String? = nil) -> String {
+            store.saveManualSubmission(existingID: key, title: title, venue: "Synthetic Journal", manuscriptID: "",
+                                       status: status, statusSince: now, portalURL: "", notes: "")
+        }
+        func paper(_ id: String) throws -> PaperRecord {
+            try unwrap(store.papers.first { $0.id == id }, "Missing fixture manuscript \(id)")
+        }
+        func plan(_ id: String) throws -> SubmissionAction.Plan {
+            try unwrap(paper(id).nextAction?.plan, "Missing fixture action \(id)")
+        }
+        func add(_ title: String, _ stamp: String) throws -> String {
+            let id = manual(title)
+            let date = try unwrap(SubmissionActionDay(rawValue: stamp), "Invalid fixture date")
+            try store.changeSubmissionAction(paperID: id, revision: nil, change: .save("Review comments", date), now: now)
+            return id
+        }
+        let today = manual("Due at local midnight")
+        let raw = try JSONSerialization.jsonObject(with: repository.disk.encoder.encode(paper(today))) as? [String: Any]
+        try require(raw?["nextAction"] == nil, "A legacy manuscript gained an action")
+        let oldRecord = try repository.disk.decoder.decode(PaperRecord.self,
+                                                           from: repository.disk.encoder.encode(paper(today)))
+        try require(oldRecord.nextAction == nil, "A legacy manuscript could not decode without an action")
+        let rawAction = Data("""
+            {"revision":"12345678901234567890123456789012","text":"Reply to reviewers","dueDate":"2026-03-07",
+             "updatedAt":"2026-03-08T07:55:00Z","completedAt":null,"futureField":{"kept":true}}
+            """.utf8)
+        let row = try unwrap(store.papers.firstIndex { $0.id == today }, "Missing original fixture manuscript")
+        store.papers[row].nextAction = try repository.disk.decoder.decode(SubmissionAction.self, from: rawAction)
+        try store.saveThrowing()
+        let weekEnd = try add("Due in seven days", "2026-03-14")
+        let far = try add("Due in eight days", "2026-03-15")
+        let lateMore = try add("Older deadline", "2026-03-04")
+        let lateLess = try add("Newer late deadline", "2026-03-06")
+        let archived = try add("Archived fixture", "2026-03-04")
+        store.setArchived(try paper(archived), archived: true)
+
+        func ids(_ kind: SubmissionActionSection.Kind, at instant: Date) -> [String] {
+            SubmissionActionSection.grouped(store.papers, now: instant, calendar: calendar)
+                .first(where: { $0.kind == kind })?.rows.map(\.id) ?? []
+        }
+        try require(ids(.overdue, at: now) == [lateMore, lateLess] && ids(.today, at: now) == [today] &&
+                    ids(.upcoming, at: now) == [weekEnd] && ids(.later, at: now) == [far],
+                    "Sorted local-day groups or archived exclusion failed")
+        let afterMidnight = now.addingTimeInterval(10 * 60)
+        try require(ids(.overdue, at: afterMidnight) == [lateMore, lateLess, today] &&
+                    ids(.upcoming, at: afterMidnight) == [weekEnd, far], "Midnight/DST rollover or +7/+8 boundary failed")
+
+        let prior = try plan(today)
+        _ = manual("Retitled with status change", status: "Major Revision", key: today)
+        try require(try plan(today) == prior, "Manual status edit inferred action changes")
+        let statusHistory = try paper(today).history
+        repository.failNextSave = true
+        do {
+            try store.changeSubmissionAction(paperID: today, revision: prior.revision, change: .complete, now: now)
+            throw Failure(description: "Action completion ignored a disk failure")
+        } catch Injected.database {}
+        try require(try plan(today) == prior, "Save failure did not roll back the action")
+
+        try store.changeSubmissionAction(paperID: today, revision: prior.revision, change: .complete, now: now)
+        let finished = try plan(today)
+        let completedHistory = try paper(today).history
+        try require(finished.completedAt == now && ids(.today, at: now).isEmpty &&
+                    completedHistory == statusHistory, "Completion altered manuscript status or history")
+        do {
+            try store.changeSubmissionAction(paperID: today, revision: prior.revision, change: .remove)
+            throw Failure(description: "A stale revision removed a completed action")
+        } catch SubmissionActionError.stalePlan {}
+        let saved = try durable(store)
+        let savedAction = try unwrap(saved.papers.first { $0.id == today }?.nextAction, "Completed action missing from disk")
+        let savedRaw = try JSONSerialization.jsonObject(with: repository.disk.encoder.encode(savedAction)) as? [String: Any]
+        try require(saved.version == 32 && (savedRaw?["futureField"] as? [String: Bool])?["kept"] == true,
+                    "Action persistence changed schema or dropped unknown metadata")
+
+        try store.changeSubmissionAction(paperID: today, revision: finished.revision, change: .reopen, now: now)
+        let reopened = try plan(today)
+        _ = manual("Retitled with terminal status", status: "Accepted", key: today)
+        let terminalPlan = try plan(today)
+        try require(terminalPlan == reopened && ids(.today, at: now).isEmpty, "Terminal status inferred completion")
+        try store.changeSubmissionAction(paperID: today, revision: reopened.revision, change: .complete, now: now)
+        try require(try plan(today).completedAt == now, "Explicit completion for an existing terminal plan failed")
+
+        let publisher = PublisherDefinition(id: "fixture", name: "Fixture Portal", kind: "custom",
+                                            url: "https://fixture.example.invalid/journal", subtitle: "", symbol: "", brands: "")
+        func capture(_ status: String, at date: Date) -> ExtractionResult {
+            ExtractionResult(site: publisher.name, url: publisher.url, checkedAt: GaoActionISO8601.string(date),
+                             papers: [ExtractedPaper(id: "FIX-21", title: "Synthetic imported manuscript", journal: "Fixture Journal",
+                                                     status: status, statusSince: nil, statusSinceSource: nil, submissionHistory: nil)])
+        }
+        let imported = store.merge(capture("Submitted", at: now), publisher: publisher)
+        let importedID = try unwrap(store.papers.first { $0.manuscriptID == "FIX-21" }?.id, "Portal manuscript missing")
+        try store.changeSubmissionAction(paperID: importedID, revision: nil, change: .save("Check disclosure", sameDay), now: now)
+        let portalPlan = try plan(importedID)
+        _ = store.merge(capture("Under Review", at: afterMidnight), publisher: publisher, existingPortalID: imported.portal.id)
+        let refreshedPlan = try plan(importedID)
+        let refreshedStatus = try paper(importedID).status
+        try require(refreshedPlan == portalPlan && refreshedStatus == "Under Review", "Portal updates did not preserve the assigned action")
+    }
+
     static func portalPresentation() throws {
         let now = Date(timeIntervalSince1970: 1_800_000_000)
         func portal(lastChecked: Date?, lastError: String?) -> PortalAccount {
@@ -872,6 +970,7 @@ struct ResearchProductIntegration {
             switch name {
             case "existing-work-analytics": try existingWorkAnalytics()
             case "workspace-navigation": try workspaceNavigation()
+            case "submission-actions": try submissionActions()
             case "portal-presentation": try portalPresentation()
             case "fresh-import": try await freshImport()
             case "new-attachment": try await newAttachment()

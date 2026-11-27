@@ -11,7 +11,7 @@ export DEVELOPER_DIR="$XCODE/Contents/Developer"
 NAME=Research
 SOURCE="$ROOT"
 [[ -d "$SOURCE/Sources" && -f "$SOURCE/Module.swift" ]] || { echo "Unknown module: $NAME" >&2; exit 1; }
-BUILD="$ROOT/build.noindex"
+BUILD="${GAO_BUILD_DIR:-$ROOT/build.noindex}"
 FRAMEWORK="$BUILD/Frameworks/$NAME.framework"
 VERSION="$FRAMEWORK/Versions/A"
 rm -rf "$FRAMEWORK"
@@ -47,5 +47,7 @@ ln -s A "$FRAMEWORK/Versions/Current"
 ln -s Versions/Current/$NAME "$FRAMEWORK/$NAME"
 ln -s Versions/Current/Modules "$FRAMEWORK/Modules"
 ln -s Versions/Current/Resources "$FRAMEWORK/Resources"
-codesign --force --sign - "$FRAMEWORK"
+if [[ "${GAO_VERIFY_ONLY:-0}" != 1 ]]; then
+    codesign --force --sign - "$FRAMEWORK"
+fi
 echo "Built $FRAMEWORK"

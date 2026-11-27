@@ -752,8 +752,55 @@
 "删除的记录和文件保留30天，可恢复到原位置。原资金回收项作为迁移依据只读保留。" = "Deleted records and files can be restored for 30 days. Original funding trash is retained read-only as migration evidence.";
 "除原资金迁移依据外，回收站中的记录和文件将永久删除，无法恢复。" = "Trash records and files will be permanently deleted except the original funding migration source.";
 
+/* Submission next action */
+"下一步行动" = "Next action";
+"今天到期" = "Due today";
+"临近（7 天内）" = "Upcoming (next 7 days)";
+"稍后（7 天以后）" = "Later (after 7 days)";
+"暂无未完成的行动。可在稿件详情中设置。" = "No open actions. Set one in the manuscript details.";
+"完成行动" = "Complete action";
+"完成行动：%@" = "Complete action: %@";
+"未完成" = "Open";
+"截止：%@" = "Due: %@";
+"完成于：%@" = "Completed: %@";
+"设置行动" = "Set action";
+"编辑行动" = "Edit action";
+"添加新行动" = "Set a new action";
+"标记完成" = "Mark complete";
+"重新打开行动" = "Reopen action";
+"移除行动" = "Remove action";
+"移除下一步行动？" = "Remove the next action?";
+"编辑下一步行动" = "Edit next action";
+"设置下一步行动" = "Set next action";
+"具体行动" = "Action";
+"截止日期" = "Due date";
+"例如：整理审稿意见并提交修订稿" = "For example, submit the revised manuscript";
+"无法更新行动" = "Could not update the action";
+"只有仍在投且未归档的稿件可以安排新行动。" = "New actions are available for active, unarchived submissions.";
+"行动已更新，请重新打开后继续。" = "The action was updated. Close and reopen it to continue.";
+"稿件没有可更新的行动。" = "This submission has no action to update.";
+"请输入 1 至 240 个字的具体行动。" = "Enter an action of 1 to 240 characters.";
+"请选择有效的截止日期。" = "Choose a valid due date.";
+
 /* OCR handoff after capture consolidation */
 "送搞操作识别文字（OCR）…" = "Recognize Text with Actions (OCR)…";
 "已将“%@”发送至搞操作进行文字识别（OCR），请在搞操作完成识别后发送结果。" = "Sent “%@” to Actions for OCR. Send the results back after recognition in Actions.";
 "启动搞操作失败（%@），已在访达中定位交接包。" = "Could not open Actions (%@). The handoff package is selected in Finder.";
 "搞操作未就绪（%@）。已在访达中显示交接包，可手动发送。" = "Actions is unavailable (%@). The handoff package is shown in Finder for manual transfer.";
+"已将“%@”发送至搞操作。导出后，可在原件或「OCR 待审核」中打开结果。" = "Sent “%@” to Actions. After export, open the result from the original or the OCR review queue.";
+"已将“%@”发送至搞操作。导出后，请在「资料交接」中打开结果包。" = "Sent “%@” to Actions. After export, open the result package from Document Handoffs.";
+"OCR 待审核" = "OCR review queue";
+"OCR 待审核（%d）" = "OCR to review (%d)";
+"暂无待审核的 OCR 结果" = "No OCR results to review";
+"审核结果" = "Review result";
+"原件不可用" = "Original unavailable";
+"OCR 结果" = "OCR result";
+"审核 OCR 结果" = "Review OCR result";
+"审核资料交接结果" = "Review document handoff result";
+"请核对原件和逐页识别文字。确认导入后，结果才会加入资料库和搜索索引。" = "Review the original and the recognized text for each page. Confirming the import adds the result to your library and search index.";
+"收起原件" = "Hide original";
+"查看原件" = "View original";
+"查看原 PDF 第 %d 页" = "View page %d of the original PDF";
+"正在核对原 PDF" = "Verifying the original PDF";
+"原件已改变、移走或无法校验。可以查看识别文字；请恢复原件后重新审核导入。" = "The original changed, moved, or could not be verified. You can inspect the recognized text. Restore the original and review again to import.";
+"无法核验此原 PDF 页。请检查原件是否仍在资料库中、内容未改变且未超过 128 MiB。" = "This page could not be verified. Check that the original PDF is still in your library, is unchanged, and is at most 128 MiB.";

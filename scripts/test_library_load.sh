@@ -5,8 +5,8 @@ ROOT=${0:A:h:h}
 # must be requested explicitly and never starts an application/provider.
 TEST_ARGUMENTS=("$@")
 if (( $# != 0 )); then
-    [[ $# == 2 && "$1" == '--case' && ( "$2" == 'ocr-revision-ordering' || "$2" == 'ocr-result-repack' || "$2" == 'completed-ocr-ordering' ) ]] || {
-        echo 'Usage: scripts/test_library_load.sh [--case ocr-revision-ordering|ocr-result-repack|completed-ocr-ordering]'; exit 2
+    [[ $# == 2 && "$1" == '--case' && ( "$2" == 'ocr-revision-ordering' || "$2" == 'ocr-result-repack' || "$2" == 'completed-ocr-ordering' || "$2" == 'ocr-auto-return' ) ]] || {
+        echo 'Usage: scripts/test_library_load.sh [--case ocr-revision-ordering|ocr-result-repack|completed-ocr-ordering|ocr-auto-return]'; exit 2
     }
 fi
 export DEVELOPER_DIR=${DEVELOPER_DIR:-/Applications/Xcode.app/Contents/Developer}
@@ -41,6 +41,7 @@ cp "$ROOT"/GameWorld/*.swift "$SNAPSHOT/GameWorld/"
 for shared in "$ROOT"/Shared/*.swift(N); do cp "$shared" "$SNAPSHOT/Shared/"; done
 cp "$ROOT/Module.swift" "$SNAPSHOT/Module.swift"
 cp "$ROOT/Tests/LibraryLoadSafetyRegression.swift" "$SNAPSHOT/Tests/LibraryLoadSafetyRegression.swift"
+cp "$ROOT/Tests/ResearchOCRReviewRegression.swift" "$SNAPSHOT/Tests/ResearchOCRReviewRegression.swift"
 SOURCES=("$SNAPSHOT"/Sources/*.swift "$SNAPSHOT"/Shared/*.swift(N) "$SNAPSHOT"/GameWorld/*.swift "$SNAPSHOT/Module.swift")
 swiftc -swift-version 5 -parse-as-library -Onone -D LIBRARY_LOAD_SAFETY_TEST \
     -sdk "$SDK" -target "$(uname -m)-apple-macosx14.0" \
@@ -50,7 +51,7 @@ swiftc -swift-version 5 -parse-as-library -Onone -D LIBRARY_LOAD_SAFETY_TEST \
     -framework UniformTypeIdentifiers -framework Security -framework PDFKit \
     -framework QuickLookUI -framework UserNotifications -framework Combine \
     -framework CoreText -framework ImageIO -lsqlite3 \
-    $SOURCES "$SNAPSHOT/Tests/LibraryLoadSafetyRegression.swift" \
+    $SOURCES "$SNAPSHOT/Tests/LibraryLoadSafetyRegression.swift" "$SNAPSHOT/Tests/ResearchOCRReviewRegression.swift" \
     -o "$TEST_BUNDLE/Contents/MacOS/LibraryLoadSafetyRegression"
 # Every preference access in production Sources must bind to the test-only
 # in-memory defaults, never the user's actual preference databases.

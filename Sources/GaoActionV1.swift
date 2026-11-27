@@ -189,6 +189,7 @@ struct GaoValidatedActionPackage {
     // Digest of the exact bytes validated through the fixed manifest FD.
     // An empty value is allowed only for legacy hand-built fixtures.
     var manifestSHA256: String = ""
+    var rawManifest: Data? = nil
 }
 struct GaoActionFileFingerprint {
     let byteCount: Int64
@@ -334,15 +335,24 @@ struct GaoActionPackageValidator {
         guard packageURL.pathExtension.lowercased() == "gaoaction" else { throw GaoActionError.invalidManifest }
         let packageFD = try GaoSecureFD.openDirectory(packageURL, requireOwnedFinal: true)
         defer { close(packageFD) }
+        return try stagePackage(in: packageFD, stagingRoot: stagingRoot)
+    }
+
+    /// The descriptor owns the selected package directory across manifest checks and payload copying.
+    func stagePackage(in packageFD: Int32, stagingRoot: URL, requirePrivate: Bool = false,
+                      checkManifest: (GaoActionManifest) throws -> Void = { _ in }) throws -> GaoValidatedActionPackage {
         let manifestFD = try GaoSecureFD.openRegularFile(at: packageFD, name: "manifest.json")
         defer { close(manifestFD) }
         let beforeManifest = try GaoSecureFD.stat(manifestFD)
+        if requirePrivate && beforeManifest.st_mode & 0o077 != 0 { throw GaoActionError.permissionDenied }
         guard beforeManifest.st_size >= 0, beforeManifest.st_size <= limits.maximumManifestBytes else { throw GaoActionError.manifestTooLarge }
         let data = try GaoSecureFD.readBounded(manifestFD, maximum: limits.maximumManifestBytes)
         guard GaoSecureFD.unchanged(beforeManifest, try GaoSecureFD.stat(manifestFD)) else { throw GaoActionError.sourceChanged }
         let manifest = try validateManifestData(data)
+        try checkManifest(manifest)
         let payloadFD = try GaoSecureFD.openChildDirectory(at: packageFD, name: "payload", owned: true)
         defer { close(payloadFD) }
+        if requirePrivate { try GaoSecureFD.checkPrivatePermissions(payloadFD) }
         let staging = try GaoSecureFD.makePrivateChild(in: stagingRoot, name: UUID().uuidString)
         var succeeded = false
         defer { close(staging.fd); if !succeeded { try? FileManager.default.removeItem(at: staging.url) } }
@@ -350,9 +360,11 @@ struct GaoActionPackageValidator {
         var total: Int64 = 0
         for item in manifest.items {
             let components = try GaoSecureFD.payloadComponents(item.relativePath)
-            let source = try GaoSecureFD.openRelativeRegularFile(at: payloadFD, components: Array(components.dropFirst()))
+            let source = try GaoSecureFD.openRelativeRegularFile(at: payloadFD, components: Array(components.dropFirst()),
+                                                                requirePrivate: requirePrivate)
             defer { close(source) }
             let before = try GaoSecureFD.stat(source)
+            if requirePrivate && before.st_mode & 0o077 != 0 { throw GaoActionError.permissionDenied }
             guard Int64(before.st_size) == item.byteCount else { throw GaoActionError.byteCountMismatch }
             let ext = (item.relativePath as NSString).pathExtension
             let suffix = ext.range(of: "^[A-Za-z0-9]{1,16}$", options: .regularExpression) == nil ? "" : "." + ext
@@ -372,7 +384,8 @@ struct GaoActionPackageValidator {
         guard GaoSecureFD.unchanged(beforeManifest, try GaoSecureFD.stat(manifestFD)) else { throw GaoActionError.sourceChanged }
         succeeded = true
         return .init(manifest: manifest, stagingDirectory: staging.url, stagedItems: copied,
-                     manifestSHA256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined())
+                     manifestSHA256: SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined(),
+                     rawManifest: data)
     }
 }
 
@@ -574,7 +587,7 @@ private enum GaoActionContract {
     }
 }
 
-private enum GaoSecureFD {
+enum GaoSecureFD {
     static let flags = O_RDONLY | O_NOFOLLOW | O_CLOEXEC
     static func stat(_ fd: Int32) throws -> Darwin.stat {
         var value = Darwin.stat()
@@ -591,7 +604,12 @@ private enum GaoSecureFD {
         guard (info.st_mode & S_IFMT) == S_IFREG, info.st_nlink == 1 else { throw GaoActionError.unsafeFile }
         guard info.st_uid == geteuid(), info.st_mode & S_IRUSR != 0 else { throw GaoActionError.permissionDenied }
     }
-    static func openDirectory(_ url: URL, requireOwnedFinal: Bool, create: Bool = false) throws -> Int32 {
+    static func checkPrivatePermissions(_ fd: Int32) throws {
+        let info = try stat(fd)
+        guard info.st_mode & 0o077 == 0 else { throw GaoActionError.permissionDenied }
+    }
+    static func openDirectory(_ url: URL, requireOwnedFinal: Bool, create: Bool = false,
+                              allowMissing: Bool = false) throws -> Int32 {
         guard url.isFileURL, url.path.hasPrefix("/"), !url.path.utf8.contains(0) else { throw GaoActionError.unsafePath }
         var components = url.path.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
         guard !components.contains(".."), !components.contains(".") else { throw GaoActionError.unsafePath }
@@ -615,6 +633,10 @@ private enum GaoSecureFD {
                     }
                     next = openat(current, component, flags | O_DIRECTORY)
                 }
+                if next < 0, allowMissing, errno == ENOENT {
+                    close(current)
+                    return -1
+                }
                 guard next >= 0 else {
                     throw errno == ELOOP || errno == ENOTDIR ? GaoActionError.unsafePath : GaoActionError.permissionDenied
                 }
@@ -627,8 +649,13 @@ private enum GaoSecureFD {
             return current
         } catch { close(current); throw error }
     }
-    static func openChildDirectory(at parent: Int32, name: String, owned: Bool) throws -> Int32 {
+    static func openChildDirectory(at parent: Int32, name: String, owned: Bool,
+                                   allowMissing: Bool = false) throws -> Int32 {
+        guard !name.isEmpty, name != ".", name != "..", !name.contains("/"), !name.utf8.contains(0) else {
+            throw GaoActionError.unsafePath
+        }
         let fd = openat(parent, name, flags | O_DIRECTORY)
+        if fd < 0, allowMissing, errno == ENOENT { return -1 }
         guard fd >= 0 else { throw GaoActionError.unsafePath }
         do { try checkDirectory(fd, owned: owned); return fd } catch { close(fd); throw error }
     }
@@ -652,7 +679,7 @@ private enum GaoSecureFD {
         guard components.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." && $0.utf8.count <= 255 }) else { throw GaoActionError.unsafePath }
         return components
     }
-    static func openRelativeRegularFile(at root: Int32, components: [String]) throws -> Int32 {
+    static func openRelativeRegularFile(at root: Int32, components: [String], requirePrivate: Bool = false) throws -> Int32 {
         guard let last = components.last else { throw GaoActionError.unsafePath }
         var current = dup(root)
         guard current >= 0 else { throw GaoActionError.ioFailure }
@@ -660,6 +687,7 @@ private enum GaoSecureFD {
         for name in components.dropLast() {
             let next = try openChildDirectory(at: current, name: name, owned: true)
             close(current); current = next
+            if requirePrivate { try checkPrivatePermissions(current) }
         }
         return try openRegularFile(at: current, name: last)
     }
@@ -742,7 +770,7 @@ private enum GaoSecureFD {
 
 /// Bounded syntax walk detecting duplicate logical keys (including \u-escaped keys).
 /// JSONSerialization alone silently keeps one value, which permits different interpretations.
-private struct GaoUniqueJSONKeys {
+struct GaoUniqueJSONKeys {
     var bytes: [UInt8]
     var offset = 0
     static func validate(_ data: Data) throws {

@@ -18,7 +18,6 @@ final class DocumentLibraryStore: ObservableObject {
     var persist: () -> Void = {}
     var persistTransaction: (() throws -> Void)?
     var readDurableDocuments: (() throws -> [ManagedDocument])?
-    var readDurableLibraryData: (() throws -> Data)?
     var libraryIsWritable: () -> Bool = { false }
     var errorHandler: (String) -> Void = { _ in }
     @Published var isImportingDocuments = false
@@ -30,6 +29,13 @@ final class DocumentLibraryStore: ObservableObject {
     var importFailureInjector: ((ResearchImportJournal.FaultPoint) throws -> Void)?
     var incomingReceiptCompletionFailureInjector: (() throws -> Void)?
     @Published var pendingExchangeResultReview: PendingExchangeResultReview?
+    @Published private(set) var pendingOCRReturns: [PendingOCRReturn] = []
+    var exchangeClientOverride: ResearchExchangeClient?
+    private var ocrReturnActive = false
+    private var ocrReturnMonitor: Task<Void, Never>?
+    private var ocrReturnMonitorID: UUID?
+    private var waitingOCRRequests: [(requestID: String, expiresAt: Date)] = []
+    private var openingOCRReview = false
 
     static let supportedExtensions: Set<String> = [
         "doc", "docx", "xls", "xlsx", "csv", "tsv", "ppt", "pptx",
@@ -562,6 +568,21 @@ struct PendingExchangeResultReview: Identifiable {
     var itemCount: Int { result.package.stagedItems.count + references.count }
 }
 
+struct PendingOCRReturn: Identifiable, Equatable {
+    let id: String
+    let requestID: String
+    let sourceDocumentIDs: [String]
+    let receivedAt: Date
+
+    init?(_ session: ResearchExchangeSession) {
+        guard let receipt = session.ocrReturn, session.appliedResults?[receipt.resultID] == nil else { return nil }
+        id = receipt.resultID
+        requestID = session.requestID
+        sourceDocumentIDs = Array(Set(session.sources.compactMap(\.documentID))).sorted()
+        receivedAt = receipt.receivedAt
+    }
+}
+
 @MainActor
 extension DocumentLibraryStore {
     func handleIncomingPackage(at url: URL) {
@@ -589,10 +610,16 @@ extension DocumentLibraryStore {
 
     @discardableResult
     func receiveExchangeResultForReview(at url: URL) throws -> PendingExchangeResultReview {
-        let result = try exchangeClient.receiveResult(at: url)
+        let review = makeExchangeResultReview(try exchangeClient.receiveResult(at: url))
+        pendingExchangeResultReview = review
+        return review
+    }
+
+    private func makeExchangeResultReview(_ result: ResearchValidatedExternalResult) -> PendingExchangeResultReview {
         let status = result.package.manifest.status ?? "failed"
         var canApply = ["completed", "partial"].contains(status) && result.session.action != .openDocument
             && (!result.package.stagedItems.isEmpty || !result.selectedReferences.isEmpty)
+            && result.ocrSourcesCurrent
         var pages: [String: [DocumentProvenance.Page]] = [:], pageErrors: [String: String] = [:]
         for output in result.ocrOutputs {
             do { pages[output.itemID] = try ocrPagesForReview(for: output, allOutputs: result.ocrOutputs) }
@@ -601,12 +628,121 @@ extension DocumentLibraryStore {
         let summary: String
         if result.businessApplied { summary = "此结果已完成业务导入；再次接收不会重复添加。" }
         else if result.session.action == .openDocument { summary = "提供方仅报告打开状态；保存后请重新选择编辑副本并明确导入。" }
+        else if !result.ocrSourcesCurrent {
+            summary = AppLocalization.text("原件已改变、移走或无法校验。可以查看识别文字；请恢复原件后重新审核导入。")
+        }
         else if !canApply { summary = "提供方状态：\(status)。本次不会应用附件或覆盖资料，可等待后续结果。" }
+        else if result.session.action == .ocrFiles {
+            summary = AppLocalization.text("请核对原件和逐页识别文字。确认导入后，结果才会加入资料库和搜索索引。")
+        }
         else { summary = "发送方仅声明来源身份；请核对输入、目标和逐页状态后批准导入。" }
-        let review = PendingExchangeResultReview(result: result, targetFolderID: result.session.targetFolderID,
-                                                requiresExplicitReview: true, canApply: canApply, summary: summary,
-                                                ocrReviewPages: pages, ocrReviewErrors: pageErrors)
-        pendingExchangeResultReview = review
-        return review
+        return PendingExchangeResultReview(result: result, targetFolderID: result.session.targetFolderID,
+                                           requiresExplicitReview: true, canApply: canApply, summary: summary,
+                                           ocrReviewPages: pages, ocrReviewErrors: pageErrors)
+    }
+
+    func pendingOCRReturns(for documentID: String) -> [PendingOCRReturn] {
+        pendingOCRReturns.filter { $0.sourceDocumentIDs.contains(documentID) }
+    }
+
+    func removePendingOCRResult(resultID: String) {
+        guard pendingOCRReturns.contains(where: { $0.id == resultID }) else { return }
+        pendingOCRReturns.removeAll { $0.id == resultID }
+    }
+
+    func openPendingOCRReview(_ summary: PendingOCRReturn) async throws {
+        guard !openingOCRReview, !isImportingDocuments, pendingPackageReview == nil,
+              pendingExchangeResultReview == nil else { throw ResearchDocumentImportError.busy }
+        openingOCRReview = true
+        defer { openingOCRReview = false }
+        let client = exchangeClient
+        let result = try await Task.detached(priority: .userInitiated) {
+            try client.stagedReturnedOCR(requestID: summary.requestID)
+        }.value
+        guard let result, !result.businessApplied, result.package.manifest.requestID == summary.id else {
+            removePendingOCRResult(resultID: summary.id)
+            return
+        }
+        guard !isImportingDocuments, pendingPackageReview == nil, pendingExchangeResultReview == nil else {
+            throw ResearchDocumentImportError.busy
+        }
+        pendingExchangeResultReview = makeExchangeResultReview(result)
+    }
+
+    func setOCRReturnActive(_ active: Bool) {
+        guard active != ocrReturnActive else { return }
+        ocrReturnActive = active
+        if active {
+            startOCRReturnMonitor(reload: true)
+        } else {
+            ocrReturnMonitorID = nil
+            ocrReturnMonitor?.cancel()
+            ocrReturnMonitor = nil
+        }
+    }
+
+    func resumeOCRReturnsIfActive() {
+        guard ocrReturnActive else { return }
+        startOCRReturnMonitor(reload: true)
+    }
+
+    func trackOCRReturn(_ prepared: ResearchPreparedExchange) {
+        guard prepared.autoReturnEnabled, let session = try? exchangeClient.loadSession(prepared.requestID) else { return }
+        registerWaitingOCR(session)
+        startOCRReturnMonitor(reload: false)
+    }
+
+    private func registerWaitingOCR(_ session: ResearchExchangeSession) {
+        guard session.ocrReturn == nil, let ticket = session.ocrAutoReturn,
+              let expiry = GaoActionISO8601.date(ticket.expiresAt), expiry > Date(),
+              !waitingOCRRequests.contains(where: { $0.requestID == session.requestID }) else { return }
+        waitingOCRRequests.append((session.requestID, expiry))
+    }
+
+    private func startOCRReturnMonitor(reload: Bool) {
+        guard ocrReturnActive, ocrReturnMonitor == nil, reload || !waitingOCRRequests.isEmpty else { return }
+        let monitorID = UUID()
+        ocrReturnMonitorID = monitorID
+        let client = exchangeClient
+        ocrReturnMonitor = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                if ocrReturnMonitorID == monitorID {
+                    ocrReturnMonitorID = nil
+                    ocrReturnMonitor = nil
+                }
+            }
+            if reload {
+                let sessions = await Task.detached(priority: .utility) { try? client.ocrReturnSessions() }.value
+                guard ocrReturnMonitorID == monitorID, !Task.isCancelled else { return }
+                if let sessions {
+                    let summaries = sessions.compactMap(PendingOCRReturn.init).sorted { $0.receivedAt > $1.receivedAt }
+                    if summaries != pendingOCRReturns { pendingOCRReturns = summaries }
+                    let returned = Set(sessions.filter { $0.ocrReturn != nil }.map(\.requestID))
+                    waitingOCRRequests.removeAll { returned.contains($0.requestID) }
+                    for session in sessions { registerWaitingOCR(session) }
+                }
+            }
+            while ocrReturnActive && libraryIsWritable() && !Task.isCancelled && ocrReturnMonitorID == monitorID {
+                let now = Date()
+                waitingOCRRequests.removeAll { $0.expiresAt <= now }
+                guard !waitingOCRRequests.isEmpty else { return }
+                let batch = Array(waitingOCRRequests.prefix(8))
+                waitingOCRRequests.removeFirst(batch.count)
+                waitingOCRRequests.append(contentsOf: batch)
+                let identifiers = batch.map(\.requestID)
+                let staged = await Task.detached(priority: .utility) {
+                    identifiers.compactMap { (try? client.receiveReturnedOCR(requestID: $0))?.session }
+                }.value
+                guard ocrReturnMonitorID == monitorID, !Task.isCancelled else { return }
+                let finished = Set(staged.map(\.requestID))
+                waitingOCRRequests.removeAll { finished.contains($0.requestID) }
+                let existing = Set(pendingOCRReturns.map(\.id))
+                let additions = staged.compactMap(PendingOCRReturn.init).filter { !existing.contains($0.id) }
+                if !additions.isEmpty { pendingOCRReturns = (pendingOCRReturns + additions).sorted { $0.receivedAt > $1.receivedAt } }
+                guard !waitingOCRRequests.isEmpty else { return }
+                try? await Task.sleep(nanoseconds: 2_000_000_000)
+            }
+        }
     }
 }

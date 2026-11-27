@@ -66,6 +66,8 @@ struct ResearchExchangeSession: Codable {
     // A pending intent binds a verified envelope to one durable job. It is not
     // an applied receipt and never implies that records have been committed.
     var resultIntents: [String: ResearchResultIntentBinding]? = nil
+    var ocrAutoReturn: ResearchOCRReturnTicket? = nil
+    var ocrReturn: ResearchOCRReturnReceipt? = nil
 }
 
 struct ResearchResultIntentBinding: Codable, Equatable {
@@ -89,6 +91,7 @@ struct ResearchPreparedExchange {
     var requestID: String
     var action: ResearchExternalAction
     var parameters: [String: GaoJSONValue]
+    var autoReturnEnabled = false
 }
 
 struct ResearchOCRPage {
@@ -135,6 +138,7 @@ struct ResearchValidatedExternalResult {
     var workflowState: String
     var duplicate: Bool
     var businessApplied: Bool = false
+    var ocrSourcesCurrent: Bool = true
     // A matching bundle ID and nonce are declarations, not authentication.
     let sourceIsAuthenticated = false
 }
@@ -185,6 +189,7 @@ final class ResearchExchangeClient {
     let researchBundleID: String
     private let providerLookup: (String) -> URL?
     private let clock: () -> Date
+    private let ocrReturns: ResearchOCRReturns
     private let fileManager = FileManager.default
     private let maximumBytes: Int64 = 2 * 1024 * 1024 * 1024
     // PaperStore may create multiple lightweight client instances. Serialize
@@ -193,11 +198,12 @@ final class ResearchExchangeClient {
 
     init(exchangeRoot: URL, researchBundleID: String,
          providerLookup: @escaping (String) -> URL? = { NSWorkspace.shared.urlForApplication(withBundleIdentifier: $0) },
-         clock: @escaping () -> Date = Date.init) {
+         clock: @escaping () -> Date = Date.init, ocrReturns: ResearchOCRReturns = .init()) {
         self.exchangeRoot = exchangeRoot.standardizedFileURL
         self.researchBundleID = researchBundleID
         self.providerLookup = providerLookup
         self.clock = clock
+        self.ocrReturns = ocrReturns
     }
 
     func availability(for action: ResearchExternalAction,
@@ -233,7 +239,7 @@ final class ResearchExchangeClient {
     }
 
     func prepareOCR(userSelectedFiles: [ResearchExchangeSourceFile], languages: [String] = [],
-                    outputs: [String] = []) throws -> ResearchPreparedExchange {
+                    outputs: [String] = [], autoReturn: Bool = false) throws -> ResearchPreparedExchange {
         guard !userSelectedFiles.isEmpty else { throw ResearchExchangeClientError.invalidSelection }
         for file in userSelectedFiles {
             guard let type = UTType(filenameExtension: file.url.pathExtension),
@@ -244,7 +250,8 @@ final class ResearchExchangeClient {
         var parameters: [String: GaoJSONValue] = [:]
         if !languages.isEmpty { parameters["languages"] = .array(languages.map(GaoJSONValue.string)) }
         if !outputs.isEmpty { parameters["outputs"] = .array(outputs.map(GaoJSONValue.string)) }
-        return try prepare(action: .ocrFiles, files: userSelectedFiles, parameters: parameters, documentVersion: nil)
+        return try prepare(action: .ocrFiles, files: userSelectedFiles, parameters: parameters,
+                           documentVersion: nil, autoReturn: autoReturn)
     }
 
     func prepareExternalEdit(documentID: String, originalURL: URL,
@@ -318,6 +325,97 @@ final class ResearchExchangeClient {
         try ensureExchange()
         let package = try GaoActionPackageValidator(expectedTargetBundleID: researchBundleID, now: clock())
             .stagePackage(at: packageURL, stagingRoot: exchangeRoot.appendingPathComponent("Incoming", isDirectory: true))
+        return try registerResult(package)
+    }
+
+    /// Called for a locally opted-in request only. A verified reply never applies business changes.
+    func receiveReturnedOCR(requestID: String) throws -> ResearchValidatedExternalResult? {
+        Self.sessionMutationLock.lock()
+        defer { Self.sessionMutationLock.unlock() }
+        let session = try loadSession(requestID)
+        if session.ocrReturn != nil { return try stagedReturnedOCR(requestID: requestID) }
+        guard let ticket = session.ocrAutoReturn,
+              let expires = GaoActionISO8601.date(ticket.expiresAt), expires > clock() else { return nil }
+        let request = try originalOCRRequest(session, ticket: ticket, now: clock())
+        let stagingRoot = exchangeRoot.appendingPathComponent("Incoming", isDirectory: true)
+        guard let package = try ocrReturns.stageResult(for: ticket, now: clock(), stagingRoot: stagingRoot, checkManifest: {
+            try ResearchOCRReturns.bind($0, to: request, ticket: ticket)
+        }) else { return nil }
+        var retained = false
+        defer { if !retained { try? fileManager.removeItem(at: package.stagingDirectory) } }
+        let acceptedAt = clock()
+        try GaoActionPackageValidator(expectedTargetBundleID: ticket.targetBundleID, now: acceptedAt).validateManifest(request)
+        try GaoActionPackageValidator(expectedTargetBundleID: researchBundleID, now: acceptedAt).validateManifest(package.manifest)
+        guard let raw = package.rawManifest else { throw GaoActionError.invalidManifest }
+        let receipt = ResearchOCRReturnReceipt(resultID: package.manifest.requestID, manifestSHA256: package.manifestSHA256,
+                                               receivedAt: acceptedAt, stagingID: package.stagingDirectory.lastPathComponent,
+                                               stagedNames: Dictionary(uniqueKeysWithValues: package.stagedItems.map {
+            ($0.item.id, $0.url.lastPathComponent)
+        }))
+        try GaoActionFileAccess.writePrivateData(raw, to: package.stagingDirectory.appendingPathComponent("manifest.json"))
+        let result = try registerResult(package, autoReturn: (request, receipt))
+        retained = true
+        return result
+    }
+
+    /// Uses only the owner's approved staging area after transport expiry, preserving the original
+    /// receipt timestamp for validation. It never reopens or refreshes the external result slot.
+    func stagedReturnedOCR(requestID: String) throws -> ResearchValidatedExternalResult? {
+        Self.sessionMutationLock.lock()
+        defer { Self.sessionMutationLock.unlock() }
+        let session = try loadSession(requestID)
+        guard let receipt = session.ocrReturn, let ticket = session.ocrAutoReturn else { return nil }
+        guard UUID(uuidString: receipt.stagingID) != nil, receipt.receivedAt <= clock(),
+              session.resultIDs.contains(receipt.resultID) else { throw ResearchExchangeClientError.invalidSession }
+        let request = try originalOCRRequest(session, ticket: ticket, now: receipt.receivedAt)
+        let directory = exchangeRoot.appendingPathComponent("Incoming", isDirectory: true)
+            .appendingPathComponent(receipt.stagingID, isDirectory: true)
+        let raw = try GaoActionFileAccess.readPrivateData(at: directory.appendingPathComponent("manifest.json"))
+        guard ResearchOCRReturns.sha256(raw) == receipt.manifestSHA256 else { throw GaoActionError.checksumMismatch }
+        let manifest = try GaoActionPackageValidator(expectedTargetBundleID: researchBundleID, now: receipt.receivedAt)
+            .validateManifestData(raw)
+        try ResearchOCRReturns.bind(manifest, to: request, ticket: ticket)
+        guard manifest.requestID == receipt.resultID, Set(receipt.stagedNames.keys) == Set(manifest.items.map(\.id)),
+              Set(receipt.stagedNames.values).count == manifest.items.count else { throw ResearchExchangeClientError.resultMismatch }
+        let items = try manifest.items.map { item -> GaoStagedActionItem in
+            guard let name = receipt.stagedNames[item.id],
+                  name.range(of: "^[A-Fa-f0-9-]{36}(\\.[A-Za-z0-9]{1,16})?$", options: .regularExpression) != nil else {
+                throw ResearchExchangeClientError.invalidSession
+            }
+            let url = directory.appendingPathComponent(name)
+            let fingerprint = try GaoActionFileAccess.fingerprint(at: url)
+            guard fingerprint.sha256 == item.sha256.lowercased(), fingerprint.byteCount == item.byteCount else {
+                throw GaoActionError.checksumMismatch
+            }
+            return .init(item: item, url: url)
+        }
+        return try registerResult(.init(manifest: manifest, stagingDirectory: directory, stagedItems: items,
+                                        manifestSHA256: receipt.manifestSHA256, rawManifest: raw),
+                                  autoReturn: (request, receipt), allowUnavailableOCRSource: true)
+    }
+
+    private func originalOCRRequest(_ session: ResearchExchangeSession, ticket: ResearchOCRReturnTicket,
+                                    now: Date) throws -> GaoActionManifest {
+        guard session.action == .ocrFiles, session.requestID == ticket.requestID, researchBundleID == ticket.sourceBundleID,
+              session.providerBundleID == ticket.targetBundleID else { throw ResearchExchangeClientError.resultMismatch }
+        let url = exchangeRoot.appendingPathComponent("Outgoing", isDirectory: true)
+            .appendingPathComponent(session.requestID + ".gaoaction", isDirectory: true)
+        guard session.packageURL == url.absoluteString else { throw ResearchExchangeClientError.invalidSession }
+        let raw = try GaoActionFileAccess.readPrivateData(at: url.appendingPathComponent("manifest.json"))
+        let request = try GaoActionPackageValidator(expectedTargetBundleID: ticket.targetBundleID, now: now)
+            .validateManifestData(raw)
+        guard try ResearchOCRReturns.ticket(for: request, data: raw, now: now) == ticket,
+              request.nonce == session.requestNonce, request.items.count == session.sources.count,
+              session.sources.allSatisfy({ binding in
+                  request.items.contains { $0.id == binding.itemID && $0.sha256 == binding.sha256 && $0.byteCount == binding.byteCount }
+              }) else { throw ResearchExchangeClientError.resultMismatch }
+        return request
+    }
+
+    private func registerResult(_ package: GaoValidatedActionPackage,
+                                autoReturn: (request: GaoActionManifest, receipt: ResearchOCRReturnReceipt)? = nil,
+                                allowUnavailableOCRSource: Bool = false)
+        throws -> ResearchValidatedExternalResult {
         let manifest = package.manifest
         guard manifest.kind == "result", let reply = manifest.inReplyTo else { throw ResearchExchangeClientError.resultMismatch }
         var session = try loadSession(reply)
@@ -327,14 +425,21 @@ final class ResearchExchangeClient {
         var ocr: [ResearchOCROutput] = []
         var references: [GaoActionReference] = []
         var workflow = manifest.status ?? "failed"
+        var ocrSourcesCurrent = true
         switch session.action {
         case .chooseFiles:
             guard manifest.references.allSatisfy({ $0.kind == "file" }) else { throw ResearchExchangeClientError.invalidSelection }
             guard manifest.references.count + manifest.items.count <= 256 else { throw ResearchExchangeClientError.tooManyItems }
             references = manifest.references
         case .ocrFiles:
-            try validateCurrentSources(session)
+            do { try validateCurrentSources(session) }
+            catch {
+                // The receipt and staged contents were already verified before admission.
+                guard allowUnavailableOCRSource, autoReturn != nil, session.ocrReturn != nil else { throw error }
+                ocrSourcesCurrent = false
+            }
             ocr = try validateOCR(package, session: session)
+            if let autoReturn { try validateReturnedOCR(package, outputs: ocr, request: autoReturn.request) }
             if ["completed", "partial"].contains(manifest.status ?? ""), ocr.contains(where: { !$0.metadataComplete }) { workflow = "needsReview" }
         case .openDocument:
             guard manifest.items.isEmpty, manifest.references.isEmpty else { throw ResearchExchangeClientError.invalidEditResult }
@@ -360,20 +465,34 @@ final class ResearchExchangeClient {
         if let intent = session.resultIntents?[manifest.requestID], intent.manifestSHA256 != manifestSHA {
             throw ResearchExchangeClientError.resultMismatch
         }
-        if !duplicate || session.resultManifestSHA256?[manifest.requestID] == nil || session.resultStatuses?[manifest.requestID] == nil {
+        if let receipt = autoReturn?.receipt, let previous = session.ocrReturn,
+           previous.resultID != receipt.resultID || previous.manifestSHA256 != receipt.manifestSHA256 {
+            throw ResearchExchangeClientError.resultMismatch
+        }
+        let newOCRReturn = session.ocrReturn == nil && autoReturn != nil
+        if newOCRReturn, let autoReturn, let ticket = session.ocrAutoReturn {
+            let now = clock()
+            guard try originalOCRRequest(session, ticket: ticket, now: now) == autoReturn.request else {
+                throw ResearchExchangeClientError.resultMismatch
+            }
+            try GaoActionPackageValidator(expectedTargetBundleID: researchBundleID, now: now).validateManifest(manifest)
+        }
+        if !duplicate || session.resultManifestSHA256?[manifest.requestID] == nil
+            || session.resultStatuses?[manifest.requestID] == nil || newOCRReturn {
             if !duplicate { session.resultIDs.append(manifest.requestID) }
             if session.resultManifestSHA256 == nil { session.resultManifestSHA256 = [:] }
             session.resultManifestSHA256?[manifest.requestID] = manifestSHA
             if session.resultStatuses == nil { session.resultStatuses = [:] }
             session.resultStatuses?[manifest.requestID] = manifest.status
-            session.state = workflow
+            if !duplicate || session.appliedResults?[manifest.requestID] == nil { session.state = workflow }
+            if newOCRReturn { session.ocrReturn = autoReturn?.receipt }
             try saveSession(session)
         }
         let applied = session.appliedResults?[manifest.requestID]
         if let applied, applied.manifestSHA256 != manifestSHA { throw ResearchExchangeClientError.resultMismatch }
         return .init(package: package, session: session, ocrOutputs: ocr,
                      selectedReferences: references, workflowState: workflow, duplicate: duplicate,
-                     businessApplied: applied != nil)
+                      businessApplied: applied != nil, ocrSourcesCurrent: ocrSourcesCurrent)
     }
 
     /// Providers may refresh a result's 120-second envelope with a new UUID.
@@ -397,10 +516,41 @@ final class ResearchExchangeClient {
                                 verifiedSelections: verifiedSelections, normalizeOCRTransportPaths: true)
     }
 
+    func compatibleOCRFingerprintsV2(_ result: ResearchValidatedExternalResult, targetScope: String,
+                                     current: String) throws -> Set<String> {
+        guard result.session.action == .ocrFiles else { return [current] }
+        var values: Set<String> = [current]
+        var manifest = result.package.manifest
+        if manifest.provenance?["requestManifestSHA256"] != nil {
+            values.insert(try semanticFingerprint(manifest: manifest, session: result.session, references: [],
+                                                  targetScope: targetScope, verifiedSelections: [],
+                                                  normalizeOCRTransportPaths: true, stripOCRRequestDigest: false))
+        }
+        // A manual rewrap can omit the field. Reconstruct its earlier V2 form
+        // only from this application's original outgoing bytes and bound nonce.
+        let session = result.session
+        let outgoing = exchangeRoot.appendingPathComponent("Outgoing", isDirectory: true)
+            .appendingPathComponent(session.requestID + ".gaoaction", isDirectory: true)
+        if session.packageURL == outgoing.absoluteString,
+           let raw = try? GaoActionFileAccess.readPrivateData(at: outgoing.appendingPathComponent("manifest.json")),
+           let request = try? JSONDecoder().decode(GaoActionManifest.self, from: raw),
+           request.requestID == session.requestID, request.nonce == session.requestNonce,
+           request.sourceBundleID == researchBundleID, request.targetBundleID == session.providerBundleID,
+           request.kind == "request", request.action == session.action.rawValue {
+            var provenance = manifest.provenance ?? [:]
+            provenance["requestManifestSHA256"] = .string(ResearchOCRReturns.sha256(raw))
+            manifest.provenance = provenance
+            values.insert(try semanticFingerprint(manifest: manifest, session: session, references: [],
+                                                  targetScope: targetScope, verifiedSelections: [],
+                                                  normalizeOCRTransportPaths: true, stripOCRRequestDigest: false))
+        }
+        return values
+    }
+
     private func semanticFingerprint(manifest original: GaoActionManifest, session: ResearchExchangeSession,
                                      references: [GaoActionReference], targetScope: String,
                                      verifiedSelections: [ResearchVerifiedSelection],
-                                     normalizeOCRTransportPaths: Bool) throws -> String {
+                                     normalizeOCRTransportPaths: Bool, stripOCRRequestDigest: Bool = true) throws -> String {
         var manifest = original
         guard manifest.kind == "result", manifest.inReplyTo == session.requestID,
               manifest.action == session.action.rawValue, manifest.sourceBundleID == session.providerBundleID,
@@ -417,6 +567,9 @@ final class ResearchExchangeClient {
             }
         }
         if var provenance = manifest.provenance {
+            if normalizeOCRTransportPaths && stripOCRRequestDigest && session.action == .ocrFiles {
+                provenance.removeValue(forKey: "requestManifestSHA256")
+            }
             for key in ["outputs", "sources", "pages"] {
                 guard let values = provenance[key]?.researchArray else { continue }
                 provenance[key] = .array(values.map { value in
@@ -678,6 +831,21 @@ final class ResearchExchangeClient {
     /// Read-only session list for explicit resume/import choices in this app.
     func recentSessions(limit: Int = 20) throws -> [ResearchExchangeSession] {
         guard limit > 0 else { return [] }
+        return try sessionFiles().map { try loadSession($0.deletingPathExtension().lastPathComponent) }
+            .sorted { $0.createdAt > $1.createdAt }.prefix(min(limit, 100)).map { $0 }
+    }
+
+    func ocrReturnSessions() throws -> [ResearchExchangeSession] {
+        let now = clock()
+        return try sessionFiles().compactMap { try? loadSession($0.deletingPathExtension().lastPathComponent) }
+            .filter { session in
+                guard session.action == .ocrFiles, session.providerBundleID == ResearchOCRReturns.targetBundleID else { return false }
+                if let returned = session.ocrReturn { return session.appliedResults?[returned.resultID] == nil }
+                return session.ocrAutoReturn.flatMap { GaoActionISO8601.date($0.expiresAt) }.map { $0 > now } ?? false
+            }.sorted { $0.createdAt > $1.createdAt }
+    }
+
+    private func sessionFiles() throws -> [URL] {
         let directory = exchangeRoot.appendingPathComponent("Sessions", isDirectory: true)
         guard fileManager.fileExists(atPath: directory.path) else { return [] }
         let values = try directory.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey])
@@ -685,13 +853,13 @@ final class ResearchExchangeClient {
         let urls = try fileManager.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil)
             .filter { $0.pathExtension == "json" }
         guard urls.count <= 10_000 else { throw ResearchExchangeClientError.invalidSession }
-        return try urls.map { try loadSession($0.deletingPathExtension().lastPathComponent) }
-            .sorted { $0.createdAt > $1.createdAt }.prefix(min(limit, 100)).map { $0 }
+        return urls
     }
 
     private func prepare(action: ResearchExternalAction, files: [ResearchExchangeSourceFile],
                          parameters: [String: GaoJSONValue], documentVersion: Date?,
-                         targetFolderID: String? = nil, sourceScope: GaoActionReference? = nil) throws -> ResearchPreparedExchange {
+                         targetFolderID: String? = nil, sourceScope: GaoActionReference? = nil,
+                         autoReturn: Bool = false) throws -> ResearchPreparedExchange {
         try validateParameters(parameters, action: action)
         guard files.count <= 256 else { throw ResearchExchangeClientError.tooManyItems }
         try ensureExchange()
@@ -725,18 +893,34 @@ final class ResearchExchangeClient {
                                          items: items, references: sourceScope.map { [$0] } ?? [], parameters: parameters)
         let package = try GaoActionPackageWriter().write(manifest: manifest, files: sourceFiles,
                                                       outgoingRoot: exchangeRoot.appendingPathComponent("Outgoing", isDirectory: true))
-        let written = try loadManifest(package)
+        let raw = try GaoActionFileAccess.readPrivateData(at: package.appendingPathComponent("manifest.json"))
+        let written = try JSONDecoder().decode(GaoActionManifest.self, from: raw)
         for binding in bindings {
             guard written.items.contains(where: { $0.id == binding.itemID && $0.sha256 == binding.sha256 && $0.byteCount == binding.byteCount }) else {
                 throw ResearchExchangeClientError.sourceChanged
             }
         }
-        try saveSession(.init(requestID: requestID, providerBundleID: action.providerBundleID, action: action,
-                              requestNonce: written.nonce, packageURL: package.absoluteString, createdAt: clock(),
-                              sources: bindings, state: "prepared", resultIDs: [], importedEditedSHA256: nil,
-                              targetFolderID: targetFolderID, sourceScope: sourceScope,
-                              selectionIntentVersion: action == .chooseFiles ? 1 : nil))
-        return .init(packageURL: package, requestID: requestID, action: action, parameters: parameters)
+        var ticket: ResearchOCRReturnTicket?
+        if autoReturn && action == .ocrFiles && researchBundleID == ResearchOCRReturns.sourceBundleID {
+            ticket = try? ResearchOCRReturns.ticket(for: written, data: raw, now: clock())
+        }
+        var session = ResearchExchangeSession(requestID: requestID, providerBundleID: action.providerBundleID, action: action,
+                                              requestNonce: written.nonce, packageURL: package.absoluteString, createdAt: clock(),
+                                              sources: bindings, state: "prepared", resultIDs: [], importedEditedSHA256: nil,
+                                              targetFolderID: targetFolderID, sourceScope: sourceScope,
+                                              selectionIntentVersion: action == .chooseFiles ? 1 : nil, ocrAutoReturn: ticket)
+        Self.sessionMutationLock.lock()
+        defer { Self.sessionMutationLock.unlock() }
+        try saveSession(session)
+        if let ticket {
+            do { try ocrReturns.publish(ticket, now: clock()) }
+            catch {
+                session.ocrAutoReturn = nil
+                try? saveSession(session)
+            }
+        }
+        return .init(packageURL: package, requestID: requestID, action: action, parameters: parameters,
+                     autoReturnEnabled: session.ocrAutoReturn != nil)
     }
 
     private func validateParameters(_ parameters: [String: GaoJSONValue], action: ResearchExternalAction) throws {
@@ -938,6 +1122,90 @@ final class ResearchExchangeClient {
 
     private static func incompleteOCRPage(_ page: ResearchOCRPage) -> Bool {
         page.status != "completed" || page.confidence.map { $0 < 0.5 } == true
+    }
+
+    private func validateReturnedOCR(_ package: GaoValidatedActionPackage, outputs: [ResearchOCROutput],
+                                     request: GaoActionManifest) throws {
+        let result = package.manifest
+        let provenance = result.provenance ?? [:]
+        guard let sources = provenance["sources"]?.researchArray,
+              let mappings = provenance["outputs"]?.researchArray,
+              sources.count == request.items.count, mappings.count == outputs.count,
+              !outputs.isEmpty else { throw ResearchExchangeClientError.invalidOCRMapping }
+        let requested = Set(request.parameters["outputs"]?.researchStrings ?? ["text", "json"])
+        let outputFormats: [String: (fileExtension: String, format: String)] = [
+            "public.utf8-plain-text": ("txt", "text"), "public.plain-text": ("txt", "text"),
+            "text/plain": ("txt", "text"), "public.json": ("json", "json"), "application/json": ("json", "json"),
+            "net.daringfireball.markdown": ("md", "markdown"), "text/markdown": ("md", "markdown"),
+            "com.adobe.pdf": ("pdf", "searchablePDF"), "application/pdf": ("pdf", "searchablePDF")
+        ]
+        if let failureValue = provenance["exportFailures"] {
+            guard let failures = failureValue.researchStrings, result.status != "completed" || failures.isEmpty else {
+                throw ResearchExchangeClientError.invalidOCRCompletion
+            }
+        }
+        var inputIDs = Set<String>(), producerIDs = Set<UUID>()
+        var hasReviewablePages = false
+        for value in sources {
+            guard let source = value.researchObject,
+                  let sourceID = source["sourceItemID"]?.researchString, inputIDs.insert(sourceID).inserted,
+                  let binding = request.items.first(where: { $0.id == sourceID }),
+                  source["sourceSHA256"]?.researchString?.lowercased() == binding.sha256.lowercased(),
+                  let producerID = source["sourceID"]?.researchString, let uuid = UUID(uuidString: producerID),
+                  producerIDs.insert(uuid).inserted, let declaredOutputs = source["outputItemIDs"]?.researchStrings else {
+                throw ResearchExchangeClientError.invalidOCRMapping
+            }
+            let pages = try parseOCRPages(source["pages"])
+            let pageStates = Dictionary(uniqueKeysWithValues: pages.map { ($0.pageNumber, $0.status) })
+            let related = outputs.filter { $0.sourceItemID == sourceID }
+            guard !pages.isEmpty, Set(declaredOutputs) == Set(related.map(\.itemID)) else {
+                throw ResearchExchangeClientError.invalidOCRMapping
+            }
+            var formats = Set<String>()
+            for output in related {
+                guard let descriptor = outputFormats[output.uti], formats.insert(descriptor.format).inserted,
+                      requested.contains(descriptor.format), let item = result.items.first(where: { $0.id == output.itemID }),
+                      (item.relativePath as NSString).pathExtension.lowercased() == descriptor.fileExtension,
+                      let mapping = mappings.compactMap(\.researchObject).first(where: {
+                          $0["resultItemID"]?.researchString == output.itemID
+                      }), mapping["sourceID"]?.researchString == producerID,
+                      mapping["format"]?.researchString == descriptor.format,
+                      Dictionary(uniqueKeysWithValues: output.pages.map { ($0.pageNumber, $0.status) }) == pageStates else {
+                    throw ResearchExchangeClientError.invalidOCRMapping
+                }
+                if descriptor.format == "json" {
+                    try validateReturnedOCRJSON(output.localCopy, sourceID: producerID, checksum: binding.sha256.lowercased(),
+                                                pageStates: pageStates)
+                }
+                hasReviewablePages = hasReviewablePages || pages.contains { ["completed", "lowConfidence"].contains($0.status) }
+            }
+            if result.status == "completed" && formats != requested { throw ResearchExchangeClientError.invalidOCRCompletion }
+        }
+        guard hasReviewablePages else { throw ResearchExchangeClientError.invalidOCRMapping }
+    }
+
+    private func validateReturnedOCRJSON(_ url: URL, sourceID: String, checksum: String, pageStates: [Int: String]) throws {
+        let data = try GaoActionFileAccess.readPrivateData(at: url, maximumBytes: 16 * 1_048_576)
+        try GaoUniqueJSONKeys.validate(data)
+        let object = try JSONDecoder().decode(GaoJSONValue.self, from: data).researchObject
+        guard object?["schemaVersion"]?.researchNumber == 1, let sources = object?["sources"]?.researchArray,
+              sources.count == 1, let source = sources.first?.researchObject,
+              source["id"]?.researchString == sourceID, source["sha256"]?.researchString?.lowercased() == checksum,
+              let pages = object?["pages"]?.researchArray, pages.count == pageStates.count else {
+            throw ResearchExchangeClientError.invalidOCRMapping
+        }
+        var numbers = Set<Int>()
+        for value in pages {
+            guard let page = value.researchObject, page["sourceID"]?.researchString == sourceID,
+                  page["originalSHA256"]?.researchString?.lowercased() == checksum,
+                  let number = page["pageNumber"]?.researchNumber, number >= 1, number <= Double(Int32.max),
+                  number.rounded() == number, numbers.insert(Int(number)).inserted,
+                  let status = page["status"]?.researchString, pageStates[Int(number)] == status,
+                  let lines = page["lines"]?.researchArray,
+                  lines.allSatisfy({ $0.researchObject?["text"]?.researchString != nil }) else {
+                throw ResearchExchangeClientError.invalidOCRMapping
+            }
+        }
     }
 
     private func parseOCRPages(_ value: GaoJSONValue?) throws -> [ResearchOCRPage] {

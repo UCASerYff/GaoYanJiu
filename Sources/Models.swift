@@ -283,9 +283,11 @@ struct PaperRecord: Codable, Hashable, Identifiable {
     var history: [StatusEvent]
     var submissionHistory: String?
     var sortOrder: Int? = nil
+    var nextAction: SubmissionAction? = nil
 
     var id: String { key }
     var isManual: Bool { sourceID == "manual" }
+    var canScheduleNextAction: Bool { !hidden && !SubmissionStatusClassifier.isTerminal(status) }
 }
 
 enum ExistingWorkType: String, Codable, CaseIterable, Identifiable {

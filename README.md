@@ -65,6 +65,14 @@ python3 Tests/InstallSafetyRegression.py
 
 通过环境变量 `GAO_SIGNING_IDENTITY` 可指定签名证书。修改团队后也需调整 `scripts/install.sh` 中的团队检查。`dist/` 存放本地发行 ZIP 和校验文件，不提交到 Git；上传到 GitHub Releases。
 
+Apple Silicon Mac 或 GitHub Actions 的 `macos-15` runner 可用以下命令验证源码。验证会在临时目录编译宿主、框架和 WidgetKit 扩展，核对版本，然后运行隔离夹具。发行签名仍由正式构建流程处理。
+
+```bash
+bash scripts/verify_macos_arm64.sh
+```
+
+另有搞操作源码时，可通过 `GAO_CAOZUO_SOURCE=/absolute/path/to/GaoCaoZuo bash scripts/verify_macos_arm64.sh` 一并运行跨应用 OCR 夹具。它让两个应用的实际传输组件在同一临时目录中交接合成识别结果。
+
 - `Sources/`、`Shared/`（如有）与 `Module.swift`：业务和游戏逻辑。
 - `GameWorld/` 与 `Resources/`：场景、模型、贴图和其他资源。
 - `Host/`：独立入口、外观与本地数据目录设置、联动服务。
@@ -78,6 +86,9 @@ python3 Tests/InstallSafetyRegression.py
 
 ## V4.14 更新
 
+- macOS Build 16 的「在投管理」可为活跃稿件设置下一步行动和截止日期。集中清单显示逾期、今天、未来七天和稍后，并可返回稿件及状态时间线。完成状态由用户确认。
+- 配套搞操作可在交接有效期内自动回传 OCR。审核入口在原件条目和待审队列中，支持按页核对原件和识别文字。确认后才导入并建立索引，原件保留。手工导出和导入继续可用。
+- 关闭工作台后可从菜单栏或 Dock 重新打开，菜单栏的退出操作会先确认。
 - 删除项目管理侧栏、列表、详情、新建、编辑和项目步骤提醒；旧项目导航自动回到在投管理“全部”，历史项目记录和回收站数据完整保留。
 - 修复成果类别分布图：按类别数量动态增加图表高度，显示完整类别轴与数量标签，并在窄窗口将类别和署名分析卡改为上下排列。
 - 删除每日自动备份、手动完整备份、迁移备份、恢复前副本、升级快照及对应菜单入口；升级核验改为只读摘要，安装不再保留旧程序回滚副本。

@@ -81,14 +81,6 @@ final class PaperStore: ObservableObject {
             guard library.version <= LibrarySchema.currentVersion else { throw ResearchDocumentImportError.unavailableLibrary }
             return library.managedDocuments
         }
-        documentLibrary.readDurableLibraryData = { [weak self] in
-            guard let self, !self.libraryLoadFailed else { throw ResearchDocumentImportError.unavailableLibrary }
-            let data = try GaoActionFileAccess.readPrivateData(at: self.repository.libraryURL, maximumBytes: 128 * 1_048_576)
-            let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
-            let library = try decoder.decode(PersistedLibrary.self, from: data)
-            guard library.version <= LibrarySchema.currentVersion else { throw ResearchDocumentImportError.unavailableLibrary }
-            return data
-        }
         documentLibrary.errorHandler = { [weak self] in self?.lastError = $0 }
 
         // objectWillChange 级联转发：子对象状态变化视同 PaperStore 变化，
@@ -120,6 +112,45 @@ final class PaperStore: ObservableObject {
     var inReviewPapers: [PaperRecord] {
         visiblePapers.filter { !SubmissionStatusClassifier.isTerminal($0.status) }
     }
+
+    func changeSubmissionAction(paperID: String, revision: String?, change: SubmissionActionChange,
+                                now: Date = Date()) throws {
+        guard !libraryLoadFailed else { throw LibraryPersistenceError.readRequired }
+        guard let index = papers.firstIndex(where: { $0.id == paperID }) else { throw SubmissionActionError.missingPaper }
+        let previous = papers[index].nextAction
+        let current = previous?.plan
+        guard current?.revision == revision else { throw SubmissionActionError.stalePlan }
+
+        let next: SubmissionAction?
+        switch change {
+        case .save(let text, let dueDate):
+            guard papers[index].canScheduleNextAction else { throw SubmissionActionError.inactivePaper }
+            guard let cleaned = SubmissionAction.cleanedText(text) else { throw SubmissionActionError.invalidText }
+            if let current, current.completedAt == nil, current.text == cleaned, current.dueDate == dueDate { return }
+            next = .updating(previous, text: cleaned, dueDate: dueDate, completedAt: nil, now: now)
+        case .complete:
+            guard let current else { throw SubmissionActionError.missingPlan }
+            guard current.completedAt == nil else { return }
+            next = .updating(previous, text: current.text, dueDate: current.dueDate, completedAt: now, now: now)
+        case .reopen:
+            guard papers[index].canScheduleNextAction else { throw SubmissionActionError.inactivePaper }
+            guard let current else { throw SubmissionActionError.missingPlan }
+            guard current.completedAt != nil else { return }
+            next = .updating(previous, text: current.text, dueDate: current.dueDate, completedAt: nil, now: now)
+        case .remove:
+            guard current != nil else { throw SubmissionActionError.missingPlan }
+            next = nil
+        }
+
+        papers[index].nextAction = next
+        do {
+            try saveThrowing()
+        } catch {
+            papers[index].nextAction = previous
+            throw error
+        }
+    }
+
     /// 已接受子集（终态里的 accept 类；publish 类已发表也算接受后的结果）。
     var acceptedPapers: [PaperRecord] {
         visiblePapers.filter { paper in

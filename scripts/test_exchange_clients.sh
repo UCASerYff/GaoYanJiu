@@ -3,8 +3,8 @@ set -euo pipefail
 ROOT=${0:A:h:h}
 TEST_CASE=all
 if (( $# )); then
-    [[ $# -eq 2 && "$1" == "--case" && ( "$2" == "file-selection-uti-normalization" || "$2" == "ocr-result-repack" ) ]] || {
-        echo 'Usage: test_exchange_clients.sh [--case file-selection-uti-normalization|ocr-result-repack]'; exit 2
+    [[ $# -eq 2 && "$1" == "--case" && ( "$2" == "file-selection-uti-normalization" || "$2" == "ocr-result-repack" || "$2" == "ocr-auto-return" ) ]] || {
+        echo 'Usage: test_exchange_clients.sh [--case file-selection-uti-normalization|ocr-result-repack|ocr-auto-return]'; exit 2
     }
     TEST_CASE="$2"
 fi
@@ -17,7 +17,7 @@ SDK=$(xcrun --sdk macosx --show-sdk-path)
 swiftc -swift-version 5 -parse-as-library -Onone -sdk "$SDK" \
     -target "$(uname -m)-apple-macosx14.0" -module-cache-path "$TEST_WORK/cache" \
     -framework AppKit -framework CryptoKit -framework UniformTypeIdentifiers -framework Security \
-    "$ROOT/Sources/GaoActionV1.swift" "$ROOT/Sources/ResearchExchangeClients.swift" \
+    "$ROOT/Sources/GaoActionV1.swift" "$ROOT/Sources/ResearchExchangeClients.swift" "$ROOT/Sources/ResearchOCRReturns.swift" \
     "$ROOT/Tests/ResearchExchangeClientsRegression.swift" -o "$TEST_WORK/ResearchExchangeClientsRegression"
 # These fixtures inject a provider lookup and use only this temporary root.
 "$TEST_WORK/ResearchExchangeClientsRegression" "$TEST_WORK/fixture-data" "$TEST_CASE"

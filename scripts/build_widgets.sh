@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT=${0:A:h:h}
 export DEVELOPER_DIR=/Applications/Xcode.app/Contents/Developer
-BUILD="$ROOT/build.noindex"
+BUILD="${GAO_BUILD_DIR:-$ROOT/build.noindex}"
 mkdir -p "$BUILD/PlugIns" "$BUILD/widget-cache"
 VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$ROOT/Info.plist")
 NUMBER=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleVersion' "$ROOT/Info.plist")

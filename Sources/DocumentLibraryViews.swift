@@ -509,6 +509,8 @@ struct DocumentLibraryDashboard: View {
             }
             .buttonStyle(.plain)
 
+            OCRReviewQueueButton(documentID: document.id)
+
             Menu {
                 documentMenuContent(document)
             } label: {
@@ -679,7 +681,9 @@ struct DocumentLibraryDashboard: View {
                     if provider.isAvailable {
                         do {
                             try await store.documentLibrary.exchangeClient.openInProvider(prepared)
-                            store.exchangeFeedbackMessage = AppLocalization.format("已将“%@”发送至搞操作进行文字识别（OCR），请在搞操作完成识别后发送结果。", document.displayName)
+                            store.exchangeFeedbackMessage = AppLocalization.format(prepared.autoReturnEnabled
+                                ? "已将“%@”发送至搞操作。导出后，可在原件或「OCR 待审核」中打开结果。"
+                                : "已将“%@”发送至搞操作。导出后，请在「资料交接」中打开结果包。", document.displayName)
                         } catch {
                             store.documentLibrary.exchangeClient.revealFallback(prepared)
                             store.exchangeFeedbackMessage = AppLocalization.format("启动搞操作失败（%@），已在访达中定位交接包。", error.localizedDescription)
@@ -1024,6 +1028,105 @@ private struct IncomingReceiptHistorySheet: View {
     }
 }
 
+struct OCRReviewQueueButton: View {
+    @EnvironmentObject private var store: PaperStore
+    var documentID: String? = nil
+    @State private var showingQueue = false
+
+    private var pending: [PendingOCRReturn] {
+        if let documentID { return store.documentLibrary.pendingOCRReturns(for: documentID) }
+        return store.documentLibrary.pendingOCRReturns
+    }
+
+    var body: some View {
+        if !pending.isEmpty {
+            if documentID == nil {
+                Button(action: show) {
+                    HStack(spacing: 3) {
+                        Image(systemName: "text.viewfinder")
+                        Text(pending.count.formatted()).font(.caption2.weight(.semibold))
+                    }
+                }
+                .help(AppLocalization.format("OCR 待审核（%d）", pending.count))
+                .accessibilityLabel(AppLocalization.format("OCR 待审核（%d）", pending.count))
+                .popover(isPresented: $showingQueue) { queue }
+            } else {
+                Button(action: show) {
+                    Label(AppLocalization.format("OCR 待审核（%d）", pending.count), systemImage: "text.viewfinder")
+                }
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(AppTheme.accent)
+                .buttonStyle(.bordered)
+                .popover(isPresented: $showingQueue) { queue }
+            }
+        }
+    }
+
+    private var queue: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text(AppLocalization.text("OCR 待审核")).font(.headline)
+            if pending.isEmpty {
+                Text(AppLocalization.text("暂无待审核的 OCR 结果")).foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(pending) { entry in
+                            Button { open(entry) } label: {
+                                HStack(alignment: .top, spacing: 12) {
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        Text(sourceNames(entry)).font(.callout.weight(.medium))
+                                        Text(Formatters.dateTime.string(from: entry.receivedAt))
+                                            .font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Label(AppLocalization.text("审核结果"), systemImage: "chevron.forward")
+                                        .font(.caption).foregroundStyle(AppTheme.accent)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.vertical, 8)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                            if entry.id != pending.last?.id { Divider() }
+                        }
+                    }
+                }
+                .frame(maxHeight: 300)
+            }
+        }
+        .padding(14)
+        .frame(width: 360)
+    }
+
+    private func show() {
+        if documentID != nil, pending.count == 1, let entry = pending.first {
+            open(entry)
+        } else {
+            showingQueue = true
+        }
+    }
+
+    private func sourceNames(_ entry: PendingOCRReturn) -> String {
+        let names = entry.sourceDocumentIDs.map { id in
+            store.managedDocuments.first(where: { $0.id == id })?.displayName ?? AppLocalization.text("原件不可用")
+        }
+        return names.isEmpty ? AppLocalization.text("OCR 结果") : names.joined(separator: "、")
+    }
+
+    private func open(_ entry: PendingOCRReturn) {
+        showingQueue = false
+        Task { @MainActor in
+            do { try await store.documentLibrary.openPendingOCRReview(entry) }
+            catch { store.exchangeFeedbackMessage = error.localizedDescription }
+        }
+    }
+}
+
+private struct OCRReviewSelectedPage: Equatable {
+    let outputID: String
+    let number: Int
+}
+
 struct ExchangeResultReviewSheet: View {
     @Environment(\.dismiss) private var dismiss
     @EnvironmentObject private var store: PaperStore
@@ -1033,6 +1136,7 @@ struct ExchangeResultReviewSheet: View {
     @State private var acknowledgedWarnings = false
     @State private var isProcessing = false
     @State private var errorMessage: String?
+    @State private var selectedOCRPage: OCRReviewSelectedPage?
 
     init(review: PendingExchangeResultReview) {
         self.review = review
@@ -1041,7 +1145,8 @@ struct ExchangeResultReviewSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            Text("审核资料交接结果").font(.title2.weight(.semibold))
+            Text(AppLocalization.text(review.result.session.action == .ocrFiles ? "审核 OCR 结果" : "审核资料交接结果"))
+                .font(.title2.weight(.semibold))
             Text(review.summary).font(.callout)
             Text("提供方状态：\(review.result.package.manifest.status ?? "failed") · 当前审核状态：\(review.result.workflowState)")
                 .font(.callout).foregroundStyle(review.result.package.manifest.status == "partial" ? Color.orange : Color.secondary)
@@ -1072,11 +1177,17 @@ struct ExchangeResultReviewSheet: View {
                         }
                     }
                     ForEach(review.result.ocrOutputs, id: \.itemID) { output in
-                        OCRResultOutputReview(output: output, filename: outputFilename(output), sourceDisplayName: sourceName(output),
-                                              pages: review.ocrReviewPages[output.itemID] ?? [], pageError: review.ocrReviewErrors[output.itemID])
+                        let original = sourceDocument(output)
+                        OCRResultOutputReview(output: output, filename: outputFilename(output),
+                                              sourceDisplayName: original?.displayName ?? AppLocalization.text("原件不可用"),
+                                              sourcePDFURL: original.flatMap { document in
+                                                  review.result.ocrSourcesCurrent && document.fileExtension.lowercased() == "pdf"
+                                                      ? store.managedDocumentURL(document) : nil
+                                              }, pages: review.ocrReviewPages[output.itemID] ?? [],
+                                              pageError: review.ocrReviewErrors[output.itemID], selectedPage: $selectedOCRPage)
                     }
                 }.frame(maxWidth: .infinity, alignment: .leading)
-            }.frame(maxHeight: 260)
+            }.frame(maxHeight: review.result.session.action == .ocrFiles ? 430 : 260)
             if review.requiresExplicitReview && review.canApply {
                 Toggle("我已核对结果中的不完整信息，确认按当前结果导入", isOn: $acknowledgedWarnings)
                     .toggleStyle(.checkbox)
@@ -1102,7 +1213,7 @@ struct ExchangeResultReviewSheet: View {
             }
         }
         .padding(24)
-        .frame(width: 640)
+        .frame(width: review.result.session.action == .ocrFiles ? 740 : 640)
         .interactiveDismissDisabled(isProcessing)
     }
 
@@ -1115,11 +1226,11 @@ struct ExchangeResultReviewSheet: View {
         if panel.runModal() == .OK, let url = panel.url { reselectedReferences[reference.id] = url }
     }
 
-    private func sourceName(_ output: ResearchOCROutput) -> String {
-        if let id = output.sourceDocumentID, let document = store.managedDocuments.first(where: { $0.id == id }) {
-            return document.displayName
-        }
-        return output.sourceDocumentID ?? "未提供"
+    private func sourceDocument(_ output: ResearchOCROutput) -> ManagedDocument? {
+        guard let binding = review.result.session.sources.first(where: {
+            $0.itemID == output.sourceItemID && $0.sha256.lowercased() == output.sourceSHA256.lowercased()
+        }), let id = binding.documentID, output.sourceDocumentID == id else { return nil }
+        return store.managedDocuments.first(where: { $0.id == id })
     }
 
     private func outputFilename(_ output: ResearchOCROutput) -> String {
@@ -1150,8 +1261,10 @@ private struct OCRResultOutputReview: View {
     let output: ResearchOCROutput
     let filename: String
     let sourceDisplayName: String
+    let sourcePDFURL: URL?
     let pages: [DocumentProvenance.Page]
     let pageError: String?
+    @Binding var selectedPage: OCRReviewSelectedPage?
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(filename).font(.headline)
@@ -1168,11 +1281,27 @@ private struct OCRResultOutputReview: View {
             }
             if let pageError { Text("页来源无法核验：\(pageError)").font(.caption).foregroundStyle(.red) }
             ForEach(pages, id: \.pageNumber) { page in
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(pageSummary(page)).font(.caption.weight(.medium))
-                        .foregroundStyle(page.status == "completed" ? Color.secondary : Color.orange)
+                let selection = OCRReviewSelectedPage(outputID: output.itemID, number: page.pageNumber)
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(pageSummary(page)).font(.caption.weight(.medium))
+                            .foregroundStyle(page.status == "completed" ? Color.secondary : Color.orange)
+                        Spacer()
+                        if sourcePDFURL != nil, page.pageNumber > 0 {
+                            Button(AppLocalization.text(selectedPage == selection ? "收起原件" : "查看原件")) {
+                                selectedPage = selectedPage == selection ? nil : selection
+                            }
+                            .buttonStyle(.link)
+                            .accessibilityLabel(AppLocalization.format("查看原 PDF 第 %d 页", page.pageNumber))
+                        }
+                    }
                     if let text = page.text, !text.isEmpty { Text(text).font(.caption).textSelection(.enabled) }
+                    if selectedPage == selection, let sourcePDFURL {
+                        OCRReviewPDFPreview(url: sourcePDFURL, checksum: output.sourceSHA256, page: page.pageNumber)
+                    }
                 }
+                .padding(8)
+                .background(AppTheme.card, in: RoundedRectangle(cornerRadius: 6))
             }
         }
     }
@@ -1182,5 +1311,36 @@ private struct OCRResultOutputReview: View {
         else { confidence = "置信度未提供" }
         let status = page.status ?? "状态未提供"
         return "第 \(page.pageNumber) 页 · \(status) · \(confidence)"
+    }
+}
+
+private struct OCRReviewPDFPreview: View {
+    let url: URL
+    let checksum: String
+    let page: Int
+    @State private var snapshot: VerifiedSourcePDF?
+    @State private var loaded = false
+
+    var body: some View {
+        Group {
+            if let snapshot, (1...snapshot.pageCount).contains(page) {
+                SourcePDFPreview(data: snapshot.data, sourceID: checksum, pageNumber: page)
+                    .frame(height: 250)
+            } else if loaded {
+                Text(AppLocalization.text("无法核验此原 PDF 页。请检查原件是否仍在资料库中、内容未改变且未超过 128 MiB。"))
+                    .font(.caption).foregroundStyle(.secondary)
+            } else {
+                ProgressView().controlSize(.small)
+                    .accessibilityLabel(AppLocalization.text("正在核对原 PDF"))
+            }
+        }
+        .task(id: url) {
+            let verified = await Task.detached(priority: .utility) {
+                VerifiedSourcePDF.read(at: url, expectedSHA256: checksum)
+            }.value
+            guard !Task.isCancelled else { return }
+            snapshot = verified
+            loaded = true
+        }
     }
 }

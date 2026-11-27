@@ -149,6 +149,7 @@ struct ContentView: View {
             }
             toolbarItemNoChrome(.primaryAction) {
                 HStack(spacing: 12) {
+                    OCRReviewQueueButton()
                     Button {
                         showingTrash = true
                     } label: {
@@ -216,7 +217,7 @@ struct ContentView: View {
                         .fixedSize()
                     }
                 }
-                .frame(width: 360, alignment: .trailing)
+                .frame(width: store.documentLibrary.pendingOCRReturns.isEmpty ? 360 : 398, alignment: .trailing)
             }
 
         }
@@ -699,14 +700,18 @@ struct ContentView: View {
 
     @ViewBuilder private var submissionList: some View {
         if displayedPapers.isEmpty {
-            EmptyLibraryView(
-                filter: effectivePaperFilter,
-                manualAction: { manualSubmissionContext = ManualSubmissionContext(paperID: nil) },
-                importAction: { importContext = ImportContext(publisher: nil) }
-            )
+            VStack(spacing: 12) {
+                SubmissionActionBoard(openPaper: selectSubmission)
+                EmptyLibraryView(
+                    filter: effectivePaperFilter,
+                    manualAction: { manualSubmissionContext = ManualSubmissionContext(paperID: nil) },
+                    importAction: { importContext = ImportContext(publisher: nil) }
+                )
+            }
         } else {
             ScrollView {
                 VStack(spacing: 18) {
+                    SubmissionActionBoard(openPaper: selectSubmission)
                     if submissionScope == .all {
                         DisclosureGroup("投稿统计与趋势") { SubmissionAnalytics(papers: displayedPapers) }
                     }
@@ -715,10 +720,7 @@ struct ContentView: View {
                         ForEach(displayedPapers) { paper in
                             PaperCard(
                                 paper: paper,
-                                action: {
-                                    selectedPaper = paper
-                                    if paper.changed { store.markRead(paper) }
-                                },
+                                action: { selectSubmission(paper) },
                                 deleteAction: {
                                     paperPendingDeletion = paper
                                 }
@@ -741,6 +743,11 @@ struct ContentView: View {
                 .frame(maxWidth: 1100)
             }
         }
+    }
+
+    private func selectSubmission(_ paper: PaperRecord) {
+        selectedPaper = paper
+        if paper.changed { store.markRead(paper) }
     }
 
     private func count(for item: LibraryFilter) -> Int {
@@ -1416,6 +1423,8 @@ struct PaperDetailView: View {
                             .padding(16)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .background(AppTheme.accent.opacity(0.08), in: RoundedRectangle(cornerRadius: 12))
+
+                            SubmissionActionDetail(paper: paper)
 
                             if let submissionHistory = paper.submissionHistory, !submissionHistory.isEmpty {
                                 VStack(alignment: .leading, spacing: 7) {

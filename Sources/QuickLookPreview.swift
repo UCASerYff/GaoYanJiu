@@ -65,22 +65,19 @@ struct QuickLookPreviewSheet: View {
             return
         }
         let expected = provenance.originalSHA256.lowercased()
-        let snapshot = await Task.detached(priority: .utility) { () -> (Data, Int)? in
-            guard let data = try? GaoActionFileAccess.readPrivateData(at: candidate, maximumBytes: 128 * 1_048_576),
-                  SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == expected,
-                  let document = PDFDocument(data: data) else { return nil }
-            return (data, document.pageCount)
+        let snapshot = await Task.detached(priority: .utility) {
+            VerifiedSourcePDF.read(at: candidate, expectedSHA256: expected)
         }.value
-        guard let (data, count) = snapshot, count > 0 else {
+        guard let snapshot else {
             pageNavigationMessage = "原 PDF 已改变、无法读取或超过 128 MiB 页码预览上限，暂不能跳转。"
             return
         }
         // Display these exact verified bytes throughout this sheet. Reopening
         // the source URL later could show a file changed by an external editor.
-        verifiedPDFData = data
-        sourcePageCount = count
+        verifiedPDFData = snapshot.data
+        sourcePageCount = snapshot.pageCount
         pageNavigationMessage = "选择页码可跳到已核验的原 PDF。"
-        if let initialPage, (1...count).contains(initialPage) {
+        if let initialPage, (1...snapshot.pageCount).contains(initialPage) {
             selectedPage = initialPage
             showingOCRPane = true
         }
@@ -159,7 +156,20 @@ struct QuickLookPreviewSheet: View {
     }
 }
 
-private struct SourcePDFPreview: NSViewRepresentable {
+struct VerifiedSourcePDF: Sendable {
+    let data: Data
+    let pageCount: Int
+
+    static func read(at url: URL, expectedSHA256: String) -> Self? {
+        guard url.pathExtension.lowercased() == "pdf",
+              let data = try? GaoActionFileAccess.readPrivateData(at: url, maximumBytes: 128 * 1_048_576),
+              SHA256.hash(data: data).map({ String(format: "%02x", $0) }).joined() == expectedSHA256.lowercased(),
+              let document = PDFDocument(data: data), document.pageCount > 0 else { return nil }
+        return Self(data: data, pageCount: document.pageCount)
+    }
+}
+
+struct SourcePDFPreview: NSViewRepresentable {
     let data: Data
     let sourceID: String
     let pageNumber: Int
