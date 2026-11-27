@@ -1,16 +1,16 @@
 # 搞研究 Windows V4.14
 
-适用于 Windows 10 和 11 x64。Windows 构建号为 2，命令行报告 4.14+2。安装包由 Windows Installer 管理，包含界面和命令行程序。已有 4.14+1 MSI 会按当前用户升级。
+适用于 Windows 10 和 11 x64。Windows 构建号为 3，命令行报告 4.14+3。安装包由 Windows Installer 管理，包含界面和命令行程序。已有 4.14+2 MSI 会按当前用户升级。
 
 ## 安装与资料
 
-1. 下载发行附件 `GaoYanJiu-Windows-4.14-x64.msi` 及同名 `.sha256` 文件。
+1. 下载发行附件 `GaoYanJiu-Windows-4.14-build3-x64.msi` 及同名 `.sha256` 文件。
 2. 在 PowerShell 中计算 SHA-256，与校验文件中的值比较。安装包没有 Authenticode 签名。
-3. 退出旧版搞研究，在当前 Windows 用户下双击 MSI，完成后从开始菜单打开「搞研究」。安装目录是 `%LOCALAPPDATA%\GaoYanJiu\`。
+3. 退出旧版搞研究，在当前 Windows 用户下双击 MSI，完成后从开始菜单打开「搞研究」。默认安装目录为 `%LOCALAPPDATA%\GaoYanJiu\`。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\GaoYanJiu-Windows-4.14-x64.msi
-Get-Content .\GaoYanJiu-Windows-4.14-x64.msi.sha256
+Get-FileHash -Algorithm SHA256 .\GaoYanJiu-Windows-4.14-build3-x64.msi
+Get-Content .\GaoYanJiu-Windows-4.14-build3-x64.msi.sha256
 ```
 
 旧版 Windows 资料继续使用 `%APPDATA%\GaoSeries\Research\AcademicAchievementManager\`。首次使用时需确认创建资料库。若资料确实存在但缺失、损坏或版本不受支持，界面会报告原因并保护原文件。卸载 MSI 保留资料。旧便携版的程序文件可以在验证新版本后自行移除。
@@ -21,14 +21,14 @@ Get-Content .\GaoYanJiu-Windows-4.14-x64.msi.sha256
 
 | 页面 | 可用操作 |
 | --- | --- |
-| 在投管理 | 手动新增、编辑、上下文搜索、拖动排序、查看状态历史、标记已读、归档、恢复追踪及回收站。宽窗口右侧显示门户，窄窗口通过工具栏打开 |
+| 在投管理 | 直接添加稿件和更新状态，按有更新、待跟进、归档和投稿状态筛选。宽窗口右侧显示最近进度、稿件预览和门户。窄窗口通过工具栏打开门户，点稿件标题查看详情 |
 | 投稿门户 | 在工作台的投稿门户打开内嵌 WebView2，登录后主动提取当前稿件，回工作台逐项审核导入。多门户可按顺序刷新 |
 | 待跟进提醒 | 在设置中启用 Windows 系统提醒并设定天数。系统对活跃稿件的同一状态阶段去重，点击打开对应稿件 |
-| 成果管理 | 成果类型、专利子类、署名、日期、编号、链接、PDF/图片附件。提供成果类别、署名和年度图表，两列图表随工作区宽度排列 |
+| 成果管理 | 默认显示成果清单，按需切换统计。维护成果类型、专利子类、署名、日期、编号、链接和 PDF/图片附件 |
 | 刊物指标 | 成果编辑器通过 Crossref 推荐刊名和 ISSN。输入 EasyScholar 密钥后可查询并随成果保存指标 |
-| 实验数据、总结报告、重要文献 | 文件夹、标签、时间和标签排序、拖放与批量上传、去重、文件名及全文搜索、PDF/图片和索引文本预览、下载、编辑和回收站 |
+| 实验数据、总结报告、重要文献 | 并列查看文件夹和文件清单，窄窗在两者之间切换。支持标签、排序、拖放与批量上传、去重、文件名及全文搜索、PDF/图片和索引文本预览、下载、编辑和回收站 |
 | 证书 | 名称、日期、标签、附件、可排序记录表、年度及标签图表 |
-| 研究城 | 三维视角、平移、旋转、缩放，房屋摆件和地形的放置、移动及收回，相邻扩建、祈愿、库存、金币、票券和历史 |
+| 研究城 | 三维场景、镜头控制、地块和库存集中在建造工作台。支持放置、移动、收回、相邻扩建、祈愿、库存、金币、票券和历史 |
 | 桌面小组件 | 从开始菜单打开「搞研究 - 在投状态持续时间」或「搞研究 - 成果与署名分布」。两者使用同一资料库的本地统计快照，点击可定位到主界面 |
 
 全文索引支持常见文本、DOCX/PPTX/XLSX，以及含文字层的 PDF（最大 128 MiB，每份最多索引前 300 页）。扫描件可以送搞操作识别。浏览器单次上传限制为 256 MiB，需要导入更大的单个资料文件时可在文件夹的资料交接菜单中指定本机路径。
@@ -46,20 +46,21 @@ Get-Content .\GaoYanJiu-Windows-4.14-x64.msi.sha256
 
 ## 验收边界
 
-- 在 Windows 11 x64 用隔离数据验收。七页的浅色、深色、宽窄布局及 175% 模拟缩放通过 Chromium 无头回归。Windows 10 和 macOS V4.14 的实机并排截图尚未验收。
-- 内嵌投稿门户使用合成站点验收。真实出版商登录和真实 EasyScholar 密钥尚未验收。
-- Windows 11 已用合成稿件验证通知投递、重启去重、归档后撤回和深链定位。通知中心横幅和鼠标点击另受桌面环境设置影响。
+- 在 Windows 11 x64 用隔离资料验收。七页覆盖浅色和深色，高缩放覆盖 175% 及 150% 窄窗。还检查了长稿名、真实状态变化、设置、加载、错误恢复和通知深链。Windows 10 实机留待复核。
+- Windows Installer 已用隔离的 MSI 标识执行 4.14+2 到 4.14+3 原位升级和卸载。旧资料与附件逐字节保留，正式安装的程序和注册信息通过前后核对。
+- 内嵌投稿门户使用 150% Windows 显示缩放下的合成站点验收，覆盖登录子窗口、主动提取和逐项审核。真实出版商登录和 EasyScholar 密钥尚未验收。
+- 使用独立 Windows 通知标识和合成稿件验证投递、重启去重和归档后撤回。测试关闭了通知横幅，通知深链通过无头工作台验证。
 - 研究城复用原始天空、草地、岩石贴图和原目录标识。建筑与地形用 Canvas 三维几何重建，SceneKit 材质、阴影和部分模型细节有差异。
 - 桌面小组件以独立 Windows 小窗运行，保留统计和链接。Windows 11 Widgets 面板无系统注册。
-- 搞操作 V1.16 x64 安装版已用合成 PNG 和双页 PDF 测试原生 OCR、6 份结果、来源摘要和重复去重。搞文件已用 Windows 源码测试选择和编辑回导，也已验证 V1.11+2 x64 安装版自动打开并核验回执。
+- 本构建用合成 OCR 结果验证先审核后应用及派生件全文检索。上一构建已用搞操作 V1.16 x64 安装版验证合成 PNG 和双页 PDF 原生 OCR、来源摘要及去重，并用搞文件 V1.11+2 x64 安装版验证自动打开并核验回执。
 
 ## 构建与复现
 
-在 Windows x64 上使用干净的 CPython 3.12 环境运行以下命令。正常构建会安装开发依赖、运行回归并输出 MSI 及 SHA-256 到 `windows/dist/`。构建时可通过 `-DistributionDirectory` 写入候选目录，用 `smoke_install.py --upgrade-from` 验证上一轮 MSI 的升级与资料兼容性。GitHub Actions 上传 Windows 构建产物。
+在 Windows x64 上使用干净的 CPython 3.12 环境运行以下命令。正常构建会安装开发依赖、运行回归并输出 MSI 及 SHA-256 到 `windows/dist/`。构建时可通过 `-DistributionDirectory` 写入候选目录。空白用户环境可用 `smoke_install.py --upgrade-from` 验证 MSI 升级和资料兼容性。已有正式安装的用户环境可再加 `--isolate-msi-identity`，使用测试专用的 MSI 标识、注册表键和合成资料验证同样的升级步骤。GitHub Actions 上传 Windows 构建产物。
 
 ```powershell
 pwsh -File .\windows\build.ps1 -Python C:\path\to\venv\Scripts\python.exe
-python .\windows\tests\smoke_install.py .\windows\dist\GaoYanJiu-Windows-4.14-x64.msi
+python .\windows\tests\smoke_install.py .\windows\dist\GaoYanJiu-Windows-4.14-build3-x64.msi
 node .\windows\tests\smoke_browser.mjs "C:\Program Files\Google\Chrome\Application\chrome.exe" C:\path\to\venv\Scripts\python.exe
 ```
 

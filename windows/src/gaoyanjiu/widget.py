@@ -121,7 +121,7 @@ def launch_widget(data_dir: Path, page: str) -> None:
 
 def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> dict | None:
     import tkinter as tk
-    from tkinter import font
+    from tkinter import font, ttk
 
     if sys.platform == "win32":
         import ctypes
@@ -136,37 +136,46 @@ def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> 
     window.title("搞研究")
     scaling = float(window.tk.call("tk", "scaling"))
     dpi_factor = scaling / (96 / 72)
-    window.geometry(f"{round(500 * dpi_factor)}x{round(310 * dpi_factor)}")
-    window.minsize(round(340 * dpi_factor), round(230 * dpi_factor))
+
+    def px(value):
+        return max(1, round(value * dpi_factor))
+
+    window.geometry(f"{px(500)}x{px(320)}")
+    window.minsize(px(340), px(235))
     if getattr(sys, "frozen", False):
         icon = Path(sys._MEIPASS) / "gaoyanjiu_assets" / "AcademicAchievementManagerIcon.png"
     else:
         icon = Path(__file__).resolve().parents[3] / "Resources" / "AcademicAchievementManagerIcon.png"
     if icon.is_file():
         window.iconphoto(True, tk.PhotoImage(file=icon))
+    available_families = {family.casefold() for family in font.families(window)}
+    family = next((name for name in ("Microsoft YaHei UI", "Microsoft YaHei", "DengXian", "SimHei")
+                   if name.casefold() in available_families), "TkDefaultFont")
+    headings = font.Font(family=family, size=12, weight="bold")
+    normal = font.Font(family=family, size=10)
+    bold = font.Font(family=family, size=10, weight="bold")
+    footnote = font.Font(family=family, size=9)
+    style = ttk.Style(window)
+    style.theme_use("clam")
     canvas = tk.Canvas(window, highlightthickness=0, takefocus=True, relief="flat")
     toolbar = tk.Frame(window)
-    toolbar.pack(fill="x", padx=round(12 * dpi_factor), pady=(round(8 * dpi_factor), 0))
-    canvas.pack(expand=True, fill="both", padx=round(12 * dpi_factor),
-                pady=(round(3 * dpi_factor), round(8 * dpi_factor)))
-    headings = font.Font(family="Microsoft YaHei UI", size=11, weight="bold")
-    normal = font.Font(family="Microsoft YaHei UI", size=9)
-    footnote = font.Font(family="Microsoft YaHei UI", size=8)
+    toolbar.pack(fill="x", padx=px(10), pady=(px(9), 0))
+    canvas.pack(expand=True, fill="both", padx=px(10), pady=(px(8), px(10)))
     state = {"page": initial_page, "document": {}, "readAt": "", "cached": False}
 
     def select(page: str) -> None:
         state["page"] = page
         paint()
 
-    buttons = [tk.Button(toolbar, command=lambda page=page: select(page), relief="flat", padx=8, pady=4)
+    buttons = [ttk.Button(toolbar, command=lambda page=page: select(page), takefocus=True)
                for page in PAGES]
     for button in buttons:
-        button.pack(side="left")
+        button.pack(side="left", padx=(0, px(4)))
+
     def open_page(_event=None) -> None:
         _launch(data_dir, "gaoyanjiu://" + state["page"])
 
-    open_button = tk.Button(toolbar, command=open_page,
-                            relief="flat", padx=8, pady=4)
+    open_button = ttk.Button(toolbar, command=open_page, takefocus=True)
     open_button.pack(side="right")
     canvas.bind("<Double-1>", open_page)
     canvas.bind("<Return>", open_page)
@@ -175,36 +184,52 @@ def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> 
         document = state["document"]
         english = document.get("language") == "en"
         dark = _dark_mode(document.get("appearance", "system"))
-        bg, card, fg, muted, selected, line = (
-            ("#202023", "#27272b", "#f3f3f3", "#b8b8c1", "#343b51", "#373a45") if dark
-            else ("#f0f1f4", "#fbfbfd", "#23252a", "#5c5e66", "#dbe8ff", "#e5e9f2")
+        bg, card, raised, fg, muted, selected, line, accent, accent_text, note, urgent = (
+            ("#131b21", "#1d2931", "#24323a", "#eef5f6", "#aebfc7", "#24423f", "#3a4a53", "#7bd6c2", "#102a28", "#f3bd74", "#ffaaa5") if dark
+            else ("#eef2f4", "#ffffff", "#f5f8f8", "#1f2c33", "#52646e", "#e0f0ec", "#d4dfe1", "#12665a", "#ffffff", "#8b5413", "#a93136")
         )
-        blue, teal = ("#85b7ff", "#53d4ce") if dark else ("#1474d4", "#007d79")
-        labels = ("Submissions", "Achievements", "Open") if english else ("在投状态", "成果统计", "打开")
+        secondary = "#84bbe6" if dark else "#256b96"
+        labels = ("Submissions", "Achievements", "Open app") if english else ("在投状态", "成果统计", "打开工作台")
         window.configure(bg=bg)
         toolbar.configure(bg=bg)
-        canvas.configure(bg=card)
+        canvas.configure(bg=card, highlightbackground=line, highlightcolor=accent, highlightthickness=px(1))
+        for key, surface, color, border, hover in (
+            ("WidgetTab.TButton", bg, muted, bg, raised),
+            ("WidgetSelected.TButton", selected, accent, line, selected),
+            ("WidgetOpen.TButton", accent, accent_text, accent, accent),
+        ):
+            style.configure(key, width=0, font=normal, padding=(px(9), px(4)), relief="flat", foreground=color,
+                            background=surface, bordercolor=border, lightcolor=surface, darkcolor=surface, focuscolor=color)
+            style.map(key, background=[("active", hover)], bordercolor=[("focus", accent), ("active", line)])
         for button, text, active in zip([*buttons, open_button], labels, [
             state["page"] == "submissions", state["page"] == "works", False,
         ]):
-            button.configure(text=text, font=normal, bg=selected if active else bg, fg=fg,
-                             activebackground=selected, activeforeground=fg)
+            kind = "WidgetOpen.TButton" if button is open_button else "WidgetSelected.TButton" if active else "WidgetTab.TButton"
+            button.configure(text=text, style=kind)
         canvas.delete("all")
         width, height = dimensions or (canvas.winfo_width(), canvas.winfo_height())
-        margin = max(10, round(headings.metrics("linespace") * .68))
-        offset = margin
-        right = width - margin
+        margin = px(11)
+        right = width - margin - px(1)
+        if width <= margin * 2 or height <= margin * 2:
+            return
 
         def text(x, y, value, color=fg, face=normal, anchor="nw", limit=None):
             value = str(value)[:512].replace("\n", " ")
             if limit is not None and face.measure(value) > limit:
-                while value and face.measure(value + "…") > limit:
-                    value = value[:-1]
-                value += "…"
+                if limit < face.measure("…"):
+                    return
+                lower, upper = 0, len(value)
+                while lower < upper:
+                    cursor = (lower + upper + 1) // 2
+                    if face.measure(value[:cursor] + "…") <= limit:
+                        lower = cursor
+                    else:
+                        upper = cursor - 1
+                value = value[:lower] + "…"
             canvas.create_text(x, y, text=value, fill=color, font=face, anchor=anchor)
 
         def bar(x, y, span, fraction, color):
-            thickness = max(3, round(normal.metrics("linespace") / 4))
+            thickness = px(3)
             canvas.create_rectangle(x, y, x + span, y + thickness, fill=line, width=0)
             if fraction:
                 canvas.create_rectangle(x, y, x + max(2, span * fraction), y + thickness, fill=color, width=0)
@@ -212,47 +237,54 @@ def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> 
         submissions = state["page"] == "submissions"
         title = (("Submission duration" if english else "在投状态持续时间") if submissions
                  else ("Research achievements" if english else "成果与署名分布"))
-        text(margin, offset, title, face=headings, limit=max(0, width - margin * 4))
         total = len(document.get("papers", [])) if submissions else document.get("works", 0)
-        text(right, offset, total, color=blue, face=headings, anchor="ne")
-        offset += headings.metrics("linespace") + margin // 2
-        footer_y = height - margin - footnote.metrics("linespace")
-        available = max(0, footer_y - offset - margin // 2)
+        quantity = (f"{total} papers" if submissions else f"{total} items") if english else f"{total} {'篇' if submissions else '项'}"
+        text(margin, margin, title, face=headings, limit=right - margin - bold.measure(quantity) - px(14))
+        text(right, margin + px(1), quantity, color=accent, face=bold, anchor="ne")
+        offset = margin + headings.metrics("linespace") + px(12)
+        footer_y = height - px(8) - footnote.metrics("linespace")
+        canvas.create_line(margin, offset - px(5), right, offset - px(5), fill=line)
+        available = max(0, footer_y - offset - px(9))
         line_height = normal.metrics("linespace")
-        row_min = line_height + max(7, line_height // 2)
+        row_min = line_height + px(11)
         footer_extra = ""
         if not document.get("statisticsRevision"):
-            text(width / 2, height / 2, "请先打开搞研究，同步小组件数据。" if not english else
-                 "Open the app to sync statistics.", color=muted, anchor="center")
+            text(width / 2, height / 2, "打开工作台以同步数据。" if not english else
+                 "Open the app to sync statistics.", color=muted, anchor="center", limit=right - margin)
         elif submissions:
             rows = paper_rows(document, utcnow())
             maximum = max([1, *(row["days"] for row in rows)])
             visible = rows[:available // row_min]
             if not rows:
-                text(width / 2, height / 2, "No submissions" if english else "暂无在投论文", color=muted, anchor="center")
+                text(width / 2, height / 2, "No submissions" if english else "暂无在投论文", color=muted, anchor="center", limit=right - margin)
             if visible and len(visible) < len(rows):
                 footer_extra = f"Newest {len(visible)}/{len(rows)}" if english else f"最新 {len(visible)}/{len(rows)} 篇"
-            row_height = available / max(1, len(visible))
+            row_height = min(px(46), available / max(1, len(visible)))
             for index, row in enumerate(visible):
                 y = offset + index * row_height
                 days = row["days"]
-                color = muted if row.get("terminal") else "#d95352" if days >= 90 else "#d88323" if days >= 60 else blue
-                duration = f"{days}{'d' if english else '天'}"
-                span = right - margin - normal.measure(duration) - margin
-                text(margin, y, row.get("title", ""), limit=max(0, span))
-                text(right, y, duration, color=color, anchor="ne")
-                bar(margin, y + line_height + 2, span, days / maximum, color)
+                duration = f"{days} {'d' if english else '天'}"
+                color = muted if row.get("terminal") else urgent if days >= 90 else note if days >= 60 else accent
+                if not row.get("terminal") and days >= 60:
+                    flag = ("Overdue" if days >= 90 else "Watch") if english else ("超期" if days >= 90 else "关注")
+                    duration = f"{flag} · {duration}"
+                duration_width = bold.measure(duration)
+                text(margin, y, row.get("title", ""), limit=max(0, right - margin - duration_width - px(11)))
+                text(right, y, duration, color=color, face=bold, anchor="ne")
+                bar(margin, y + line_height + px(3), right - margin, days / maximum, color)
         else:
-            gap = margin
+            gap = px(18)
             span = (right - margin - gap) / 2
+            canvas.create_line(margin + span + gap / 2, offset, margin + span + gap / 2,
+                               max(offset, footer_y - px(8)), fill=line)
             for index, (key, heading, color) in enumerate((
-                ("categories", "Categories" if english else "成果类别", blue),
-                ("authors", "Authorship" if english else "我的署名", teal),
+                ("categories", "Categories" if english else "成果类别", accent),
+                ("authors", "Authorship" if english else "我的署名", secondary),
             )):
                 x = margin + index * (span + gap)
-                text(x, offset, heading, face=normal)
+                text(x, offset, heading, face=bold, limit=span)
                 rows = document.get(key, [])
-                row_space = max(0, available - line_height - 4)
+                row_space = max(0, available - line_height - px(7))
                 visible = rows[:row_space // row_min]
                 maximum = max([1, *(row["count"] for row in rows)])
                 if not rows:
@@ -260,17 +292,18 @@ def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> 
                 if len(visible) < len(rows):
                     footer_extra = "Enlarge to see all" if english else "放大查看全部"
                 for row_index, row in enumerate(visible):
-                    y = offset + line_height + 4 + row_index * row_space / len(visible)
+                    y = offset + line_height + px(7) + row_index * min(px(44), row_space / len(visible))
                     text(x, y, row["label"], limit=max(0, span - normal.measure(f'{row["count"]}  ')))
-                    text(x + span, y, row["count"], color=color, anchor="ne")
-                    bar(x, y + line_height + 2, span, row["count"] / maximum, color)
+                    text(x + span, y, row["count"], color=color, face=bold, anchor="ne")
+                    bar(x, y + line_height + px(3), span, row["count"] / maximum, color)
         if document.get("dataChangedAt"):
             baseline = document.get("dataChangedAtBasis") == "source-write-baseline"
             prefix = (("Baseline" if baseline else "Stats") if english else ("统计基准" if baseline else "统计更新"))
             read_prefix = (("Saved read" if state["cached"] else "Read") if english
                            else ("缓存读取" if state["cached"] else "读取"))
-            text(margin, footer_y, f'{prefix} {document["dataChangedAt"][:10]}   {read_prefix} {state["readAt"]}',
-                 color=muted, face=footnote, limit=max(0, width - 2 * margin - footnote.measure(footer_extra) - 6))
+            canvas.create_line(margin, footer_y - px(4), right, footer_y - px(4), fill=line)
+            text(margin, footer_y, f'{prefix} {document["dataChangedAt"][:10]}  ·  {read_prefix} {state["readAt"]}',
+                 color=muted, face=footnote, limit=max(0, right - margin - footnote.measure(footer_extra) - px(6)))
             text(right, footer_y, footer_extra, color=muted, face=footnote, anchor="ne")
 
     def refresh() -> None:
@@ -293,7 +326,7 @@ def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> 
                 for appearance in ("light", "dark"):
                     state["document"]["appearance"] = appearance
                     for size in ((340, 200), (500, 280), (750, 420)):
-                        paint(dimensions=size)
+                        paint(dimensions=tuple(px(value) for value in size))
                         layouts.append({"page": page, "appearance": appearance, "size": size,
                                         "color": canvas.cget("bg"), "items": len(canvas.find_all())})
             return {"tk": tk.TkVersion, "scaling": scaling, "layouts": layouts}

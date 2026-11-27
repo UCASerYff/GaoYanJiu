@@ -9,6 +9,7 @@ import json
 import msilib
 import os
 import re
+import shutil
 import stat
 import struct
 import subprocess
@@ -23,6 +24,10 @@ from urllib.request import ProxyHandler, Request, build_opener
 NO_WINDOW = subprocess.CREATE_NO_WINDOW
 NOTIFICATION_KEY = r"Software\Classes\AppUserModelId\GaoSeries.GaoYanJiu"
 NOTIFICATION_ACTIVATOR = "{F35C7BDD-954B-41DD-A863-F60CC0C192D7}"
+INSTALL_STATE_KEY = r"Software\GaoSeries\GaoYanJiu"
+PROTOCOL_KEY = r"Software\Classes\gaoyanjiu"
+PAYLOAD_COMPONENT = "GaoYanJiuFiles"
+SHELL_COMPONENTS = {"GaoYanJiuProtocol", "GaoYanJiuNotificationIdentity", "GaoYanJiuShortcuts"}
 
 
 def msi_property(database, name: str) -> str:
@@ -225,7 +230,166 @@ def installer_identity(package: Path) -> tuple[str, str, str]:
     return product_code, upgrade_code, version
 
 
-def smoke(package: Path, legacy: Path | None, register_shell: bool, previous: Path | None = None) -> None:
+def _msi_rows(database, sql: str, fields: int, integers=()) -> list[tuple]:
+    view = database.OpenView(sql)
+    try:
+        view.Execute(None)
+        rows = []
+        while record := view.Fetch():
+            rows.append(tuple(record.GetInteger(index) if index in integers else record.GetString(index)
+                              for index in range(1, fields + 1)))
+        return rows
+    finally:
+        view.Close()
+
+
+def _msi_execute(database, sql: str, *values) -> None:
+    view = database.OpenView(sql)
+    try:
+        record = None
+        if values:
+            record = msilib.CreateRecord(len(values))
+            for index, value in enumerate(values, 1):
+                if isinstance(value, int):
+                    record.SetInteger(index, value)
+                elif value is not None:
+                    record.SetString(index, value)
+        view.Execute(record)
+    finally:
+        view.Close()
+
+
+def _msi_code(value: uuid.UUID) -> str:
+    return "{" + str(value).upper() + "}"
+
+
+def _related_products(upgrade_code: str) -> tuple[str, ...]:
+    codes = []
+    while True:
+        product = ctypes.create_unicode_buffer(39)
+        result = ctypes.windll.msi.MsiEnumRelatedProductsW(upgrade_code, 0, len(codes), product)
+        if result == 259:
+            return tuple(sorted(codes))
+        if result != 0:
+            raise OSError(result, "MsiEnumRelatedProductsW failed")
+        codes.append(product.value)
+
+
+def _program_fingerprint(path: Path) -> tuple[int, str] | None:
+    if not path.is_file():
+        return None
+    with path.open("rb") as handle:
+        return path.stat().st_size, hashlib.file_digest(handle, "sha256").hexdigest()
+
+
+def _canonical_msi_state(upgrade_code: str, menu: Path) -> tuple:
+    install_path = read_registry(INSTALL_STATE_KEY, "InstallPath")
+    locations = {Path(os.environ["LOCALAPPDATA"]) / "GaoYanJiu"}
+    if isinstance(install_path, str) and Path(install_path).is_absolute():
+        locations.add(Path(install_path))
+    files = tuple((str(directory), name, _program_fingerprint(directory / name))
+                  for directory in sorted(locations)
+                  for name in ("GaoYanJiu.exe", "GaoYanJiu-cli.exe", "ThirdPartyNotices.txt"))
+    shortcuts = tuple((item.name, _program_fingerprint(item)) for item in sorted(menu.glob("*.lnk")))
+    products = tuple((code, ctypes.windll.msi.MsiQueryProductStateW(code)) for code in _related_products(upgrade_code))
+    return (products, install_path, files, shortcuts, registry_key_exists(INSTALL_STATE_KEY),
+            read_registry(INSTALL_STATE_KEY, "Shortcuts"), registry_key_exists(PROTOCOL_KEY),
+            read_registry(PROTOCOL_KEY), read_registry(PROTOCOL_KEY, "URL Protocol"),
+            read_registry(PROTOCOL_KEY + r"\DefaultIcon"), read_registry(PROTOCOL_KEY + r"\shell\open\command"),
+            registry_key_exists(NOTIFICATION_KEY),
+            read_registry(NOTIFICATION_KEY, "CustomActivator"), read_registry(NOTIFICATION_KEY, "DisplayName"))
+
+
+def _isolate_installer(package: Path, destination: Path, namespace: uuid.UUID, state_key: str) -> tuple[str, str]:
+    source_product, source_upgrade, source_version = installer_identity(package)
+    expected_digest = package.with_suffix(".msi.sha256").read_text(encoding="ascii").split()[0]
+    shutil.copyfile(package, destination)
+    assert _program_fingerprint(destination)[1] == expected_digest
+    product = _msi_code(uuid.uuid5(namespace, "product:" + source_product))
+    upgrade = _msi_code(uuid.uuid5(namespace, "upgrade:" + source_upgrade))
+    package_code = _msi_code(uuid.uuid4())
+    database = msilib.OpenDatabase(str(destination), msilib.MSIDBOPEN_TRANSACT)
+
+    # Fail closed if future packages acquire system-wide installation tables
+    # or a different custom-action/component topology.
+    tables = {item[0] for item in _msi_rows(database, "SELECT `Name` FROM `_Tables`", 1)}
+    excluded = {"Class", "ProgId", "TypeLib", "Extension", "Verb", "MIME", "Environment",
+                "ServiceControl", "ServiceInstall", "DuplicateFile", "MoveFile", "RemoveRegistry",
+                "SelfReg", "IniFile", "RemoveIniFile", "ODBCDataSource", "CreateFolder", "MsiLockPermissionsEx"}
+    assert not tables & excluded, tables & excluded
+    properties = dict(_msi_rows(database, "SELECT `Property`, `Value` FROM `Property`", 2))
+    assert properties.get("ALLUSERS") in (None, ""), "Only per-user MSIs can be cloned"
+    assert properties.get("GAOYANJIU_STATE_KEY") == INSTALL_STATE_KEY
+    components = _msi_rows(database, "SELECT `Component`, `ComponentId`, `Condition`, `Directory_` FROM `Component`", 4)
+    assert PAYLOAD_COMPONENT in {name for name, _, _, _ in components}
+    for name, original, condition, directory in components:
+        assert name in SHELL_COMPONENTS or name == PAYLOAD_COMPONENT, name
+        assert directory == ("GaoYanJiuMenuFolder" if name == "GaoYanJiuShortcuts" else "INSTALLFOLDER"), name
+        assert condition == ("NOT GAOYANJIU_TEST_INSTALL" if name in SHELL_COMPONENTS else ""), name
+        uuid.UUID(original)
+        replacement = _msi_code(uuid.uuid5(namespace, "component:" + original.upper()))
+        _msi_execute(database, "UPDATE `Component` SET `ComponentId`= ? WHERE `Component`= ?", replacement, name)
+        if name in SHELL_COMPONENTS:
+            _msi_execute(database, "UPDATE `Component` SET `Condition`= ? WHERE `Component`= ?", "0", name)
+    keys = _msi_rows(database, "SELECT `Root`, `Key`, `Component_` FROM `Registry`", 3, integers=(1,))
+    for root, key, component in keys:
+        assert root == 1
+        assert (component == PAYLOAD_COMPONENT and key == "[GAOYANJIU_STATE_KEY]") or component in SHELL_COMPONENTS
+    for (component,) in _msi_rows(database, "SELECT `Component_` FROM `Shortcut`", 1):
+        assert component in SHELL_COMPONENTS
+    assert set(_msi_rows(database, "SELECT `File`, `Component_` FROM `File`", 2)) == {
+        (file, PAYLOAD_COMPONENT) for file in ("GaoYanJiuApp", "GaoYanJiuCli", "GaoYanJiuNotices")
+    }
+    for component, directory in _msi_rows(database, "SELECT `Component_`, `DirProperty` FROM `RemoveFile`", 2):
+        assert directory in {"INSTALLFOLDER", "GaoYanJiuMenuFolder"} and component in {PAYLOAD_COMPONENT, "GaoYanJiuShortcuts"}
+    if "CustomAction" in tables:
+        actions = _msi_rows(database, "SELECT `Action`, `Source`, `Target` FROM `CustomAction`", 3)
+        for action, source, target in actions:
+            assert (action, source, target) == ("ClearGaoYanJiuReminders", "GaoYanJiuCli", "--clear-reminders")
+            _msi_execute(database, "UPDATE `InstallExecuteSequence` SET `Condition`= ? WHERE `Action`= ?", "0", action)
+
+    for name, value in {"ProductCode": product, "UpgradeCode": upgrade, "GAOYANJIU_STATE_KEY": state_key,
+                        "GAOYANJIU_TEST_INSTALL": "1"}.items():
+        if name in properties:
+            _msi_execute(database, "UPDATE `Property` SET `Value`= ? WHERE `Property`= ?", value, name)
+        else:
+            _msi_execute(database, "INSERT INTO `Property` (`Property`, `Value`) VALUES (?, ?)", name, value)
+    for directory, suffix in {"INSTALLFOLDER": "payload", "GaoYanJiuMenuFolder": "menu"}.items():
+        name = f"GaoYanJiu.InstallSmoke.{namespace.hex}.{suffix}"
+        _msi_execute(database, "UPDATE `Directory` SET `DefaultDir`= ? WHERE `Directory`= ?", name, directory)
+    final_directories = dict(_msi_rows(database, "SELECT `Directory`, `Directory_Parent` FROM `Directory`", 2))
+    assert final_directories["INSTALLFOLDER"] == "LocalAppDataFolder"
+    assert final_directories["GaoYanJiuMenuFolder"] == "ProgramMenuFolder"
+
+    columns = "`UpgradeCode`, `VersionMin`, `VersionMax`, `Language`, `Attributes`, `Remove`, `ActionProperty`"
+    related = _msi_rows(database, f"SELECT {columns} FROM `Upgrade`", 7, integers=(5,))
+    assert related and {row[0] for row in related} == {source_upgrade}
+    assert {row[-1] for row in related} == {"WIX_UPGRADE_DETECTED", "WIX_DOWNGRADE_DETECTED"}
+    _msi_execute(database, "DELETE FROM `Upgrade`")
+    for row in related:
+        _msi_execute(database, f"INSERT INTO `Upgrade` ({columns}) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                     upgrade, *(value if value != "" else None for value in row[1:]))
+    summary = database.GetSummaryInformation(1)
+    summary.SetProperty(9, package_code)
+    summary.Persist()
+    database.Commit()
+    del summary, database
+
+    final = msilib.OpenDatabase(str(destination), msilib.MSIDBOPEN_READONLY)
+    assert msi_property(final, "ProductCode") == product and msi_property(final, "UpgradeCode") == upgrade
+    assert msi_property(final, "ProductVersion") == source_version
+    assert msi_property(final, "GAOYANJIU_STATE_KEY") == state_key and msi_property(final, "GAOYANJIU_TEST_INSTALL") == "1"
+    assert _msi_rows(final, "SELECT `UpgradeCode` FROM `Upgrade`", 1) == [(upgrade,), (upgrade,)]
+    observed = final.GetSummaryInformation(0).GetProperty(9)
+    assert (observed.decode("ascii") if isinstance(observed, bytes) else observed) == package_code
+    assert ctypes.windll.msi.MsiQueryProductStateW(product) == -1
+    return product, upgrade
+
+
+def smoke(package: Path, legacy: Path | None, register_shell: bool, previous: Path | None = None,
+          isolate_identity: bool = False) -> None:
+    if isolate_identity and not __debug__:
+        raise RuntimeError("Run the isolated MSI test with Python assertions enabled.")
     product_code, upgrade_code, version = installer_identity(package)
     expected_version = "+".join(version.rsplit(".", 1))
     previous_code = None
@@ -233,18 +397,20 @@ def smoke(package: Path, legacy: Path | None, register_shell: bool, previous: Pa
         previous_code, previous_upgrade, previous_version = installer_identity(previous)
         assert previous_upgrade == upgrade_code and previous_code != product_code
         assert tuple(map(int, previous_version.split("."))) < tuple(map(int, version.split(".")))
-    unrelated = ctypes.create_unicode_buffer(39)
-    if ctypes.windll.msi.MsiEnumRelatedProductsW(upgrade_code, 0, 0, unrelated) != 259:
+    if isolate_identity and register_shell:
+        raise ValueError("The isolated MSI identity must skip shell registration.")
+    if not isolate_identity and _related_products(upgrade_code):
         raise RuntimeError("An existing MSI installation prevents isolated installation testing")
-    protocol = r"Software\Classes\gaoyanjiu"
+    protocol = PROTOCOL_KEY
     menu = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/搞研究"
-    if (register_shell or previous) and (registry_key_exists(protocol) or registry_key_exists(NOTIFICATION_KEY) or menu.exists()):
+    if not isolate_identity and (register_shell or previous) and (registry_key_exists(protocol) or registry_key_exists(NOTIFICATION_KEY) or menu.exists()):
         raise RuntimeError("Existing GaoYanJiu shell resources prevent isolated registration testing")
-    if previous:
+    if previous and not isolate_identity:
         installed_dir = Path(os.environ["LOCALAPPDATA"]) / "GaoYanJiu"
         if installed_dir.exists() or registry_key_exists(r"Software\GaoSeries\GaoYanJiu"):
             raise RuntimeError("Existing default install resources prevent isolated MSI upgrade testing")
 
+    canonical = _canonical_msi_state(upgrade_code, menu) if isolate_identity else None
     with tempfile.TemporaryDirectory(prefix="GaoYanJiu-install-") as directory:
         root = Path(directory)
         install = root / "安装 # Windows"
@@ -254,7 +420,18 @@ def smoke(package: Path, legacy: Path | None, register_shell: bool, previous: Pa
         env = dict(os.environ, GAO_RESEARCH_DATA_DIR=str(profile), PYTHONUTF8="1", TEMP=str(runtime), TMP=str(runtime))
         cli = install / "GaoYanJiu-cli.exe"
         app = install / "GaoYanJiu.exe"
-        key = rf"Software\GaoSeries\GaoYanJiu.InstallSmoke.{uuid.uuid4().hex}"
+        namespace = uuid.uuid4()
+        key = rf"Software\GaoSeries\GaoYanJiu.InstallSmoke.{namespace.hex}"
+        if isolate_identity:
+            clone = root / "candidate-isolated.msi"
+            product_code, temporary_upgrade = _isolate_installer(package, clone, namespace, key)
+            package = clone
+            if previous:
+                clone = root / "previous-isolated.msi"
+                previous_code, previous_upgrade = _isolate_installer(previous, clone, namespace, key)
+                assert previous_upgrade == temporary_upgrade and previous_code != product_code
+                previous = clone
+            assert not _related_products(temporary_upgrade)
         properties = [f"INSTALLFOLDER={install}", f"GAOYANJIU_STATE_KEY={key}"]
         if not register_shell:
             properties.append("GAOYANJIU_TEST_INSTALL=1")
@@ -291,14 +468,18 @@ def smoke(package: Path, legacy: Path | None, register_shell: bool, previous: Pa
             exercise(install, profile, fixture, env, expected_version)
             data_hash = hashlib.sha256(library.read_bytes()).hexdigest()
         finally:
-            for code in (product_code, previous_code):
-                if code and ctypes.windll.msi.MsiQueryProductStateW(code) == 5:
-                    msi_run(root, "/x", code, properties, "-candidate" if code == product_code else "-previous")
-            assert read_registry(key, "InstallPath") is None
             try:
-                winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
-            except FileNotFoundError:
-                pass
+                for code in (product_code, previous_code):
+                    if code and ctypes.windll.msi.MsiQueryProductStateW(code) == 5:
+                        msi_run(root, "/x", code, properties, "-candidate" if code == product_code else "-previous")
+                assert read_registry(key, "InstallPath") is None
+                try:
+                    winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
+                except FileNotFoundError:
+                    pass
+            finally:
+                if canonical is not None:
+                    assert _canonical_msi_state(upgrade_code, menu) == canonical, "Canonical MSI or shell state changed"
         assert not app.exists() and not cli.exists()
         assert hashlib.sha256(library.read_bytes()).hexdigest() == data_hash
         assert attachment.read_bytes() == b"Trusted synthetic legacy attachment"
@@ -310,6 +491,8 @@ def smoke(package: Path, legacy: Path | None, register_shell: bool, previous: Pa
         print("Legacy Windows data passed: install preserves bytes; current app retains project, funding, unknown fields and city")
     if previous:
         print("MSI upgrade passed: earlier build was removed and legacy data and attachment bytes were preserved")
+    if isolate_identity:
+        print(f"Isolated identities passed: {len(canonical[0])} canonical products and their shell registrations were preserved")
     if register_shell:
         print("Shell registration passed: deep link, three Start menu shortcuts, and notification identity installed and removed")
 
@@ -321,6 +504,8 @@ if __name__ == "__main__":
     sources.add_argument("--legacy-cli", type=Path)
     sources.add_argument("--upgrade-from", type=Path)
     parser.add_argument("--register-shell", action="store_true", help="Use only on a disposable Windows account.")
+    parser.add_argument("--isolate-msi-identity", action="store_true", help="Use temporary MSI identities and skip shell registration.")
     args = parser.parse_args()
     smoke(args.package.resolve(strict=True), args.legacy_cli.resolve(strict=True) if args.legacy_cli else None,
-          args.register_shell, args.upgrade_from.resolve(strict=True) if args.upgrade_from else None)
+          args.register_shell, args.upgrade_from.resolve(strict=True) if args.upgrade_from else None,
+          args.isolate_msi_identity)

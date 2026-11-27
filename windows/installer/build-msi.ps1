@@ -36,7 +36,7 @@ $productId = & $Python -c 'import sys, uuid; print(uuid.uuid5(uuid.NAMESPACE_URL
 if ($LASTEXITCODE -ne 0) { throw 'Could not derive the MSI product identifier' }
 $source = Join-Path $PSScriptRoot 'GaoYanJiu.wxs'
 $object = Join-Path $WorkDirectory 'GaoYanJiu.wixobj'
-$fileName = "GaoYanJiu-Windows-$MarketingVersion-x64.msi"
+$fileName = "GaoYanJiu-Windows-$MarketingVersion-build$BuildNumber-x64.msi"
 $package = Join-Path $DistributionDirectory $fileName
 
 & (Join-Path $wix 'candle.exe') -nologo -arch x64 -out $object "-dPayloadDir=$PayloadDirectory" "-dIconFile=$IconFile" `

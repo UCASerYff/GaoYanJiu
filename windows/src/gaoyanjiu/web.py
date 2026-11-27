@@ -84,7 +84,10 @@ class Api:
                 store.reminders.submit(store)
             return 200, self._bootstrap()
         if path == "/api/papers" and method == "GET":
-            return 200, {"papers": store.list_papers(query.get("scope", "all"), query.get("q", ""))}
+            return 200, {
+                "papers": store.list_papers(query.get("scope", "all"), query.get("q", "")),
+                "followUpKeys": [paper["key"] for paper in store.follow_ups()],
+            }
         if path == "/api/papers" and method == "POST":
             key = store.save_paper(
                 body.get("key") or None,
@@ -574,7 +577,7 @@ class ResearchHandler(BaseHTTPRequestHandler):
             mime = "text/html; charset=utf-8"
         else:
             name = path.removeprefix("/assets/")
-            if name not in {"app.js", "submissions.js", "records.js", "library-ui.js", "style.css",
+            if name not in {"app.js", "submissions.js", "records.js", "library-ui.js", "style.css", "submissions.css", "collections.css",
                             "exchange.js", "city.js", "city-scene.js", "city.css"} and name not in REUSED_ASSETS:
                 self._json(404, {"error": "not_found", "message": "not found"})
                 return

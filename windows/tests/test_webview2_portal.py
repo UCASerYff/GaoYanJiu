@@ -4,6 +4,7 @@ import os
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
 import pytest
 
@@ -46,20 +47,33 @@ class _Publisher(BaseHTTPRequestHandler):
             self.send_header("Location", "/dashboard?auth=synthetic-token")
             self.end_headers()
             return
+        if self.path.startswith("/gao-fixture-sign-in"):
+            self._html("""<!doctype html><meta charset="utf-8"><title>合成登录</title>
+            <style>:root{color-scheme:light dark}body{font:16px 'Segoe UI',sans-serif;margin:2rem;color:CanvasText;background:Canvas}
+            label{display:block;margin:1rem 0}</style>
+            <h1>合成投稿站 · 登录</h1><form><label>账号 <input value="demo" disabled></label>
+            <label>口令 <input type="password" disabled></label></form>""")
+            return
         if self.path.startswith("/dashboard") and "gaoFixture=synthetic" in self.headers.get("Cookie", ""):
-            html = """<!doctype html><meta charset="utf-8"><title>Fixture Journal</title>
+            self._html("""<!doctype html><meta charset="utf-8"><title>Fixture Journal</title>
+            <style>:root{color-scheme:light dark}body{font:16px 'Segoe UI',sans-serif;margin:2rem;color:CanvasText;background:Canvas}
+            table{border-collapse:collapse;width:100%}td,th{text-align:left;padding:10px;border-bottom:1px solid #849498}</style>
+            <h1>合成投稿站 · 稿件列表</h1>
             <script>window.PaperSignalExtractor = Object.freeze({extract: async () => ({papers: []})});</script>
             <table><thead><tr><th>Manuscript ID</th><th>Title</th><th>Journal</th><th>Status</th></tr></thead>
             <tbody><tr><td>DEMO-001</td><td>A synthetic article about WebView2</td><td>Fixture Journal</td><td>Under review</td></tr>
             <tr><td>DEMO-002</td><td>A second synthetic article</td><td>Fixture Journal</td><td>Accepted</td></tr></tbody></table>
-            """.encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "text/html; charset=utf-8")
-            self.send_header("Content-Length", str(len(html)))
-            self.end_headers()
-            self.wfile.write(html)
+            """)
             return
         self.send_error(404)
+
+    def _html(self, text):
+        html = text.encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(html)))
+        self.end_headers()
+        self.wfile.write(html)
 
     def log_message(self, message, *args):
         pass
@@ -73,14 +87,17 @@ def _run(server):
 
 @pytest.mark.skipif(os.name != "nt" or os.environ.get("GAO_WEBVIEW2_SMOKE") != "1",
                     reason="opt-in Windows WebView2 integration with a built native helper")
-def test_native_webview2_extract_review_and_store(tmp_path):
+@pytest.mark.parametrize("appearance", ["light", "dark"])
+def test_native_webview2_extract_review_and_store(tmp_path, appearance):
     library = Library(tmp_path / "synthetic").open()
     library.create_empty()
     store = ResearchStore(library)
+    store.settings["appearance"] = appearance
     with ThreadingHTTPServer(("127.0.0.1", 0), _Publisher) as publisher, make_server(store) as server:
         publisher_thread = _run(publisher)
         app_thread = _run(server)
-        browser = PortalBrowser(store, asset_dir(), probe_loopback=True)
+        probe_helper = os.environ.get("GAO_WEBVIEW2_SMOKE_HELPER")
+        browser = PortalBrowser(store, asset_dir(), helper_path=Path(probe_helper) if probe_helper else None, probe_loopback=True)
         server.api.portal_browser = browser
         connection = http.client.HTTPConnection("127.0.0.1", server.server_port, timeout=10)
 
@@ -98,7 +115,7 @@ def test_native_webview2_extract_review_and_store(tmp_path):
             token = server.token
             assert request("GET", endpoint, token=token) == (200, {"available": True})
             url = f"http://127.0.0.1:{publisher.server_port}/"
-            portal_id = store.save_portal({"name": "Synthetic journal", "url": url})
+            portal_id = store.save_portal({"name": "合成投稿站", "url": url})
             status, started = request("POST", endpoint + "/open", {"id": portal_id}, token)
             assert status == 200
             session_id = started["sessionId"]
@@ -112,6 +129,27 @@ def test_native_webview2_extract_review_and_store(tmp_path):
                 assert waiting["state"] not in {"captured", "closed", "error"}, waiting
                 time.sleep(0.25)
             assert waiting["state"] == "ready" and "capture" not in waiting
+            surface = next((library.root / "PortalProfiles").iterdir())
+            for mode in ("compact", "auth"):
+                process = browser._identified(session_id).process
+                process.stdin.write(("layout-" + mode + "\n").encode())
+                process.stdin.flush()
+                path = surface / (mode + ".json")
+                for _ in range(50):
+                    if path.exists() and path.stat().st_size:
+                        break
+                    time.sleep(0.25)
+                assert path.exists(), mode
+                layout = json.loads(path.read_text(encoding="utf-8"))
+                assert "error" not in layout, layout
+                assert layout["theme"] == appearance
+                assert layout["width"] >= 590 and layout["height"] >= 420
+                assert layout["addressWidth"] / (layout["dpi"] / 96) >= 280
+                assert layout["buttonHeight"] / (layout["dpi"] / 96) >= 30
+                assert layout["actionFits"]
+                assert "?" not in layout["address"]
+                assert ("审核" if mode == "compact" else "登录完成") in layout["status"], layout
+                assert (surface / (mode + ".png")).read_bytes().startswith(b"\x89PNG\r\n\x1a\n")
             browser._probe_extract(session_id)
             for _ in range(80):
                 status, capture = request("GET", session_query, token=token)

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import {spawn} from "node:child_process";
-import {createHash} from "node:crypto";
+import {createHash, randomBytes, randomUUID} from "node:crypto";
 import {mkdtemp, mkdir, readFile, rm, writeFile} from "node:fs/promises";
 import {createServer} from "node:http";
 import {setTimeout as delay} from "node:timers/promises";
@@ -108,7 +108,7 @@ try {
   }
   async function settings(theme) {
     await press('#utilities [aria-label="设置"]');
-    await has("#editor [name=appearance]");
+    await has("#editor[open] [name=appearance]");
     await addText("#editor [name=appearance]", theme);
     await press("#editor button[type=submit]");
     await poll(() => evaluate("document.body.dataset.theme===" + JSON.stringify(theme)), theme + " setting");
@@ -143,26 +143,41 @@ try {
   await cdp("Page.navigate", {url: session.url});
   await has("#gate:not([hidden]) #gate-create:not([hidden])");
   assert.equal(await evaluate("document.querySelector('#shell').hidden"), true);
+  await screenshot("first-run");
   await press("#gate-create");
   await current("submissions");
   assert.equal(await evaluate("document.querySelectorAll('#nav button').length"), 7);
-  assert.equal(await evaluate("getComputedStyle(document.querySelector('.sidebar')).width"), "248px");
+  assert.equal(await evaluate("getComputedStyle(document.querySelector('.sidebar')).width"), "198px");
   assert.equal(await evaluate("getComputedStyle(document.querySelector('.portal-wide')).display"), "grid");
   await settings("light");
 
-  await byText(".submission-layout .empty button", "手动添加");
+  await byText("#page-tools button", "添加稿件");
   await has("#editor [name=title]");
-  await addText("#editor [name=title]", "隔离稿件 Alpha");
+  const title = "隔离稿件 Alpha · 面向复杂材料微结构和热机械耦合行为的多尺度实验表征与可解释模型验证";
+  await addText("#editor [name=title]", title);
   await addText("#editor [name=venue]", "Fixture Journal");
   await addText("#editor [name=manuscriptID]", "MS-101");
+  await addText("#editor [name=statusSince]", "2001-01-01");
+  await screenshot("submission-editor-light");
   await submit();
   await has(".paper-row");
+  await press('.tabs [data-scope="followup"]');
+  await has('.tabs [data-scope="followup"][aria-pressed="true"]');
+  await poll(() => evaluate("document.querySelector('.paper-stage').textContent.includes('待跟进')"), "follow-up status");
+  await press('.tabs [data-scope="all"]');
+  await has('.tabs [data-scope="all"][aria-pressed="true"]');
   await press(".paper-row .text-button");
-  await has("#editor .pairs");
-  await byText("#editor .dialog-foot button", "编辑");
+  await has(".submission-inspector .is-selected");
+  await screenshot("submission-inspector-light");
+  await byText(".paper-row button", "更新状态");
   await addText("#editor [name=status]", "审稿中");
+  await addText("#editor [name=statusSince]", new Date().toISOString().slice(0, 10));
   await submit();
+  await poll(() => evaluate("document.querySelector('.paper-progress').textContent.includes('已投稿 → 审稿中')"), "real manuscript transition");
+  await addText('.paper-status-filter select', "审稿中");
+  await poll(() => evaluate("state.paperStatus === '审稿中' && document.querySelector('#main').getAttribute('aria-busy')==='false'"), "status filter");
   await press(".paper-row .text-button");
+  await byText(".paper-context button", "查看完整详情");
   await has("#editor .line-item");
   assert.match(await evaluate("document.querySelector('#editor').textContent"), /已投稿/);
   await byText("#editor .dialog-foot button", "归档");
@@ -170,6 +185,7 @@ try {
   await press('.tabs [data-scope="hidden"]');
   await has(".paper-row");
   await press(".paper-row .text-button");
+  await byText(".paper-context button", "查看完整详情");
   await has("#editor .pairs");
   await byText("#editor .dialog-foot button", "恢复追踪");
   await poll(() => evaluate("!document.querySelector('#editor').open && !document.querySelector('.paper-row')"), "restore from archive");
@@ -204,6 +220,7 @@ try {
   await addText("#editor [name=capture]", captured);
   await press("#editor button[type=submit]");
   await has("#editor .line-item input:checked");
+  await screenshot("portal-review-light");
   await submit();
   await poll(() => evaluate("document.querySelectorAll('.paper-row').length === 2"), "reviewed portal import");
 
@@ -211,7 +228,8 @@ try {
   assert.equal(await evaluate(css("#search") + ".value"), "");
   await press("#page-tools .primary");
   await has("#editor [name=title]");
-  await addText("#editor [name=title]", "隔离成果 Beta");
+  const workTitle = "多中心联合实验中高维时空代谢谱、表型可重复性与长期随访结果的分层分析及方法学复核";
+  await addText("#editor [name=title]", workTitle);
   await addText("#editor [name=type]", "patent");
   await addText("#editor [name=patentType]", "utilityModel");
   await addText("#editor [name=authorPosition]", "second");
@@ -221,6 +239,15 @@ try {
   await press(".work-row .text-button");
   await has("#editor .pairs");
   await byText("#editor .dialog-foot button", "完成");
+  await addText('[name="workTypeFilter"]', "dataset");
+  await has(".catalog-workspace .empty");
+  await addText('[name="workTypeFilter"]', "");
+  await has(".work-row");
+  await press('[data-catalog-view="analysis"]');
+  await has(".catalog-analysis .chart-bars");
+  assert.equal(await evaluate("document.querySelectorAll('.catalog-analysis section').length"), 3);
+  await press('[data-catalog-view="records"]');
+  await has(".work-row");
 
   const documentPath = path.join(workspace, "测试资料.txt");
   await writeFile(documentPath, "独立资料全文 searchable-token", "utf8");
@@ -281,6 +308,69 @@ try {
   await poll(() => evaluate("!!document.querySelector('#editor .empty')"), "restore attachment from Trash");
   await byText("#editor .dialog-foot button", "完成");
 
+  await openPage("experimentData");
+  await has(".file-pane-heading");
+  const lab = await request("/api/documents?kind=experimentData");
+  const other = await request("/api/documents/folder", {kind: "experimentData", name: "隔离归档"});
+  const otherFile = path.join(workspace, "另一个文件夹的资料.txt");
+  await writeFile(otherFile, "cross-folder-index-token", "utf8");
+  await request("/api/documents/import-path", {folderID: other.id, path: otherFile});
+  await addText("#search", "cross-folder-index-token");
+  await poll(() => evaluate("document.querySelector('.file-pane-heading')?.textContent === '隔离归档' && document.querySelector('.document-row')?.textContent.includes('另一个文件夹的资料')"),
+    "full-text search reaches another folder");
+  await press("#clear-search");
+  await poll(() => evaluate("document.querySelector('.file-pane-heading')?.textContent === 'experimentData 项'"), "return to selected folder");
+
+  const {document: source} = await request("/api/documents/import-path", {folderID: lab.folderID, path: imagePath});
+  await evaluate("refresh()");
+  await byText(".document-row .text-button", "证书");
+  await byText("#editor .dialog-foot button", "送搞操作识别文字");
+  await has("#editor button[type=submit]");
+  await byText("#editor .dialog-foot button", "取消");
+  const outbound = await request("/api/exchange/prepare", {action: "ocr.files", documentIDs: [source.id], launch: false});
+  const requestManifest = JSON.parse(await readFile(path.join(outbound.path, "manifest.json"), "utf8"));
+  const binding = {sourceItemID: requestManifest.items[0].id, sourceSHA256: source.sha256};
+  const ocrText = "合成 OCR 搜索内容";
+  const output = Buffer.from(JSON.stringify({schemaVersion: 1, sources: [{sha256: source.sha256, pages: [
+    {page: 1, status: "completed", lines: [{text: ocrText}]}, {page: 2, status: "failed", lines: []},
+  ]}]}));
+  const replyID = randomUUID();
+  const reply = {
+    schemaVersion: 1, kind: "result", requestID: replyID, inReplyTo: outbound.requestID, action: requestManifest.action,
+    sourceBundleID: requestManifest.targetBundleID, targetBundleID: requestManifest.sourceBundleID,
+    createdAt: requestManifest.createdAt, expiresAt: requestManifest.expiresAt, nonce: randomBytes(32).toString("base64"),
+    parameters: requestManifest.parameters, status: "partial", references: [],
+    items: [{id: "contents", relativePath: "OCR.json", uti: "public.json",
+      byteCount: output.length, sha256: createHash("sha256").update(output).digest("hex")}],
+    provenance: {
+      engine: "FixtureOCR",
+      sources: [{...binding, outputItemIDs: ["contents"], pages: [{pageNumber: 1, status: "completed"}, {pageNumber: 2, status: "failed"}]}],
+      outputs: [{...binding, resultItemID: "contents", format: "json"}],
+    },
+  };
+  const replyPath = path.join(workspace, replyID + ".gaoaction");
+  await mkdir(path.join(replyPath, "payload"), {recursive: true});
+  await writeFile(path.join(replyPath, "payload", "OCR.json"), output);
+  await writeFile(path.join(replyPath, "manifest.json"), JSON.stringify(reply));
+  await byText(".folder-toolbar summary", "资料交接");
+  await byText(".folder-toolbar .popover-menu button", "交接回执");
+  await has("#editor [name=path]");
+  await addText("#editor [name=path]", replyPath);
+  await byText("#editor .dialog-body button", "读取并复核");
+  await has('#editor [name="acceptPartial"]');
+  assert.equal(await evaluate(css("#editor .ocr-page-text") + ".textContent"), ocrText);
+  await press("#editor button[type=submit]");
+  await has("#editor .dialog-error:not([hidden])");
+  await screenshot("ocr-review-required-light");
+  await press('#editor [name="acceptPartial"]');
+  await press("#editor button[type=submit]");
+  await poll(() => evaluate("!document.querySelector('#editor button[type=submit]')"), "reviewed OCR import");
+  await byText("#editor .dialog-foot button", "完成");
+  await byText(".document-row .text-button", "OCR");
+  await has("#editor .text-preview");
+  assert.equal(await evaluate(css("#editor .text-preview") + ".textContent"), ocrText);
+  await byText("#editor .dialog-foot button", "完成");
+
   await openPage("city");
   await has(".city-scene-canvas");
   const canvas = () => evaluate(css(".city-scene-canvas") + ".toDataURL()");
@@ -311,13 +401,48 @@ try {
     await screenshot(page + "-dark-175");
   }
   await openPage("submissions");
-  assert.equal(await evaluate("getComputedStyle(document.querySelector('.portal-wide')).display"), "none");
+  assert.equal(await evaluate("document.querySelector('.portal-wide').getClientRects().length"), 0);
   await byText("#page-tools button", "门户");
   await has("#editor .portal-panel");
   await byText("#editor .dialog-foot button", "完成");
   await cdp("Page.navigate", {url: session.url + "#projects"});
   await current("submissions");
   await has('.tabs [data-scope="all"][aria-pressed="true"]');
+  await cdp("Emulation.setDeviceMetricsOverride", {width: 590, height: 720, deviceScaleFactor: 1.5, mobile: false});
+  await has('#nav-toggle button[aria-expanded="false"]');
+  await press("#nav-toggle button");
+  await has('#nav-toggle button[aria-expanded="true"]');
+  assert.equal(await evaluate("getComputedStyle(document.querySelector('.sidebar')).width"), "198px");
+  await press("#nav-toggle button");
+  await has('#nav-toggle button[aria-expanded="false"]');
+  await has(".paper-row .text-button");
+  assert.equal(await evaluate(css(".paper-row .text-button") + ".textContent"), title);
+  for (const name of [".topbar", ".main", ".paper-row", ".paper-row .text-button"]) {
+    assert.equal(await evaluate(`(()=>{const node=${css(name)};return node.scrollWidth<=node.clientWidth+1})()`), true, name);
+  }
+  await screenshot("submissions-narrow-dark-150");
+  await press(".paper-row .text-button");
+  await has("#editor[open] .pairs");
+  await screenshot("submission-detail-narrow-dark-150");
+  await byText("#editor .dialog-foot button", "完成");
+  await press('#utilities [aria-label="设置"]');
+  await has("#editor[open] .settings-grid");
+  await screenshot("settings-narrow-dark-150");
+  await byText("#editor .dialog-foot button", "取消");
+  await openPage("experimentData");
+  await has(".document-row");
+  await screenshot("library-narrow-dark-150");
+  await byText(".library-pane-title button", "返回文件夹");
+  await has(".library-workspace:not(.has-current-folder) .folder-card");
+  await byText(".folder-button", "experimentData 项");
+  await has(".document-row");
+  await openPage("works");
+  await has(".work-row");
+  assert.equal(await evaluate(css(".work-row .text-button") + ".textContent"), workTitle);
+  assert.equal(await evaluate("document.querySelector('.main').scrollWidth<=document.querySelector('.main').clientWidth+1"), true);
+  await screenshot("works-narrow-dark-150");
+  await openPage("city");
+  await screenshot("city-narrow-dark-150");
   await cdp("Page.navigate", {url: session.url + "#works"});
   await current("works");
   const reminderPaper = (await request("/api/papers?q=MS-101")).papers[0];
@@ -327,8 +452,27 @@ try {
   await has("#editor[open] #dialog-heading");
   assert.match(await evaluate(css("#dialog-heading") + ".textContent"), /隔离稿件 Alpha/);
   await byText("#editor .dialog-foot button", "完成");
+  await evaluate(`(() => {
+    const original = window.fetch;
+    window.fetch = (...args) => {
+      if (!String(args[0]).startsWith("/api/works?")) return original(...args);
+      window.fetch = original;
+      return new Promise(resolve => {
+        window.finishFixtureLoad = () => resolve(new Response(JSON.stringify({message: "隔离测试中的临时读取错误"}),
+          {status: 503, headers: {"Content-Type": "application/json"}}));
+      });
+    };
+  })()`);
+  await press('#nav [data-nav-page="works"]');
+  await has("#main[aria-busy=true] .page-wait");
+  await screenshot("workbench-loading-dark-150");
+  await evaluate("window.finishFixtureLoad()");
+  await has("#main [role=alert]");
+  await screenshot("workbench-error-dark-150");
+  await byText("#main [role=alert] button", "重新加载");
+  await current("works");
   assert.deepEqual(errors, []);
-  console.log("Browser passed: seven pages, first-run gate, submission editor and archive, reviewed external portal fallback, work editor, three searchable libraries, attachment/Trash, city orbit/draw/place, light/dark at 1440 and 1040 at simulated 175%, and direct notification activation.");
+  console.log("Browser passed: seven pages, first-run gate, long manuscript and work titles, submission editor and follow-up, status filter and archive, reviewed portal fallback, work filter and analytics, three searchable libraries, cross-folder search, reviewed partial OCR, attachment/Trash, city orbit/draw/place, dark 175%, narrow 150%, settings and direct notification activation.");
 } catch (error) {
   console.error(logs.slice(-12).join("").slice(-6000));
   if (errors.length) console.error(errors);

@@ -11,6 +11,8 @@ const AUTHOR_POSITIONS = {
   third: ["三作", "Third author"], fourth: ["四作", "Fourth author"], fifth: ["五作", "Fifth author"], beyondFifth: ["五作+", "Beyond fifth"],
 };
 const ATTACHMENT_ACCEPT = "application/pdf,image/*,.tif,.tiff,.heic";
+const catalogViews = {work: "records", certificate: "records"};
+let workTypeFilter = "";
 
 function localizedOptions(values) { return Object.entries(values).map(([key, label]) => [key, tr(...label)]); }
 function valueLabel(values, key) { return values[key] ? tr(...values[key]) : key || ""; }
@@ -23,13 +25,24 @@ function formatTags(text) {
     return true;
   });
 }
-function yearChart(title, subtitle, points) {
-  const maximum = Math.max(1, ...points.map((point) => point.count));
-  return card(title, subtitle, points.length ? el("div", "year-chart", points.map(({label, count}) => {
-    const fill = el("i");
-    fill.style.height = Math.round(count / maximum * 93) + "px";
-    return el("div", "year-column", el("strong", "", count), fill, el("span", "muted", label));
-  })) : el("p", "muted", tr("没有年度记录", "No annual records")));
+function catalogHeader(kind, tools = []) {
+  const selected = catalogViews[kind];
+  const options = [["records", tr("记录", "Records")], ["analysis", tr("统计", "Analytics")]];
+  const switcher = el("div", "catalog-switch", options.map(([view, label]) => {
+    const tab = button(label, async () => {
+      if (catalogViews[kind] === view) return;
+      catalogViews[kind] = view;
+      await render();
+      safeFocus(document.querySelector(`[data-catalog-view="${view}"]`));
+    }, {style: "quiet"});
+    tab.dataset.catalogView = view;
+    tab.setAttribute("aria-pressed", String(selected === view));
+    return tab;
+  }));
+  switcher.setAttribute("role", "group");
+  switcher.setAttribute("aria-label", tr("视图", "View"));
+  return el("header", "catalog-toolbar", switcher,
+    tools.length > 0 && el("div", "catalog-controls row", tools));
 }
 function yearsForWorks(works) {
   const years = works.map((item) => String(item.completedAt || "").slice(0, 4)).filter((year) => /^\d{4}$/.test(year));
@@ -41,7 +54,7 @@ function metricsPanel(metrics) {
     [metrics.matchedJournalName, metrics.source, metrics.lookedUpAt && formatDate(metrics.lookedUpAt)].filter(Boolean).join(" · "),
     pairs(...metrics.items.map((metric) => [metric.label, metric.value])));
 }
-function workCard(work, query) {
+function workCard(work, sortable) {
   const title = button(work.title, () => viewWork(work), {style: "text-button"});
   const actions = popover(tr("成果操作", "Work actions"), "ellipsis", [
     button(tr("查看详情", "View details"), () => viewWork(work), {symbol: "document"}),
@@ -49,37 +62,63 @@ function workCard(work, query) {
     button(tr("添加附件", "Add attachments"), () => addRecordAttachments("work", work.id), {symbol: "clip", disabled: !state.writable}),
     button(tr("移入回收站", "Move to Trash"), () => deleteRecord("work", work), {symbol: "trash", style: "danger", disabled: !state.writable}),
   ], true);
-  const row = el("article", "work-row", el("span", "record-mark", icon(work.type === "patent" ? "seal" : "document")),
-    el("div", "record-summary", el("div", "record-meta", badge(workType(work)),
-      work.authorPosition && badge(valueLabel(AUTHOR_POSITIONS, work.authorPosition), "teal")), title,
-      el("div", "record-meta", [work.venue, work.authors, work.identifier].filter(Boolean).join(" · "))),
-    el("div", "record-status", el("small", "", formatDate(work.completedAt)),
-      work.attachments?.length > 0 && el("small", "row", icon("clip"), work.attachments.length)),
-    el("span", "grip", icon("grip")), actions);
+  const attachments = work.attachments?.length || 0;
+  const attachmentCount = button(String(attachments), () => viewWork(work), {symbol: "clip", style: "quiet"});
+  attachmentCount.setAttribute("aria-label", tr(`查看附件（${attachments}）`, `View attachments (${attachments})`));
+  const orderMark = sortable && state.writable && el("span", "grip", icon("grip"));
+  if (orderMark) orderMark.title = tr("拖动调整顺序", "Drag to reorder");
+  const metadata = [work.venue, work.authors, work.identifier].filter(Boolean).join(" · ");
+  const authorPosition = valueLabel(AUTHOR_POSITIONS, work.authorPosition);
+  const row = el("article", "work-row catalog-work-row",
+    el("div", "catalog-item-name",
+      el("span", "catalog-type-icon", icon(work.type === "patent" ? "seal" : "document")),
+      el("div", "record-summary", title, metadata && el("div", "record-meta", metadata))),
+    el("div", "catalog-category", el("span", "", workType(work)), authorPosition && el("small", "muted", authorPosition)),
+    el("span", "catalog-date", formatDate(work.completedAt)),
+    el("div", "catalog-attachments", attachmentCount),
+    el("div", "catalog-row-actions", orderMark, actions));
   row.addEventListener("click", (event) => {
-    if (!event.target.closest("button, details, a") && !window.getSelection()?.toString()) title.click();
+    if (!event.target.closest("button, details, a, .grip") && !window.getSelection()?.toString()) title.click();
   });
-  return reorderItem(row, "work", work.id, !query);
+  return reorderItem(row, "work", work.id, sortable);
+}
+function workIndex(works, query) {
+  const canReorder = !query && !workTypeFilter;
+  return el("div", "catalog-work-list",
+    el("div", "catalog-column-head", el("span", "", tr("成果名称", "Title")), el("span", "", tr("类型", "Type")),
+      el("span", "", tr("日期", "Date")), el("span", "", tr("附件", "Attachments"))),
+    works.map((work) => workCard(work, canReorder)));
 }
 async function pageWorks(_page, query) {
   const {works, analytics} = await api("/api/works?" + new URLSearchParams({q: query}));
   const info = state.overview.works;
   const newWork = () => button(tr("新建成果", "New work"), () => editWork(), {symbol: "plus", style: "primary", disabled: !state.writable});
-  const stats = dashboard(latestLabel(info.latest, tr("手动建立已发表论文、会议成果和其他学术产出", "Organize published papers, conference work and other research output")), [
+  const stats = dashboard(latestLabel(info.latest, ""), [
     [info.count, tr("成果总数", "Works"), "seal"], [info.attachments, tr("附件", "Attachments"), "clip", "teal"],
     [info.thisYear, tr("本年成果", "Works this year"), "calendar", "clay"],
   ]);
-  if (!works.length) return {tools: [newWork()], nodes: [stats, emptyState("seal", query ? tr("没有找到匹配的成果", "No matching works") : tr("还没有成果记录", "No works yet"),
-    query ? tr("试试其他标题、作者或编号。", "Try another title, author or identifier.") : tr("添加已发表、已接收或已完成的学术成果。", "Add published, accepted or completed research."),
-    ...(!query ? [newWork()] : []))]};
-  const charts = el("div", "analytics-layout",
-    el("div", "analytics-pair",
-      chart(tr("成果类别分布", "Works by category"), tr("统计当前列表的成果类别", "Category totals for the works in this list"),
-        analytics.categories, {height: analytics.chartHeight}),
-      chart(tr("期刊论文署名顺序", "Journal article authorship"), tr("按我的署名位置统计", "Count by your authorship position"),
-        analytics.authorPositions, {height: 215, mark: "teal"})),
-    yearChart(tr("成果年度趋势", "Works by year"), tr("按完成或发表年份汇总", "By completion or publication year"), yearsForWorks(works)));
-  return {tools: [newWork()], nodes: [stats, charts, el("section", "collection", works.map((work) => workCard(work, query)))]};
+  const records = catalogViews.work === "records";
+  const types = selectField(tr("成果类型", "Work type"), "workTypeFilter", workTypeFilter,
+    [["", tr("全部类型", "All types")], ...localizedOptions(WORK_TYPES)]);
+  types.addEventListener("change", async (event) => {
+    workTypeFilter = event.target.value;
+    await render();
+    safeFocus(document.querySelector('[name="workTypeFilter"]'));
+  });
+  const visible = workTypeFilter ? works.filter((work) => work.type === workTypeFilter) : works;
+  const filtered = query || (records && workTypeFilter);
+  const itemCount = filtered && el("span", "catalog-result-count muted",
+    tr(`${records ? visible.length : works.length} 项匹配`, `${records ? visible.length : works.length} matches`));
+  const body = (records ? visible.length : works.length) ? (records ? workIndex(visible, query) :
+    el("div", "catalog-analysis",
+      chart(tr("成果类别", "Works by category"), "", analytics.categories),
+      chart(tr("期刊论文署名", "Journal article authorship"), "", analytics.authorPositions, {mark: "teal"}),
+      chart(tr("年度趋势", "Works by year"), "", yearsForWorks(works), {mark: "teal"}))) :
+    emptyState("seal", filtered ? tr("没有匹配的成果", "No matching works") : tr("还没有成果", "No works yet"),
+      filtered ? tr("可调整筛选或尝试其他标题、作者和编号。", "Adjust filters or try another title, author or identifier.") : "",
+      ...(!filtered ? [newWork()] : []));
+  return {tools: [newWork()], nodes: [stats, el("section", "catalog-workspace",
+    catalogHeader("work", [itemCount, records && types].filter(Boolean)), body)]};
 }
 function attachmentIdentity(kind, owner, attachment) {
   return {kind, ownerID: owner, attachmentID: attachment.id, name: attachment.storedName};
@@ -96,17 +135,17 @@ function previewAttachment(kind, owner, attachment, goBack) {
 function recordAttachments(kind, record, goBack) {
   const owner = record.id;
   const files = record.attachments || [];
-  return el("section", "card stack",
-    el("div", "section-head", el("h2", "section-title", tr("附件", "Attachments")),
+  return el("section", "catalog-detail-section",
+    el("div", "catalog-detail-head", el("h3", "section-title", tr("附件", "Attachments")),
       button(tr("添加附件", "Add attachments"), () => addRecordAttachments(kind, owner, true), {symbol: "clip", disabled: !state.writable})),
-    files.length ? el("div", "list", files.map((attachment) => el("div", "line-item",
+    files.length ? el("div", "catalog-attachments-list", files.map((attachment) => el("div", "line-item",
       el("div", "grow", button(attachment.originalName, () => previewAttachment(kind, owner, attachment, goBack), {symbol: "document", style: "text-button"}),
         el("small", "muted block", formatDate(attachment.addedAt))),
       downloadLink(kind, owner, attachment),
       button(tr("移入回收站", "Move to Trash"), () => confirmTrash(tr("删除此附件？", "Delete this attachment?"),
         tr("附件可在回收站恢复 30 天。", "The attachment can be recovered from Trash for 30 days."),
         () => post("/api/attachments/trash", attachmentIdentity(kind, owner, attachment))), {iconOnly: true, symbol: "trash", disabled: !state.writable}))))
-      : el("p", "muted", tr("还没有附件", "No attachments")));
+      : el("p", "catalog-no-attachments muted", tr("还没有附件", "No attachments")));
 }
 function recordPath(kind) { return kind === "work" ? "/api/works" : "/api/certificates"; }
 async function loadRecord(kind, id) {
@@ -136,16 +175,16 @@ function deleteRecord(kind, record) {
 }
 function viewWork(work) {
   modal(work.title, [
-    card(tr("成果信息", "Work details"), "", pairs(
+    el("section", "catalog-detail-section", pairs(
       [tr("类型", "Type"), workType(work)], [tr("日期", "Date"), formatDate(work.completedAt)],
       [tr("发表载体", "Venue"), work.venue], [tr("作者", "Authors"), work.authors],
       [tr("我的署名顺序", "My authorship position"), valueLabel(AUTHOR_POSITIONS, work.authorPosition)],
       [tr("索引编号", "Identifier"), work.identifier], ["ISSN", work.journalISSN],
       [tr("备注", "Notes"), work.notes]), external(tr("打开成果网页", "Open work website"), work.url)),
     metricsPanel(work.journalMetrics), recordAttachments("work", work, () => viewWork(work)),
-  ], {subtitle: workType(work), actions: [
-    button(tr("编辑", "Edit"), () => editWork(work), {symbol: "edit", disabled: !state.writable}),
+  ], {size: "catalog-detail", actions: [
     button(tr("移入回收站", "Move to Trash"), () => deleteRecord("work", work), {style: "danger", symbol: "trash", disabled: !state.writable}),
+    button(tr("编辑成果", "Edit work"), () => editWork(work), {symbol: "edit", disabled: !state.writable}),
   ]});
 }
 function saveWithAttachments(kind, persist, inputForm) {
@@ -208,9 +247,15 @@ async function editWork(work = null) {
   const metricInputs = formGroup(tr("期刊评价", "Journal metrics"), issn,
     el("div", "form-columns", secret, el("div", "row", saveKey, external(tr("获取密钥", "Get a key"), "https://www.easyscholar.cc/user/open"))),
     keyStatus, el("div", "row", lookup, lookupStatus), metricsView);
+  const journalOptions = el("details", "catalog-form-options", el("summary", "", tr("期刊评价与密钥", "Journal metrics and key")), metricInputs);
+  const metadata = el("details", "catalog-form-options", el("summary", "", tr("索引与备注", "Identifiers and notes")),
+    formGroup("", field(tr("DOI、ISBN、专利号或其他编号", "DOI, ISBN, patent or other identifier"), "identifier", work?.identifier),
+      field(tr("成果网页链接（可选）", "Work website (optional)"), "url", work?.url),
+      field(tr("备注", "Notes"), "notes", work?.notes, "area")));
+  journalOptions.open = Boolean(work?.journalMetrics);
   const selectType = kind.querySelector("select");
   const updateType = () => {
-    metricInputs.hidden = selectType.value !== "journalArticle";
+    journalOptions.hidden = selectType.value !== "journalArticle";
     patent.hidden = selectType.value !== "patent";
     suggestionList.hidden = selectType.value !== "journalArticle";
   };
@@ -255,15 +300,11 @@ async function editWork(work = null) {
   const form = modal(work ? tr("编辑成果", "Edit work") : tr("新建成果", "New work"), [
     formGroup(tr("成果信息", "Work information"), title, el("div", "form-columns", kind, patent,
       field(tr("完成或发表日期", "Completion or publication date"), "completedAt", dateInput(work?.completedAt), "date")),
-      venue, suggestionList, field(tr("作者（可选）", "Authors (optional)"), "authors", work?.authors),
+      venue, suggestionList, el("div", "form-columns", field(tr("作者（可选）", "Authors (optional)"), "authors", work?.authors),
       selectField(tr("我的署名顺序", "My authorship position"), "authorPosition", work?.authorPosition || "",
-        [["", tr("未设置 / 不适用", "Unspecified / not applicable")], ...localizedOptions(AUTHOR_POSITIONS)])),
-    metricInputs,
-    formGroup(tr("索引与备注", "Identifiers and notes"),
-      field(tr("DOI、ISBN、专利号或其他编号", "DOI, ISBN, patent or other identifier"), "identifier", work?.identifier),
-      field(tr("成果网页链接（可选）", "Work website (optional)"), "url", work?.url),
-      field(tr("备注", "Notes"), "notes", work?.notes, "area")),
-  ], {subtitle: tr("整理已发表、已接收或已完成的学术成果。", "Organize published, accepted or completed research."),
+        [["", tr("未设置 / 不适用", "Unspecified / not applicable")], ...localizedOptions(AUTHOR_POSITIONS)]))),
+    journalOptions, metadata,
+  ], {size: "catalog-editor",
     actions: [button(tr("保存并添加附件", "Save and add attachments"), () => saveWithAttachments("work", persist, form), {symbol: "clip"})],
     submit: async (values) => { await persist(values); closeDialog(); await refresh(); }});
   updateType();
@@ -283,48 +324,89 @@ function compareCertificates(left, right) {
     : value(left).localeCompare(value(right), state.language === "en" ? "en-US" : "zh-CN", {numeric: true});
   return (state.certificateDescending ? -difference : difference) || left.name.localeCompare(right.name);
 }
+function sortCertificates(key) {
+  state.certificateDescending = state.certificateSort === key ? !state.certificateDescending : key === "eventDate";
+  state.certificateSort = key;
+}
+const certificateColumns = [
+  ["name", ["名称", "Name"]], ["eventDate", ["日期", "Date"]],
+  ["tags", ["标签", "Tags"]], ["attachments", ["附件", "Attachments"]],
+];
 function certificatesTable(records) {
-  const columns = [["name", tr("名称", "Name")], ["eventDate", tr("时间", "Date")], ["tags", tr("标签", "Tags")], ["attachments", tr("附件", "Attachments")]];
-  const head = el("thead", "", el("tr", "", columns.map(([key, label]) => {
-    const sort = button(label, async () => {
-      state.certificateDescending = state.certificateSort === key ? !state.certificateDescending : key === "eventDate";
-      state.certificateSort = key;
+  const head = el("thead", "", el("tr", "", certificateColumns.map(([key, label]) => {
+    const sorting = state.certificateSort === key;
+    const sort = button(tr(...label), async () => {
+      sortCertificates(key);
       await render();
+      safeFocus(document.querySelector(`[data-cert-order="${key}"]`));
     }, {style: "text-button"});
+    sort.dataset.certOrder = key;
+    if (sorting) {
+      const direction = el("span", "catalog-sort-direction", state.certificateDescending ? "↓" : "↑");
+      direction.setAttribute("aria-hidden", "true");
+      sort.append(direction);
+    }
     const header = el("th", "", sort);
-    if (state.certificateSort === key) header.setAttribute("aria-sort", state.certificateDescending ? "descending" : "ascending");
+    header.scope = "col";
+    if (sorting) header.setAttribute("aria-sort", state.certificateDescending ? "descending" : "ascending");
     return header;
-  }), el("th", "", tr("操作", "Actions"))));
-  const table = el("table", "", head, el("tbody", "", records.slice().sort(compareCertificates).map((record) => el("tr", "",
-    el("td", "", button(record.name, () => viewCertificate(record), {style: "text-button"})),
-    el("td", "muted", formatDate(record.eventDate)),
-    el("td", "", record.tags?.length ? el("div", "row", record.tags.slice(0, 3).map((tag) => badge(tag, "teal")),
-      record.tags.length > 3 && el("small", "muted", "+" + (record.tags.length - 3))) : el("small", "muted", tr("未设置", "Unspecified"))),
-    el("td", "", button(String(record.attachments?.length || 0), () => viewCertificate(record), {symbol: "clip", style: "quiet"})),
-    el("td", "", popover(tr("证书操作", "Certificate actions"), "ellipsis", [
+  }), el("th", "catalog-actions-heading", tr("操作", "Actions"))));
+  const table = el("table", "catalog-certificate-table", head, el("tbody", "", records.slice().sort(compareCertificates).map((record) => {
+    const count = record.attachments?.length || 0;
+    const attachments = button(String(count), () => viewCertificate(record), {symbol: "clip", style: "quiet"});
+    attachments.setAttribute("aria-label", tr(`查看附件（${count}）`, `View attachments (${count})`));
+    const tags = record.tags || [];
+    const visibleTags = tags.length ? el("div", "row", tags.slice(0, 3).map((tag) => badge(tag, "teal")),
+      tags.length > 3 && el("small", "muted", "+" + (tags.length - 3))) : el("span", "muted", "—");
+    const actions = popover(tr("证书操作", "Certificate actions"), "ellipsis", [
       button(tr("编辑", "Edit"), () => editCertificate(record), {symbol: "edit", disabled: !state.writable}),
       button(tr("添加附件", "Add attachments"), () => addRecordAttachments("certificate", record.id), {symbol: "clip", disabled: !state.writable}),
       button(tr("移入回收站", "Move to Trash"), () => deleteRecord("certificate", record), {symbol: "trash", style: "danger", disabled: !state.writable}),
-    ], true))))));
-  return card(tr("证书记录表", "Certificate records"),
-    tr("按名称、时间、标签和附件四个维度统一管理", "Sort records by name, date, tags or attachments"), el("div", "table-wrap", table));
+    ], true);
+    return el("tr", "",
+      el("td", "catalog-cert-name", el("div", "catalog-item-name",
+        el("span", "catalog-type-icon", icon("certificate")), button(record.name, () => viewCertificate(record), {style: "text-button"}))),
+      el("td", "catalog-cert-date muted", formatDate(record.eventDate)), el("td", "catalog-cert-tags", visibleTags),
+      el("td", "catalog-cert-attachments", attachments), el("td", "catalog-cert-actions", actions));
+  })));
+  return el("div", "table-wrap catalog-certificate-list", table);
+}
+function smallCertificateSort() {
+  const ar = certificateColumns.map(([key, label]) => [key, tr(...label)]);
+  const sort = selectField(tr("排序", "Sort"), "certificateSort", state.certificateSort, ar);
+  sort.addEventListener("change", async (event) => {
+    sortCertificates(event.target.value);
+    await render();
+    safeFocus(document.querySelector('[name="certificateSort"]'));
+  });
+  const ascending = tr("升序", "Ascending");
+  const descending = tr("降序", "Descending");
+  const direction = button(state.certificateDescending ? descending : ascending, async () => {
+    sortCertificates(state.certificateSort);
+    await render();
+    safeFocus(document.querySelector("[data-certificate-direction]"));
+  }, {style: "quiet"});
+  direction.dataset.certificateDirection = "";
+  return el("div", "catalog-small-sort row", sort, direction);
 }
 async function pageCertificates(_page, query) {
   const {certificates, analytics} = await api("/api/certificates?" + new URLSearchParams({q: query}));
   const info = state.overview.certificates;
   const newCertificate = () => button(tr("新建证书记录", "New certificate"), () => editCertificate(), {symbol: "plus", style: "primary", disabled: !state.writable});
-  const stats = dashboard(latestLabel(info.latest, tr("用多维表格管理证书、标签和附件", "Manage certificates, tags and attachments in a sortable table")), [
+  const stats = dashboard(latestLabel(info.latest, ""), [
     [info.count, tr("记录总数", "Records"), "certificate"], [info.tags, tr("标签种类", "Tags"), "tag", "teal"],
     [info.attachments, tr("附件", "Attachments"), "clip", "clay"],
   ]);
-  const body = certificates.length ? el("div", "analytics-layout",
-    el("div", "analytics-pair", yearChart(tr("证书年度趋势", "Certificates by year"), "", analytics.years),
-      chart(tr("证书标签分布", "Certificate tags"), "", analytics.tags, {height: 120, mark: "teal"})),
-    certificatesTable(certificates)) : emptyState("certificate", query ? tr("没有找到匹配的证书记录", "No matching certificates") : tr("还没有证书记录", "No certificates yet"),
-    query ? tr("试试使用其他名称、标签或附件名称。", "Try a different name, tag or attachment filename.")
-      : tr("添加证书、获奖、竞赛、文体或任职记录，并统一保管 PDF 和图片附件。", "Add certificates, awards, competitions or appointments and keep related PDF and image attachments together."),
+  const records = catalogViews.certificate === "records";
+  const tools = [query && el("span", "catalog-result-count muted", tr(`${certificates.length} 项匹配`, `${certificates.length} matches`)),
+    records && certificates.length > 0 && smallCertificateSort()].filter(Boolean);
+  const body = certificates.length ? (records ? certificatesTable(certificates) : el("div", "catalog-analysis",
+      chart(tr("年度趋势", "Certificates by year"), "", analytics.years),
+      chart(tr("标签分布", "Certificate tags"), "", analytics.tags, {mark: "teal"})))
+    : emptyState("certificate", query ? tr("没有匹配的证书", "No matching certificates") : tr("还没有证书", "No certificates yet"),
+    query ? tr("试试使用其他名称、标签或附件名称。", "Try a different name, tag or attachment filename.") : "",
     ...(!query ? [newCertificate()] : []));
-  return {tools: [newCertificate()], nodes: [stats, body]};
+  return {tools: [newCertificate()], nodes: [stats, el("section", "catalog-workspace", catalogHeader("certificate", tools), body)]};
 }
 function editCertificate(record = null) {
   const name = field(tr("名称（必填）", "Name (required)"), "name", record?.name);
@@ -332,26 +414,24 @@ function editCertificate(record = null) {
   const tags = field(tr("自定义标签，可用逗号分隔", "Custom tags, separated by commas"), "tags", (record?.tags || []).join(", "));
   const choices = [["竞赛", "Competition"], ["文体", "Culture and sport"], ["任职", "Appointment"], ["荣誉", "Honor"], ["培训", "Training"], ["资质", "Qualification"]];
   const tagInput = tags.querySelector("input");
-  const shortcuts = el("div", "row", choices.map((entry) => button(tr(...entry), () => {
+  const shortcuts = el("div", "row catalog-tag-suggestions", choices.map((entry) => button(tr(...entry), () => {
     tagInput.value = formatTags(tagInput.value + "," + tr(...entry)).join(", ");
-  })));
+  }, {style: "quiet"})));
   const persist = (values) => post("/api/certificates", {...values, id: record?.id, tags: formatTags(values.tags)});
   const form = modal(record ? tr("编辑证书记录", "Edit certificate") : tr("新建证书记录", "New certificate"), [
-    formGroup(tr("基本信息", "Basic information"), name, field(tr("时间", "Date"), "eventDate", dateInput(record?.eventDate), "date")),
+    formGroup(tr("基本信息", "Basic information"), name, field(tr("日期", "Date"), "eventDate", dateInput(record?.eventDate), "date")),
     formGroup(tr("标签", "Tags"), tags, shortcuts),
-    formGroup(tr("附件", "Attachments"),
-      el("p", "muted", tr("可同时上传多份 PDF 和图片。附件会复制到应用资料目录。", "Upload multiple PDFs and images. Files are copied to the app's data directory."))),
-  ], {subtitle: tr("填写名称和时间，并添加任意自定义标签。", "Provide a name and date and add any tags you need."),
+  ], {size: "catalog-editor",
     actions: [button(tr("保存并添加附件", "Save and add attachments"), () => saveWithAttachments("certificate", persist, form), {symbol: "clip"})],
     submit: async (values) => { await persist(values); closeDialog(); await refresh(); }});
 }
 function viewCertificate(record) {
   modal(record.name, [
-    card(tr("证书信息", "Certificate details"), "", pairs([tr("时间", "Date"), formatDate(record.eventDate)],
+    el("section", "catalog-detail-section", pairs([tr("日期", "Date"), formatDate(record.eventDate)],
       [tr("最近更新", "Last updated"), formatDate(record.updatedAt, true)]),
       record.tags?.length > 0 && el("div", "row", record.tags.map((tag) => badge(tag, "teal")))),
     recordAttachments("certificate", record, () => viewCertificate(record)),
-  ], {actions: [
+  ], {size: "catalog-detail", actions: [
     button(tr("编辑", "Edit"), () => editCertificate(record), {symbol: "edit", disabled: !state.writable}),
     button(tr("移入回收站", "Move to Trash"), () => deleteRecord("certificate", record), {symbol: "trash", style: "danger", disabled: !state.writable}),
   ]});

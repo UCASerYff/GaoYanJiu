@@ -154,6 +154,11 @@ def test_papers_works_rewards_and_followups(tmp_path: Path):
     key = research.save_paper(None, "第一篇", "Nature", "", "外审", "2026-10-01", "", "", flag_changed=True)
     assert research.list_papers("changed")[0]["key"] == key
     assert research.list_papers("all")[0]["manuscriptID"] == "未填写"
+    assert [paper["key"] for paper in research.list_papers("followup", "第一篇")] == [key]
+    assert research.list_papers("followup", "无匹配记录") == []
+    research.set_hidden(key, True)
+    assert research.list_papers("followup") == []
+    research.set_hidden(key, False)
     work_id = research.save_work(
         {
             "title": "期刊成果",

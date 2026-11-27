@@ -5,6 +5,8 @@ const FOLDER_PROMPTS = {
   summaryReports: ["按主题或周期创建文件夹，整理周报、月报与汇报材料", "Organize reports and presentation materials by topic or period"],
   importantLiterature: ["按研究主题创建文件夹，保存重要参考资料", "Keep important references in folders by research topic"],
 };
+const libraryLanding = new Map();
+function countLabel(count) { return tr(count + " 个文件", count + " files"); }
 function exchangeContext(extra = {}) { return {api, refresh, folderID: state.folder, language: state.language, ...extra}; }
 function newFolderButton(kind) {
   return button(tr("新建文件夹", "New folder"), () => editFolder(kind), {symbol: "folder", style: "primary", disabled: !state.writable});
@@ -23,7 +25,11 @@ function deleteFolder(folder) {
     tr("文件夹和文件会移入回收站，可在 30 天内恢复。", "The folder and its files can be recovered from Trash for 30 days."),
     async () => {
       await post("/api/documents/folder/trash", {id: folder.id});
-      if (state.folder === folder.id) { state.folder = ""; state.tag = ""; }
+      if (state.folder === folder.id) {
+        libraryLanding.set(folder.libraryKind, "");
+        state.folder = "";
+        state.tag = "";
+      }
     });
 }
 function folderActions(kind, folder) {
@@ -32,30 +38,39 @@ function folderActions(kind, folder) {
     button(tr("删除文件夹", "Delete folder"), () => deleteFolder(folder), {symbol: "trash", style: "danger", disabled: !state.writable}),
   ], true);
 }
-function enterFolder(folder) {
+async function enterFolder(folder) {
+  libraryLanding.set(folder.libraryKind, folder.id);
   state.folder = folder.id;
   state.tag = "";
   state.documentSort = "uploadedAt";
   $("main").scrollTop = 0;
-  return render();
+  await render();
+  safeFocus(document.querySelector(".file-pane-heading"));
 }
-function folderGrid(kind, folders, query) {
+function folderIndex(kind, folders, query, selectedFolder) {
   if (!folders.length) return emptyState("folder", query ? tr("没有匹配的文件夹", "No matching folders") : tr("还没有文件夹", "No folders yet"),
     query ? tr("试试其他名称、标签或正文关键词。", "Try another name, tag or full-text term.") : tr(...FOLDER_PROMPTS[kind]),
     ...(!query ? [newFolderButton(kind)] : []));
-  const countLabel = (count) => tr(count + " 个文件", count + " files");
-  return el("section", "collection", el("div", "section-head", el("h2", "", tr("文件夹", "Folders"))),
-    el("div", "folder-grid", folders.map((folder) => {
-      const enter = button(folder.name, () => enterFolder(folder), {style: "folder-button"});
+  return el("section", "library-folders",
+    el("header", "library-pane-head",
+      el("h2", "", tr("文件夹", "Folders")),
+      query && !selectedFolder && el("span", "muted", tr(`${folders.length} 项匹配`, `${folders.length} matches`))),
+    el("div", "library-folder-list", folders.map((folder) => {
+      const selected = folder.id === selectedFolder;
+      const enter = button(folder.name, () => enterFolder(folder), {symbol: "folder", style: "folder-button"});
       enter.title = folder.name;
-      const row = el("article", "card folder-card",
-        el("span", "record-mark", icon("folder")), el("div", "record-summary",
-          el("strong", "", folder.name), el("small", "muted", countLabel(folder.fileCount)), el("small", "muted", formatDate(folder.updatedAt, true))),
-        icon("arrow"), enter, folderActions(kind, folder));
+      if (selected) enter.setAttribute("aria-current", "true");
+      const row = el("article", "folder-card library-folder-row", enter,
+        el("span", "folder-file-count muted", countLabel(folder.fileCount)),
+        el("span", "folder-last-edit muted", formatDate(folder.updatedAt)),
+        selected ? el("span", "folder-selected-mark", icon("arrow")) : folderActions(kind, folder));
+      row.classList.toggle("is-selected", selected);
       return reorderItem(row, "folder", folder.id, !query);
     })));
 }
 async function importDocuments(folder, files) {
+  if (!files.length) return;
+  toast(tr(`正在导入 ${files.length} 个文件…`, `Importing ${files.length} files…`));
   let imported = 0;
   let existing = 0;
   const failures = [];
@@ -106,17 +121,24 @@ function fileSize(value) {
 async function previewDocument(document) {
   const media = storedPreview("document", document.folderID, document);
   const {text} = await api("/api/documents/text?" + new URLSearchParams({id: document.id}));
-  const detail = el("div", "stack",
-    pairs([tr("文件名称", "Filename"), document.originalName], [tr("大小", "Size"), fileSize(document.byteCount)],
-      [tr("上传时间", "Uploaded"), formatDate(document.uploadedAt, true)]),
+  const detail = el("div", "document-preview-content",
+    el("div", "document-preview-metadata",
+      el("span", "muted", document.originalName),
+      el("span", "", fileSize(document.byteCount)),
+      el("span", "", formatDate(document.uploadedAt, true))),
     document.tags?.length > 0 && el("div", "row", document.tags.map((tag) => badge(tag, "teal"))));
   if (media) detail.append(media);
-  if (text) detail.append(el("details", "form-group", el("summary", "", tr("索引文字", "Indexed text")), el("p", "text-preview", text)));
+  if (text) {
+    const indexedText = el("details", "catalog-form-options", el("summary", "", tr("全文索引", "Indexed text")),
+      el("p", "text-preview", text));
+    indexedText.open = !media;
+    detail.append(indexedText);
+  }
   if (!media && !text) detail.append(el("p", "muted", tr("此文件可下载到本机打开。", "Download this file to open it on your computer.")));
   const pages = document.windowsProvenance?.pages || [];
   const source = document.windowsProvenance?.targetRecordID || document.windowsProvenance?.sourceDocumentID;
   if (source && pages.length && /\.pdf$/i.test(document.windowsProvenance?.sourceName || "")) {
-    const originals = el("div", "row");
+    const originals = el("div", "row document-ocr-pages");
     const query = state.query.toLowerCase();
     for (const page of pages.filter((page) => !query || String(page.text || "").toLowerCase().includes(query))) {
       if (!Number.isSafeInteger(page.pageNumber) || page.pageNumber < 1) continue;
@@ -128,7 +150,8 @@ async function previewDocument(document) {
         ], {size: "wide", actions: [button(tr("返回 OCR 结果", "Back to OCR result"), () => previewDocument(document))]});
       }, {symbol: "document"}));
     }
-    if (originals.childElementCount) detail.append(originals);
+    if (originals.childElementCount) detail.append(el("section", "catalog-detail-section",
+      el("h3", "", tr("OCR 对应原件", "OCR source pages")), originals));
   }
   const actions = el("div", "row", downloadLink("document", document.folderID, document),
     button(tr("在文件资源管理器中显示", "Show in File Explorer"), () => post("/api/files/reveal", {kind: "document", ownerID: document.folderID, name: document.storedName}), {symbol: "folder"}));
@@ -139,20 +162,36 @@ function documentRow(document, manualOrder) {
   const buttons = el("div", "exchange-menu-staging");
   window.researchExchange?.document(buttons, exchangeContext({document}));
   const name = button(document.displayName, () => previewDocument(document), {style: "text-button"});
-  return reorderItem(el("article", "document-row",
-    el("span", "record-mark", icon(/^(png|jpe?g|gif|tiff?|webp|heic)$/.test(document.fileExtension) ? "image" : "document")),
-    el("div", "record-summary", name, el("small", "muted", document.originalName),
-      el("div", "record-meta", (document.tags || []).map((tag) => badge(tag, "teal")),
-        document.windowsProvenance?.pages?.length > 0 && badge("OCR"))),
-    el("div", "record-status", el("small", "", fileSize(document.byteCount)), el("small", "", formatDate(document.uploadedAt))),
-    manualOrder && el("span", "grip", icon("grip")), popover(tr("文件操作", "File actions"), "ellipsis", [
-      button(tr("预览", "Preview"), () => previewDocument(document), {symbol: "document"}),
+  const quickDownload = downloadLink("document", document.folderID, document);
+  quickDownload.replaceChildren(icon("download"));
+  quickDownload.classList.add("icon-button", "document-download");
+  quickDownload.title = tr("下载", "Download");
+  quickDownload.setAttribute("aria-label", quickDownload.title);
+  const extension = document.fileExtension || "";
+  const currentFilename = extension ? document.displayName + "." + extension : document.displayName;
+  const originalLabel = document.originalName && document.originalName.toLowerCase() !== currentFilename.toLowerCase() && document.originalName;
+  const imageFile = /^(png|jpe?g|gif|tiff?|webp|heic)$/i.test(extension);
+  const tags = document.tags || [];
+  const showOcr = document.windowsProvenance?.pages?.length > 0 && !tags.some((tag) => /^ocr\b/i.test(tag));
+  const fileType = el("span", "library-document-type muted", extension.toUpperCase() || "—");
+  if (extension) fileType.title = extension.toUpperCase();
+  const orderMark = manualOrder && state.writable && el("span", "grip", icon("grip"));
+  if (orderMark) orderMark.title = tr("拖动调整顺序", "Drag to reorder");
+  return reorderItem(el("article", "document-row library-document-row",
+    el("div", "catalog-item-name",
+      el("span", "catalog-type-icon", icon(imageFile ? "image" : "document")),
+      el("div", "record-summary", name, originalLabel && el("small", "muted", originalLabel),
+      el("div", "record-meta", tags.map((tag) => badge(tag, "teal")), showOcr && badge("OCR")))),
+    fileType,
+    el("span", "library-document-size muted", fileSize(document.byteCount)),
+    el("span", "library-document-date muted", formatDate(document.uploadedAt)),
+    el("div", "catalog-row-actions", orderMark, quickDownload, popover(tr("文件操作", "File actions"), "ellipsis", [
       downloadLink("document", document.folderID, document),
       button(tr("在文件资源管理器中显示", "Show in File Explorer"), () => post("/api/files/reveal", {kind: "document", ownerID: document.folderID, name: document.storedName}), {symbol: "folder"}),
       button(tr("编辑文件信息", "Edit file information"), () => editDocument(document), {symbol: "edit", disabled: !state.writable}),
       ...buttons.children,
       button(tr("删除文件", "Delete file"), () => deleteDocument(document), {style: "danger", symbol: "trash", disabled: !state.writable}),
-    ], true)), "document", document.id, manualOrder);
+    ], true))), "document", document.id, manualOrder);
 }
 function folderContents(kind, folder, documents, tags, query) {
   const gears = el("div", "");
@@ -160,30 +199,50 @@ function folderContents(kind, folder, documents, tags, query) {
   const sort = selectField(tr("排序", "Sort"), "sort", state.documentSort, [
     ["uploadedAt", tr("上传时间", "Upload time")], ["tags", tr("标签", "Tags")],
   ]);
-  sort.addEventListener("change", async (event) => { state.documentSort = event.target.value; await render(); });
+  sort.addEventListener("change", async (event) => {
+    state.documentSort = event.target.value;
+    await render();
+    safeFocus(document.querySelector('.folder-toolbar [name="sort"]'));
+  });
   const filter = selectField(tr("筛选标签", "Filter tags"), "tag", state.tag, [
     ["", tr("全部标签", "All tags")], ...tags.map(({label}) => [label, label]),
   ]);
   filter.querySelector("select").disabled = !tags.length;
-  filter.addEventListener("change", async (event) => { state.tag = event.target.value; await render(); });
+  filter.addEventListener("change", async (event) => {
+    state.tag = event.target.value;
+    await render();
+    safeFocus(document.querySelector('.folder-toolbar [name="tag"]'));
+  });
   const displayed = (state.tag ? documents.filter((document) => document.tags?.includes(state.tag)) : documents).slice();
   if (state.documentSort === "tags") displayed.sort((a, b) => (a.tags?.[0] || "").localeCompare(b.tags?.[0] || "") || a.displayName.localeCompare(b.displayName));
-  const toolbar = el("div", "folder-toolbar",
-    button(tr("返回文件夹", "Back to folders"), async () => { state.folder = ""; state.tag = ""; await render(); }, {symbol: "back", style: "quiet"}),
-    el("div", "row grow", icon("folder"), el("div", "", el("strong", "", folder.name),
-      el("small", "muted block", tr(folder.fileCount + " 个文件", folder.fileCount + " files")))),
-    sort, filter, folderActions(kind, folder),
-    popover(tr("资料交接", "Document handoff"), "link", [
+  const heading = el("h2", "file-pane-heading", folder.name);
+  heading.tabIndex = -1;
+  const back = button(tr("返回文件夹", "Back to folders"), async () => {
+    libraryLanding.set(kind, "");
+    state.folder = "";
+    state.tag = "";
+    await render();
+    safeFocus(document.querySelector(".folder-button"));
+  }, {symbol: "back", style: "quiet"});
+  const toolbar = el("header", "folder-toolbar library-pane-toolbar",
+    el("div", "library-pane-title",
+      back, el("div", "library-active-name", heading,
+        el("small", "muted", displayed.length === folder.fileCount ? countLabel(folder.fileCount)
+          : tr(`${displayed.length} / ${folder.fileCount} 个文件`, `${displayed.length} of ${folder.fileCount} files`)))),
+    el("div", "library-primary-tools row", folderActions(kind, folder),
+      popover(tr("资料交接", "Document handoff"), "link", [
       ...gears.children, button(tr("从本机路径导入", "Import from local path"), () => importFromPath(folder), {symbol: "folder", disabled: !state.writable}),
-    ]), uploadDocumentButton(folder));
+      ]), uploadDocumentButton(folder)),
+    el("div", "library-file-filters row", sort, filter));
   const manualOrder = !query && !state.tag && state.documentSort === "uploadedAt";
-  const contents = displayed.length ? el("div", "collection", displayed.map((document) => documentRow(document, manualOrder)))
+  const contents = displayed.length ? el("div", "library-files-list",
+    el("div", "library-file-columns", el("span", "", tr("文件名", "Filename")), el("span", "", tr("类型", "Type")),
+      el("span", "", tr("大小", "Size")), el("span", "", tr("导入日期", "Imported"))),
+    displayed.map((document) => documentRow(document, manualOrder)))
     : emptyState("document", query || state.tag ? tr("没有找到匹配的文件", "No matching files") : tr("文件夹中还没有文件", "This folder is empty"),
       query || state.tag ? tr("请更改搜索词或标签。", "Change the search term or tag.") : tr("可上传文件或将本机文件拖到这里。", "Upload files or drag local files here."),
       ...(!query && !state.tag ? [uploadDocumentButton(folder)] : []));
-  const wrapper = el("section", "document-drop", toolbar,
-    state.tag && el("div", "row tag-filter", badge(state.tag, "teal"), button(tr("清除", "Clear"), async () => { state.tag = ""; await render(); }, {style: "quiet"})),
-    contents);
+  const wrapper = el("section", "document-drop library-files", toolbar, contents);
   if (state.writable) {
     wrapper.addEventListener("dragover", (event) => {
       if (!event.dataTransfer.types.includes("Files")) return;
@@ -201,17 +260,33 @@ function folderContents(kind, folder, documents, tags, query) {
   return wrapper;
 }
 async function pageDocuments(kind, query) {
-  const data = await api("/api/documents?" + new URLSearchParams({kind, folder: state.folder, q: query, view: "folders"}));
+  const requested = state.folder;
+  const fetchContents = (folder) => api("/api/documents?" + new URLSearchParams({kind, folder, q: query, view: "folders"}));
+  let data = await fetchContents(query ? "" : requested);
+  const matches = query ? data.folders : null;
+  if (query && requested && matches.length) {
+    const matchedFolder = matches.find((entry) => entry.id === requested) || matches[0];
+    data = await fetchContents(matchedFolder.id);
+  } else if (!query && !data.folderID && data.folders.length && libraryLanding.get(kind) !== "") {
+    const preferred = data.folders.find((entry) => entry.id === libraryLanding.get(kind));
+    const first = preferred || data.folders.find((entry) => entry.fileCount > 0) || data.folders[0];
+    data = await fetchContents(first.id);
+  }
   const folder = data.folders.find((entry) => entry.id === data.folderID);
-  if (!folder && state.page === kind) { state.folder = ""; state.tag = ""; }
+  if (state.page === kind && state.folder === requested && state.query === query) {
+    if (!query) state.folder = folder?.id || "";
+    if ((!query || folder) && state.tag && !data.tags.some((tag) => tag.label === state.tag)) state.tag = "";
+  }
   const info = state.overview[kind];
   const tools = el("div", "row");
   if (!folder) window.researchExchange?.toolbar(tools, exchangeContext({folderID: ""}));
   tools.append(newFolderButton(kind));
   return {tools: [...tools.children], nodes: [
-    dashboard(latestLabel(info.latest, tr(...FOLDER_PROMPTS[kind])), [
+    dashboard(latestLabel(info.latest, ""), [
       [info.folders, tr("文件夹", "Folders"), "folder"], [info.count, tr("文件", "Files"), "document", "teal"], [info.tags, tr("标签", "Tags"), "tag", "clay"],
     ]),
-    folder ? folderContents(kind, folder, data.documents, data.tags, query) : folderGrid(kind, data.folders, query),
+    el("div", `library-workspace${folder ? " has-current-folder" : ""}`,
+      folderIndex(kind, matches || data.folders, query, data.folderID),
+      folder && folderContents(kind, folder, data.documents, data.tags, query)),
   ]};
 }

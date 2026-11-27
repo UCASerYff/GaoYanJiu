@@ -2,6 +2,7 @@
 
 const $ = (id) => document.getElementById(id);
 const token = document.querySelector('meta[name="gao-token"]').content;
+const compactRail = matchMedia("(max-width: 780px)");
 const DOCUMENT_PAGES = ["experimentData", "summaryReports", "importantLiterature"];
 const PAGE_LABELS = {
   submissions: ["在投管理", "Submissions"], works: ["成果管理", "Works"],
@@ -10,7 +11,7 @@ const PAGE_LABELS = {
 };
 const PAGE_ICONS = {submissions: "document", works: "seal", experimentData: "flask", summaryReports: "report", importantLiterature: "books", certificates: "certificate", city: "city"};
 const SYMBOLS = {
-  archive: "\uE7B8", arrow: "\uE76C", back: "\uE76B", bell: "\uEA8F", books: "\uE8F1", calendar: "\uE787", certificate: "\uEB95",
+  archive: "\uE7B8", arrow: "\uE76C", back: "\uE76B", bell: "\uEA8F", books: "\uE8F1", calendar: "\uE787", certificate: "\uEB95", chart: "\uE9D2",
   city: "\uE80F", clip: "\uE723", close: "\uE711", coin: "\uEC0A", document: "\uE8A5", download: "\uE896", edit: "\uE70F",
   ellipsis: "\uE712", exit: "\uE8BB", flask: "\uEA80", folder: "\uE8B7", globe: "\uE774", grip: "\uE700", image: "\uEB9F",
   link: "\uE71B", menu: "\uE89F", open: "\uE8E5", paperplane: "\uE724", plus: "\uE710", refresh: "\uE72C", report: "\uE9F9",
@@ -18,7 +19,8 @@ const SYMBOLS = {
 };
 const state = {
   page: "submissions", scope: "all", folder: "", tag: "", documentSort: "uploadedAt", language: "zh-Hans", query: "",
-  certificateSort: "eventDate", certificateDescending: true, analyticsOpen: false, overview: {}, settings: {}, writable: true,
+  certificateSort: "eventDate", certificateDescending: true, paperSelection: "", paperStatus: "",
+  overview: {}, settings: {}, writable: true,
 };
 
 function tr(zh, en) { return (state.language === "en" && en) || zh; }
@@ -118,7 +120,7 @@ function formGroup(title, ...children) { return el("fieldset", "form-group stack
 function closeDialog() { if ($("editor").open) $("editor").close(); }
 function modal(title, nodes, options = {}) {
   const dialog = $("editor");
-  const {subtitle, submit, submitLabel, actions = [], size = "", unclosable = false} = options;
+  const {subtitle, submit, submitLabel, dismissLabel, actions = [], size = "", unclosable = false} = options;
   dialog.className = size;
   const heading = el("h2", "", title);
   heading.id = "dialog-heading";
@@ -127,14 +129,15 @@ function modal(title, nodes, options = {}) {
   error.setAttribute("role", "alert");
   const body = el("div", "dialog-body stack", nodes);
   const footer = el("footer", "dialog-foot", actions);
-  if (!unclosable) footer.append(button(submit ? tr("取消", "Cancel") : tr("完成", "Done"), closeDialog));
+  if (!unclosable) footer.append(button(dismissLabel || (submit ? tr("取消", "Cancel") : tr("完成", "Done")), closeDialog, {style: "quiet"}));
   if (submit) {
     const save = el("button", "primary", submitLabel || tr("保存", "Save"));
     save.type = "submit";
     footer.append(save);
   }
-  const form = el(submit ? "form" : "div", "dialog-layout",
-    el("header", "dialog-header", heading, subtitle && el("p", "muted", subtitle)), body, error, footer);
+  const titleBar = el("header", "dialog-header", el("div", "dialog-heading-text", heading, subtitle && el("p", "muted", subtitle)),
+    !unclosable && button(tr("关闭窗口", "Close dialog"), closeDialog, {symbol: "close", iconOnly: true}));
+  const form = el(submit ? "form" : "div", "dialog-layout", titleBar, el("div", "dialog-scroll", body, error), footer);
   if (submit) form.addEventListener("submit", async (event) => {
     event.preventDefault();
     const submitter = event.submitter;
@@ -145,10 +148,14 @@ function modal(title, nodes, options = {}) {
   });
   dialog.replaceChildren(form);
   if (!dialog.open) dialog.showModal();
+  if (submit) {
+    const input = form.querySelector('.dialog-body input:not([type="hidden"]):not([type="checkbox"]):not(:disabled), .dialog-body textarea, .dialog-body select');
+    safeFocus(input);
+  }
   return form;
 }
 function confirmTrash(title, details, run, label = tr("删除", "Delete")) {
-  modal(title, [el("p", "", details)], {size: "compact", actions: [button(label, async () => {
+  modal(title, [el("p", "", details)], {size: "compact", dismissLabel: tr("取消", "Cancel"), actions: [button(label, async () => {
     await run(); closeDialog(); await refresh();
   }, {style: "danger"})]});
 }
@@ -273,26 +280,27 @@ function setPage(page) {
   state.folder = "";
   state.tag = "";
   state.query = "";
-  if (page === "submissions") state.scope = "all";
+  if (page === "submissions") Object.assign(state, {scope: "all", paperStatus: "", paperSelection: ""});
   $("search").value = "";
   $("main").scrollTop = 0;
   return render();
 }
 function navGroups() {
   const groups = [
-    [tr("研究工作台", "Research Workspace"), ["submissions", "works"]],
-    [tr("资料与资产", "Library and Assets"), [...DOCUMENT_PAGES, "certificates"]],
+    [tr("研究", "Research"), ["submissions", "works"]],
+    [tr("资料与证书", "Library and Certificates"), [...DOCUMENT_PAGES, "certificates"]],
     [tr("探索", "Explore"), ["city"]],
   ];
+  const focused = document.activeElement?.dataset.navPage;
   $("nav").replaceChildren(...groups.map(([label, pages]) => el("section", "nav-group", el("h2", "", label), pages.map((page) => {
-    const node = button(pageLabel(page), () => setPage(page), {symbol: PAGE_ICONS[page], style: "nav-row"});
-    node.append(el("span", "nav-count", state.overview[page]?.count ?? 0));
+    const name = pageLabel(page);
+    const node = button(name, () => setPage(page), {symbol: PAGE_ICONS[page], style: "nav-row", iconOnly: true});
+    node.append(el("span", "nav-label", name));
+    node.dataset.navPage = page;
     if (page === state.page) node.setAttribute("aria-current", "page");
     return node;
   }))));
-  const status = state.page === "submissions" ? [el("div", "status-line", el("span", "status-dot"),
-    tr(`${state.overview.portals || 0} 个投稿门户`, `${state.overview.portals || 0} submission portals`))] : [];
-  $("sidebar-status").replaceChildren(...status, el("small", "muted", tr("本地存储", "Local storage")));
+  if (focused) safeFocus($("nav").querySelector(`[data-nav-page="${focused}"]`));
 }
 function searchPrompt() {
   return {
@@ -301,16 +309,30 @@ function searchPrompt() {
     certificates: tr("搜索证书名称、标签或附件", "Search certificate name, tags or attachments"),
   }[state.page] || tr("搜索文件夹、文件名、标签或正文", "Search folders, filenames, tags or text");
 }
+function navigationExpanded() {
+  const shell = $("shell");
+  return shell.classList.contains("sidebar-expanded") ||
+    (!compactRail.matches && !shell.classList.contains("sidebar-collapsed"));
+}
 function utilities() {
-  const sidebar = button(tr("显示或隐藏侧栏", "Toggle sidebar"), () => {
-    const collapsed = $("shell").classList.toggle("sidebar-collapsed");
-    sidebar.setAttribute("aria-expanded", String(!collapsed));
+  const shell = $("shell");
+  const sidebar = button(tr("展开或收起导航", "Toggle navigation"), () => {
+    const show = !navigationExpanded();
+    shell.classList.toggle("sidebar-expanded", show);
+    shell.classList.toggle("sidebar-collapsed", !show);
+    sidebar.setAttribute("aria-expanded", String(show));
   }, {iconOnly: true, symbol: "menu"});
   sidebar.setAttribute("aria-controls", "sidebar");
-  sidebar.setAttribute("aria-expanded", String(!$("shell").classList.contains("sidebar-collapsed")));
-  $("utilities").replaceChildren(sidebar,
-    button(tr("回收站", "Trash"), openTrash, {iconOnly: true, symbol: "trash"}),
-    button(tr("设置", "Settings"), openSettings, {iconOnly: true, symbol: "settings"}));
+  sidebar.setAttribute("aria-expanded", String(navigationExpanded()));
+  $("nav-toggle").replaceChildren(sidebar);
+  const utility = (label, action, symbol) => {
+    const control = button(label, action, {iconOnly: true, symbol, style: "nav-row"});
+    control.append(el("span", "nav-label", label));
+    return control;
+  };
+  $("utilities").replaceChildren(utility(tr("回收站", "Trash"), openTrash, "trash"),
+    utility(tr("设置", "Settings"), openSettings, "settings"));
+  $("page-title").textContent = pageLabel(state.page);
   $("search-icon").replaceChildren(icon("search"));
   document.querySelector(".search-wrap").hidden = state.page === "city";
   const search = $("search");
@@ -322,9 +344,9 @@ function utilities() {
   $("clear-search").replaceChildren(icon("close"));
 }
 function dashboard(subtitle, stats) {
-  return el("header", "dashboard", el("h1", "", pageLabel(state.page)), el("p", "dashboard-caption", subtitle),
-    el("div", "stats", stats.map(([value, label, symbol, style]) => el("div", "stat", el("div", `stat-symbol ${style || ""}`, icon(symbol)),
-      el("div", "", el("strong", "", value ?? 0), el("small", "muted", label))))));
+  return el("div", "dashboard", stats.length > 0 && el("div", "stats", stats.map(([value, label, symbol, style]) =>
+    el("div", "stat", symbol && el("span", `stat-symbol ${style || ""}`, icon(symbol)),
+      el("strong", "", value ?? 0), el("small", "muted", label)))), subtitle && el("p", "dashboard-caption", subtitle));
 }
 function latestLabel(value, empty, checked = false) {
   if (!value) return empty;
@@ -372,7 +394,7 @@ async function openSettings() {
     () => post("/api/files/reveal", {kind: "root"}), {symbol: "folder"}));
   links.append(button(tr("打开桌面小组件", "Open desktop widgets"),
     () => post("/api/widgets/open", {page: state.page === "works" ? "works" : "submissions"}), {symbol: "city"}));
-  modal(tr("设置", "Settings"), [formGroup(tr("通用", "General"),
+  const groups = el("div", "settings-grid", formGroup(tr("通用", "General"),
     selectField(tr("外观", "Appearance"), "appearance", data.settings.appearance, [["system", tr("跟随系统", "System")], ["light", tr("浅色", "Light")], ["dark", tr("深色", "Dark")]]),
     selectField(tr("语言", "Language"), "language", data.settings.language, [["zh-Hans", "简体中文"], ["en", "English"]])),
   formGroup(tr("投稿提醒", "Follow-up reminders"),
@@ -381,7 +403,8 @@ async function openSettings() {
     el("small", "muted", tr("系统通知会显示稿件标题和当前状态。", "Notifications show the manuscript title and current status.")),
     el("small", "muted", remindersMessage[reminders.state])),
   formGroup(tr("本地资料", "Local data"), el("p", "path-text", data.dataDir), links,
-    el("small", "muted", `Windows ${state.version} · build ${state.build}`))], {submit: async (values) => {
+    el("small", "muted", `Windows ${state.version} · build ${state.build}`)));
+  modal(tr("设置", "Settings"), [groups], {size: "settings-dialog", submit: async (values) => {
     const {notificationsEnabled, ...settings} = values;
     if (!systemReminders.disabled) settings.notificationsEnabled = Boolean(notificationsEnabled);
     await post("/api/settings", {...settings, followUpDays: Number(settings.followUpDays)});
@@ -399,24 +422,10 @@ async function quit() {
 }
 async function pageCity() {
   const data = await api("/api/reward");
-  const balances = data.city || data;
-  const stats = dashboard(tr("让每一份学术积累，长成属于你的绿色研究城", "Grow a green city with each research milestone"), [
-    [Math.floor((balances.coins || 0) + (data.pendingCoins || 0)), tr("金币", "Coins"), "coin", "clay"],
-    [balances.buildingTickets, tr("房屋券", "Building tickets"), "ticket"],
-    [balances.decorationTickets, tr("摆件券", "Decoration tickets"), "seal", "teal"],
-  ]);
-  const collect = button(tr("收取金币", "Collect coins"), async () => { await post("/api/reward/collect"); await refresh(); },
-    {symbol: "coin", disabled: (data.pendingCoins || 0) < 0.01});
   const city = renderRewardCity({data, request: api, language: state.language, onUpdate: (next) => {
-    const latest = next.city || next;
-    [Math.floor((latest.coins || 0) + (next.pendingCoins || 0)), latest.buildingTickets, latest.decorationTickets].forEach((value, index) => {
-      stats.querySelectorAll(".stat strong")[index].textContent = value ?? 0;
-    });
-    collect.disabled = (next.pendingCoins || 0) < 0.01;
-    state.overview.city.count = next.placements?.length ?? latest.placements?.length ?? 0;
-    navGroups();
+    state.overview.city.count = next.placements?.length ?? next.city?.placements?.length ?? 0;
   }});
-  return {tools: [collect], nodes: [stats, city]};
+  return {tools: [], nodes: [city]};
 }
 
 let renderGeneration = 0;
@@ -425,13 +434,30 @@ async function render() {
   const generation = ++renderGeneration;
   const page = state.page;
   navGroups(); utilities(); applyChrome();
+  const main = $("main");
+  if (main.dataset.page !== page) {
+    $("page-tools").replaceChildren();
+    main.replaceChildren(el("p", "page-wait", tr("正在加载…", "Loading…")));
+  }
+  main.setAttribute("aria-busy", "true");
   const build = {submissions: pageSubmissions, works: pageWorks, certificates: pageCertificates, city: pageCity}[page] || pageDocuments;
-  const result = await build(page, state.query);
-  if (generation !== renderGeneration || page !== state.page) return;
-  $("page-tools").replaceChildren(...result.tools);
-  const notice = state.writable ? [] : [el("p", "readonly-notice", state.libraryMessage)];
-  $("main").replaceChildren(...notice, ...result.nodes);
-  $("main").dataset.page = page;
+  try {
+    const result = await build(page, state.query);
+    if (generation !== renderGeneration || page !== state.page) return;
+    $("page-tools").replaceChildren(...result.tools);
+    const notice = state.writable ? [] : [el("p", "readonly-notice", state.libraryMessage)];
+    main.replaceChildren(...notice, ...result.nodes);
+    main.dataset.page = page;
+  } catch (error) {
+    if (generation !== renderGeneration) return;
+    const failed = emptyState("refresh", tr("页面加载失败", "The page could not load"), error.message,
+      button(tr("重新加载", "Try again"), render, {symbol: "refresh"}));
+    failed.setAttribute("role", "alert");
+    main.replaceChildren(failed);
+    delete main.dataset.page;
+  } finally {
+    if (generation === renderGeneration) main.setAttribute("aria-busy", "false");
+  }
 }
 async function refresh(info = null) {
   const data = info || await api("/api/bootstrap");
@@ -462,7 +488,7 @@ async function applyRoute() {
     else toast(tr("这条提醒对应的稿件已找不到。", "The submission for this reminder is no longer available."));
   }
   else if (Object.hasOwn(PAGE_LABELS, route)) await setPage(route);
-  else if (["changed", "hidden", "projects"].includes(route)) {
+  else if (["changed", "followup", "hidden", "projects"].includes(route)) {
     await setPage("submissions");
     if (route !== "projects") { state.scope = route; await render(); }
   }
@@ -476,6 +502,9 @@ function applySearch() {
   searchTimer = setTimeout(() => render().catch(report), 150);
 }
 document.addEventListener("DOMContentLoaded", async () => {
+  compactRail.addEventListener("change", () => {
+    $("nav-toggle").querySelector("button")?.setAttribute("aria-expanded", String(navigationExpanded()));
+  });
   $("gate-create").addEventListener("click", () => post("/api/library/create").then(refresh).then(applyRoute).catch(report));
   $("gate-retry").addEventListener("click", () => post("/api/library/reload").then(refresh).then(applyRoute).catch(report));
   $("gate-quit").addEventListener("click", () => quit().catch(report));
@@ -483,6 +512,13 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("clear-search").addEventListener("click", () => { $("search").value = ""; applySearch(); safeFocus($("search")); });
   window.addEventListener("hashchange", () => applyRoute().catch(report));
   document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && document.activeElement?.closest(".popover[open]")) {
+      const menu = document.activeElement.closest(".popover[open]");
+      menu.open = false;
+      safeFocus(menu.querySelector("summary"));
+      event.preventDefault();
+      return;
+    }
     if ($("shell").hidden || $("editor").open || !(event.ctrlKey || event.metaKey)) return;
     if (event.key.toLowerCase() === "f" && state.page !== "city") { event.preventDefault(); safeFocus($("search")); }
     if (event.key === ",") { event.preventDefault(); openSettings().catch(report); }
@@ -493,6 +529,9 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     const info = await api("/api/bootstrap");
     await refresh(info); await applyRoute();
-    if (info.followUps) toast(tr(`${info.followUps} 篇论文待跟进`, `${info.followUps} submissions to follow up`));
-  } catch (error) { report(error); }
+  } catch (error) {
+    $("gate").hidden = false;
+    $("gate-text").textContent = error.message;
+    $("gate-retry").addEventListener("click", () => window.location.reload(), {once: true});
+  }
 });

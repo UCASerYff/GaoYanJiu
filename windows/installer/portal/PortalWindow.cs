@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
+using System.Drawing.Imaging;
 using System.IO;
 using System.Text;
 using System.Threading.Tasks;
@@ -68,22 +69,18 @@ namespace GaoYanJiu.Portal
         private readonly StreamWriter output;
         private readonly bool smoke;
         private readonly bool english;
-        private readonly bool dark;
+        private readonly PortalTheme theme;
+        private readonly PortalChrome chrome;
         private readonly Uri origin;
-        private readonly TextBox address = new TextBox { Dock = DockStyle.Fill };
-        private readonly Label status = new Label { AutoSize = false, Dock = DockStyle.Bottom, Height = 31, TextAlign = ContentAlignment.MiddleLeft };
-        private readonly Button back;
-        private readonly Button forward;
-        private readonly Button reload;
-        private readonly Button go;
-        private readonly Button extract;
-        private readonly WebView2 browser = new WebView2 { Dock = DockStyle.Fill };
         private CoreWebView2Environment environment;
         private bool loaded;
         private bool extracting;
         private bool captured;
         private bool hasFatalError;
         private int navigationGeneration;
+        private bool probeAuthRequested;
+
+        private WebView2 browser { get { return chrome.Browser; } }
 
         internal PortalWindow(PortalInput settings, StreamReader inputPipe, StreamWriter outputPipe, bool smokeMode)
         {
@@ -92,67 +89,46 @@ namespace GaoYanJiu.Portal
             output = outputPipe;
             smoke = smokeMode;
             english = settings.language == "en";
-            dark = settings.appearance == "dark" || (settings.appearance != "light" && SystemUsesDarkTheme());
+            theme = new PortalTheme(settings.appearance);
+            chrome = new PortalChrome(theme, english, settings.name, false);
             origin = new Uri(config.url, UriKind.Absolute);
-            Text = Translate("搞研究 · 投稿门户", "GaoYanJiu · Submission Portal") + " — " + config.name;
-            Font = new Font("Segoe UI", 10f);
+            Text = Translate("搞研究 · 投稿门户", "GaoYanJiu · Submission portal");
+            Font = new Font(english ? "Segoe UI" : "Microsoft YaHei UI", 9.5f);
+            AutoScaleDimensions = new SizeF(96, 96);
             AutoScaleMode = AutoScaleMode.Dpi;
-            MinimumSize = new Size(740, 520);
-            Size = new Size(1160, 800);
+            MinimumSize = new Size(590, 450);
+            ClientSize = new Size(1080, 702);
             StartPosition = FormStartPosition.CenterScreen;
-            KeyPreview = true;
             Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            theme.ApplyCaption(this);
             if (smoke)
             {
                 ShowInTaskbar = false;
                 StartPosition = FormStartPosition.Manual;
                 Location = new Point(-32000, -32000);
-                Size = new Size(880, 620);
+                ClientSize = new Size(840, 588);
             }
 
-            BackColor = dark ? Color.FromArgb(23, 27, 25) : Color.FromArgb(243, 240, 232);
-            ForeColor = dark ? Color.WhiteSmoke : Color.FromArgb(36, 43, 40);
-            address.BackColor = dark ? Color.FromArgb(35, 42, 38) : Color.White;
-            address.ForeColor = ForeColor;
-            status.ForeColor = ForeColor;
-            status.Padding = new Padding(11, 0, 11, 0);
-            browser.DefaultBackgroundColor = BackColor;
-            address.AccessibleName = Translate("投稿网站地址", "Portal address");
-            address.Text = origin.AbsoluteUri;
-
-            back = ButtonWithAction("←", Translate("后退", "Back"), delegate { if (browser.CanGoBack) browser.GoBack(); });
-            forward = ButtonWithAction("→", Translate("前进", "Forward"), delegate { if (browser.CanGoForward) browser.GoForward(); });
-            reload = ButtonWithAction("⟳", Translate("重新载入", "Reload"), delegate { if (browser.CoreWebView2 != null) browser.Reload(); });
-            go = ButtonWithAction(Translate("前往", "Go"), Translate("前往当前地址", "Go to address"), NavigateAddress);
-            extract = ButtonWithAction(Translate("提取稿件并审核", "Extract for review"), Translate("提取当前页面的稿件", "Extract submissions on this page"),
-                async delegate { await ExtractAsync(); });
-            extract.BackColor = dark ? Color.FromArgb(154, 215, 185) : Color.FromArgb(36, 75, 66);
-            extract.ForeColor = dark ? Color.FromArgb(14, 25, 20) : Color.White;
-            extract.Enabled = false;
-            back.Enabled = false;
-            forward.Enabled = false;
-            go.Enabled = false;
-            reload.Enabled = false;
-
-            var nav = new TableLayoutPanel { ColumnCount = 6, RowCount = 1, Dock = DockStyle.Top, Height = 49, Padding = new Padding(9, 8, 9, 7) };
-            for (int i = 0; i < 3; i++) nav.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            nav.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
-            nav.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            nav.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
-            nav.Controls.Add(back, 0, 0);
-            nav.Controls.Add(forward, 1, 0);
-            nav.Controls.Add(reload, 2, 0);
-            nav.Controls.Add(address, 3, 0);
-            nav.Controls.Add(go, 4, 0);
-            nav.Controls.Add(extract, 5, 0);
-            Controls.Add(browser);
-            Controls.Add(status);
-            Controls.Add(nav);
-
-            SetStatus(Translate("正在启动内嵌投稿门户…", "Starting the embedded submission portal…"));
-            address.KeyDown += OnAddressKeyDown;
-            KeyDown += OnWindowKeyDown;
-            Shown += async delegate { await InitializeAsync(); };
+            BackColor = theme.Canvas;
+            chrome.SetAddress(origin.AbsoluteUri);
+            chrome.Finish.Enabled = false;
+            Controls.Add(chrome);
+            BindNavigation(chrome);
+            chrome.Go.Click += delegate { NavigateAddress(); };
+            chrome.Address.KeyDown += delegate(object sender, KeyEventArgs args)
+            {
+                if (args.KeyCode != Keys.Enter || args.Modifiers != Keys.None) return;
+                args.SuppressKeyPress = true;
+                NavigateAddress();
+            };
+            chrome.Finish.Click += async delegate { await ExtractAsync(); };
+            BindBrowserShortcuts(this, chrome, false);
+            SetStatus(Translate("正在启动投稿窗口…", "Opening the submission portal…"), PortalStatus.Busy);
+            Shown += async delegate
+            {
+                if (!smoke) FitToWorkingArea(this);
+                await InitializeAsync();
+            };
             FormClosed += delegate { if (!captured && !hasFatalError) Send("closed", "", null); };
         }
 
@@ -177,62 +153,58 @@ namespace GaoYanJiu.Portal
 
         private string Translate(string zh, string en) { return english ? en : zh; }
 
-        private static bool SystemUsesDarkTheme()
+        private static void FitToWorkingArea(Form window)
         {
-            const string key = @"HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize";
-            try { return Convert.ToInt32(Microsoft.Win32.Registry.GetValue(key, "AppsUseLightTheme", 1)) == 0; }
-            catch (Exception) { return false; }
+            Rectangle desktop = Screen.FromControl(window).WorkingArea;
+            int width = Math.Max(window.MinimumSize.Width, Math.Min(window.Width, desktop.Width - 18));
+            int height = Math.Max(window.MinimumSize.Height, Math.Min(window.Height, desktop.Height - 18));
+            if (width != window.Width || height != window.Height)
+                window.Bounds = new Rectangle(desktop.Left + (desktop.Width - width) / 2,
+                    desktop.Top + (desktop.Height - height) / 2, width, height);
         }
 
-        private Button ButtonWithAction(string title, string accessibleName, Action action)
+        private static void BindNavigation(PortalChrome windowChrome)
         {
-            var button = new Button
+            WebView2 view = windowChrome.Browser;
+            windowChrome.Back.Click += delegate { if (view.CanGoBack) view.GoBack(); };
+            windowChrome.Forward.Click += delegate { if (view.CanGoForward) view.GoForward(); };
+            windowChrome.Reload.Click += delegate { if (view.CoreWebView2 != null) view.Reload(); };
+        }
+
+        private static Action Shortcut(PortalChrome windowChrome, bool signIn, Keys keyData)
+        {
+            if (keyData == (Keys.Control | Keys.L))
+                return delegate { windowChrome.Address.Focus(); windowChrome.Address.SelectAll(); };
+            if (keyData == Keys.F5 || keyData == (Keys.Control | Keys.R)) return windowChrome.Reload.PerformClick;
+            if (keyData == (Keys.Alt | Keys.Left)) return windowChrome.Back.PerformClick;
+            if (keyData == (Keys.Alt | Keys.Right)) return windowChrome.Forward.PerformClick;
+            if (keyData == (signIn ? Keys.Escape : Keys.Control | Keys.Enter)) return windowChrome.Finish.PerformClick;
+            return null;
+        }
+
+        private static void BindBrowserShortcuts(Form window, PortalChrome windowChrome, bool signIn)
+        {
+            window.KeyPreview = true;
+            window.KeyDown += delegate(object sender, KeyEventArgs args)
             {
-                Text = title,
-                AccessibleName = accessibleName,
-                AutoSize = true,
-                Dock = DockStyle.Fill,
-                MinimumSize = new Size(33, 27),
-                Margin = new Padding(3, 0, 3, 0),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = BackColor,
-                ForeColor = ForeColor
+                Action action = Shortcut(windowChrome, signIn, args.KeyData);
+                if (action == null) return;
+                args.SuppressKeyPress = true;
+                action();
             };
-            button.FlatAppearance.BorderColor = dark ? Color.FromArgb(69, 79, 74) : Color.FromArgb(210, 210, 199);
-            button.Click += delegate { action(); };
-            return button;
-        }
-
-        private void OnAddressKeyDown(object sender, KeyEventArgs args)
-        {
-            if (args.KeyCode != Keys.Enter) return;
-            args.SuppressKeyPress = true;
-            NavigateAddress();
-        }
-
-        private void OnWindowKeyDown(object sender, KeyEventArgs args)
-        {
-            if (args.Control && args.KeyCode == Keys.L)
+            windowChrome.Browser.HandleShortcut = delegate(Keys keyData)
             {
-                address.Focus();
-                address.SelectAll();
-                args.SuppressKeyPress = true;
-            }
-            else if ((args.Control && args.KeyCode == Keys.R) || args.KeyCode == Keys.F5)
+                Action action = Shortcut(windowChrome, signIn, keyData);
+                if (action == null || window.IsDisposed) return false;
+                window.BeginInvoke(action);
+                return true;
+            };
+            // The WinForms SDK raises KeyDown for accelerators originating in
+            // the focused web page, outside the form's own message handling.
+            windowChrome.Browser.KeyDown += delegate(object sender, KeyEventArgs args)
             {
-                if (browser.CoreWebView2 != null) browser.Reload();
-                args.SuppressKeyPress = true;
-            }
-            else if (args.Alt && args.KeyCode == Keys.Left && browser.CanGoBack)
-            {
-                browser.GoBack();
-                args.SuppressKeyPress = true;
-            }
-            else if (args.Alt && args.KeyCode == Keys.Right && browser.CanGoForward)
-            {
-                browser.GoForward();
-                args.SuppressKeyPress = true;
-            }
+                if (windowChrome.Browser.HandleShortcut(args.KeyData)) args.SuppressKeyPress = true;
+            };
         }
 
         private void WatchForParentClose()
@@ -246,7 +218,10 @@ namespace GaoYanJiu.Portal
                     while ((command = input.ReadLine()) != null)
                     {
                         // The offscreen probe uses the same button as the user.
-                        if (smoke && command == "extract") BeginInvoke((Action)extract.PerformClick);
+                        if (!smoke) continue;
+                        if (command == "extract") BeginInvoke((Action)chrome.Finish.PerformClick);
+                        if (command == "layout-compact") BeginInvoke((Action)ProbeCompactLayout);
+                        if (command == "layout-auth") BeginInvoke((Action)ProbeAuthLayout);
                     }
                 }
                 catch (IOException) { }
@@ -271,17 +246,17 @@ namespace GaoYanJiu.Portal
                     return;
                 }
                 await browser.EnsureCoreWebView2Async(environment);
-                ConfigureCore(browser.CoreWebView2);
+                ConfigureCore(chrome);
                 browser.CoreWebView2.NavigationStarting += MainNavigationStarting;
                 browser.CoreWebView2.NavigationCompleted += MainNavigationCompleted;
                 browser.CoreWebView2.SourceChanged += delegate
                 {
-                    address.Text = browser.CoreWebView2.Source;
+                    chrome.SetAddress(browser.CoreWebView2.Source);
                     UpdateButtons();
                 };
                 browser.CoreWebView2.HistoryChanged += delegate { UpdateButtons(); };
-                go.Enabled = true;
-                reload.Enabled = true;
+                chrome.Go.Enabled = true;
+                chrome.Reload.Enabled = true;
                 browser.CoreWebView2.Navigate(origin.AbsoluteUri);
                 Send("ready", "loading", null);
             }
@@ -296,8 +271,9 @@ namespace GaoYanJiu.Portal
             }
         }
 
-        private void ConfigureCore(CoreWebView2 core)
+        private void ConfigureCore(PortalChrome windowChrome)
         {
+            CoreWebView2 core = windowChrome.Browser.CoreWebView2;
             var settings = core.Settings;
             settings.AreHostObjectsAllowed = false;
             settings.IsWebMessageEnabled = false;
@@ -306,9 +282,9 @@ namespace GaoYanJiu.Portal
             settings.AreDefaultContextMenusEnabled = false;
             settings.IsPasswordAutosaveEnabled = false;
             settings.IsGeneralAutofillEnabled = false;
-            core.Profile.PreferredColorScheme = dark ? CoreWebView2PreferredColorScheme.Dark : CoreWebView2PreferredColorScheme.Light;
-            core.NavigationStarting += GuardNavigation;
-            core.FrameNavigationStarting += GuardNavigation;
+            core.Profile.PreferredColorScheme = theme.Dark ? CoreWebView2PreferredColorScheme.Dark : CoreWebView2PreferredColorScheme.Light;
+            core.NavigationStarting += delegate(object sender, CoreWebView2NavigationStartingEventArgs args) { GuardNavigation(windowChrome, args); };
+            core.FrameNavigationStarting += delegate(object sender, CoreWebView2NavigationStartingEventArgs args) { GuardNavigation(windowChrome, args); };
             core.NewWindowRequested += OpenPopup;
             core.PermissionRequested += delegate(object sender, CoreWebView2PermissionRequestedEventArgs args)
             {
@@ -347,32 +323,70 @@ namespace GaoYanJiu.Portal
             return uri.Scheme == Uri.UriSchemeHttps && !uri.IsLoopback;
         }
 
-        private void GuardNavigation(object sender, CoreWebView2NavigationStartingEventArgs args)
+        private void GuardNavigation(PortalChrome windowChrome, CoreWebView2NavigationStartingEventArgs args)
         {
             if (NavigationAllowed(args.Uri)) return;
             args.Cancel = true;
-            SetStatus(Translate("已拦截不支持的地址。", "This navigation is blocked."));
+            windowChrome.SetStatus(Translate("此地址已拦截，请返回投稿站或登录站。", "This address was blocked. Return to the portal or its sign-in page."), PortalStatus.Warning);
         }
 
         private async void OpenPopup(object sender, CoreWebView2NewWindowRequestedEventArgs args)
         {
-            if (!args.IsUserInitiated || !NavigationAllowed(args.Uri) || smoke)
+            if (!args.IsUserInitiated || !NavigationAllowed(args.Uri) || (smoke && !probeAuthRequested))
             {
                 args.Handled = true;
                 return;
             }
             using (args.GetDeferral())
             {
-                var popup = new Form { Text = Translate("投稿门户登录", "Portal sign-in"), Size = new Size(900, 700), StartPosition = FormStartPosition.CenterParent };
-                var popupBrowser = new WebView2 { Dock = DockStyle.Fill };
-                var popupAddress = new TextBox { Dock = DockStyle.Top, ReadOnly = true, AccessibleName = Translate("登录地址", "Sign-in address") };
-                popup.Controls.Add(popupBrowser);
-                popup.Controls.Add(popupAddress);
+                var popup = new PortalPopup(smoke)
+                {
+                    Text = Translate("搞研究 · 投稿登录", "GaoYanJiu · Portal sign-in"), ShowInTaskbar = false,
+                    AutoScaleDimensions = new SizeF(96, 96), AutoScaleMode = AutoScaleMode.Dpi,
+                    ClientSize = new Size(870, 640), MinimumSize = new Size(530, 420),
+                    StartPosition = smoke ? FormStartPosition.Manual : FormStartPosition.CenterParent, BackColor = theme.Canvas,
+                    Font = new Font(english ? "Segoe UI" : "Microsoft YaHei UI", 9.5f), Icon = Icon
+                };
+                if (smoke) popup.Location = new Point(-32000, -32000);
+                else popup.Shown += delegate { FitToWorkingArea(popup); };
+                theme.ApplyCaption(popup);
+                var popupChrome = new PortalChrome(theme, english, config.name, true);
+                popupChrome.SetAddress(args.Uri);
+                popupChrome.SetStatus(Translate("正在打开登录网站…", "Opening the sign-in website…"), PortalStatus.Busy);
+                popupChrome.Finish.Click += delegate { popup.Close(); };
+                BindNavigation(popupChrome);
+                BindBrowserShortcuts(popup, popupChrome, true);
+                popup.Controls.Add(popupChrome);
                 try
                 {
+                    WebView2 popupBrowser = popupChrome.Browser;
                     await popupBrowser.EnsureCoreWebView2Async(environment);
-                    ConfigureCore(popupBrowser.CoreWebView2);
-                    popupBrowser.CoreWebView2.SourceChanged += delegate { popupAddress.Text = popupBrowser.CoreWebView2.Source; };
+                    ConfigureCore(popupChrome);
+                    popupChrome.Reload.Enabled = true;
+                    popupBrowser.CoreWebView2.SourceChanged += delegate { popupChrome.SetAddress(popupBrowser.CoreWebView2.Source); };
+                    popupBrowser.CoreWebView2.HistoryChanged += delegate
+                    {
+                        popupChrome.Back.Enabled = popupBrowser.CanGoBack;
+                        popupChrome.Forward.Enabled = popupBrowser.CanGoForward;
+                    };
+                    popupBrowser.CoreWebView2.NavigationStarting += delegate(object source, CoreWebView2NavigationStartingEventArgs navigation)
+                    {
+                        if (!navigation.Cancel)
+                            popupChrome.SetStatus(Translate("正在加载登录页面…", "Loading sign-in page…"), PortalStatus.Busy);
+                    };
+                    popupBrowser.CoreWebView2.NavigationCompleted += async delegate(object source, CoreWebView2NavigationCompletedEventArgs navigation)
+                    {
+                        if (navigation.IsSuccess)
+                            popupChrome.SetStatus(Translate("登录完成后返回投稿门户。", "Return to the portal when sign-in is complete."), PortalStatus.Ready);
+                        else
+                            popupChrome.SetStatus(Translate("登录页面加载失败，可以重新载入。", "The sign-in page could not load. Reload to try again."), PortalStatus.Warning);
+                        if (smoke && probeAuthRequested)
+                        {
+                            probeAuthRequested = false;
+                            await SaveProbe(popup, popupChrome, "auth");
+                            popup.Close();
+                        }
+                    };
                     popupBrowser.CoreWebView2.WindowCloseRequested += delegate { popup.Close(); };
                     args.NewWindow = popupBrowser.CoreWebView2;
                     args.Handled = true;
@@ -382,8 +396,86 @@ namespace GaoYanJiu.Portal
                 {
                     popup.Dispose();
                     args.Handled = true;
-                    SetStatus(Translate("无法打开投稿门户登录窗口。", "Could not open the portal sign-in window."));
+                    SetStatus(Translate("无法打开投稿登录窗口，请从当前页面重试。", "The sign-in window could not open. Try again from the current page."), PortalStatus.Warning);
                 }
+            }
+        }
+
+        private async void ProbeCompactLayout()
+        {
+            if (!loaded || !SameOrigin(browser.Source)) return;
+            using (Graphics graphics = CreateGraphics())
+            {
+                float dpi = graphics.DpiX / 96f;
+                ClientSize = new Size((int)(600 * dpi), (int)(460 * dpi));
+            }
+            await Task.Delay(150);
+            await SaveProbe(this, chrome, "compact");
+        }
+
+        private async void ProbeAuthLayout()
+        {
+            if (!loaded || !SameOrigin(browser.Source)) return;
+            probeAuthRequested = true;
+            try
+            {
+                await DevTools("Runtime.evaluate", new
+                {
+                    expression = "window.open('/gao-fixture-sign-in?temporary=hidden', 'gaoFixtureSignIn')",
+                    userGesture = true
+                });
+            }
+            catch (Exception) { probeAuthRequested = false; }
+        }
+
+        private async Task SaveProbe(Form window, PortalChrome surface, string name)
+        {
+            try
+            {
+                using (var page = new MemoryStream())
+                {
+                    Task capture = surface.Browser.CoreWebView2.CapturePreviewAsync(CoreWebView2CapturePreviewImageFormat.Png, page);
+                    if (await Task.WhenAny(capture, Task.Delay(5000)) != capture) throw new TimeoutException();
+                    await capture;
+                    page.Position = 0;
+                    using (var image = new Bitmap(window.ClientSize.Width, window.ClientSize.Height))
+                    {
+                        surface.DrawToBitmap(image, window.ClientRectangle);
+                        using (var content = Image.FromStream(page))
+                        using (Graphics graphics = Graphics.FromImage(image))
+                        {
+                            Rectangle view = window.RectangleToClient(surface.Browser.RectangleToScreen(surface.Browser.ClientRectangle));
+                            graphics.DrawImage(content, view);
+                        }
+                        image.Save(Path.Combine(config.profile, name + ".png"), ImageFormat.Png);
+                    }
+                }
+                using (Graphics graphics = window.CreateGraphics())
+                {
+                    Rectangle action = window.RectangleToClient(surface.Finish.RectangleToScreen(surface.Finish.ClientRectangle));
+                    Rectangle navigation = window.RectangleToClient(surface.Reload.RectangleToScreen(surface.Reload.ClientRectangle));
+                    Rectangle page = window.RectangleToClient(surface.Browser.RectangleToScreen(surface.Browser.ClientRectangle));
+                    var layout = new
+                    {
+                        theme = theme.Dark ? "dark" : "light",
+                        dpi = graphics.DpiX,
+                        width = window.ClientSize.Width,
+                        height = window.ClientSize.Height,
+                        addressWidth = surface.Address.Width,
+                        buttonHeight = surface.Finish.Height,
+                        rows = surface.GetRowHeights(),
+                        actionFits = window.ClientRectangle.Contains(action)
+                            && action.Width >= surface.Finish.GetPreferredSize(Size.Empty).Width
+                            && navigation.Bottom <= page.Top && action.Top >= page.Bottom,
+                        status = surface.StatusText,
+                        address = surface.Address.Text
+                    };
+                    File.WriteAllText(Path.Combine(config.profile, name + ".json"), Program.Json.Serialize(layout));
+                }
+            }
+            catch (Exception)
+            {
+                File.WriteAllText(Path.Combine(config.profile, name + ".json"), "{\"error\":\"visual-capture-failed\"}");
             }
         }
 
@@ -393,7 +485,7 @@ namespace GaoYanJiu.Portal
             ++navigationGeneration;
             loaded = false;
             UpdateButtons();
-            SetStatus(Translate("正在加载投稿页面…", "Loading portal page…"));
+            SetStatus(Translate("正在加载投稿页面…", "Loading portal page…"), PortalStatus.Busy);
         }
 
         private void MainNavigationCompleted(object sender, CoreWebView2NavigationCompletedEventArgs args)
@@ -402,18 +494,18 @@ namespace GaoYanJiu.Portal
             UpdateButtons();
             if (!loaded)
             {
-                SetStatus(Translate("页面加载失败。请检查地址或重新载入。", "Could not load the page. Check the address or reload."));
+                SetStatus(Translate("页面加载失败。检查地址或重新载入。", "The page could not load. Check the address or reload."), PortalStatus.Warning);
                 Send("ready", "navigation-failed", null);
                 return;
             }
             if (SameOrigin(browser.Source))
             {
-                SetStatus(Translate("在稿件列表或详情页点击「提取稿件并审核」。", "On a submission list or details page, click Extract for review."));
+                SetStatus(Translate("打开稿件列表或详情后，即可提取并审核。", "Open a submission list or article page, then extract for review."), PortalStatus.Ready);
                 Send("ready", "", null);
             }
             else
             {
-                SetStatus(Translate("可在此页面登录。请回到所选投稿门户后提取。", "You can sign in here. Return to the selected portal to extract submissions."));
+                SetStatus(Translate("请在本页登录。返回投稿站后即可提取。", "Sign in here. You can extract submissions after returning to the portal."), PortalStatus.Ready);
                 Send("ready", "different-origin", null);
             }
         }
@@ -421,11 +513,11 @@ namespace GaoYanJiu.Portal
         private void NavigateAddress()
         {
             if (browser.CoreWebView2 == null) return;
-            string value = address.Text.Trim();
+            string value = chrome.Address.Text.Trim();
             if (!value.Contains("://")) value = "https://" + value;
             if (!NavigationAllowed(value))
             {
-                SetStatus(Translate("请输入有效的 HTTPS 投稿地址。", "Enter a supported HTTPS portal address."));
+                SetStatus(Translate("请输入有效的投稿网站地址。", "Enter a valid submission website address."), PortalStatus.Warning);
                 return;
             }
             browser.CoreWebView2.Navigate(value);
@@ -433,9 +525,9 @@ namespace GaoYanJiu.Portal
 
         private void UpdateButtons()
         {
-            back.Enabled = browser.CanGoBack;
-            forward.Enabled = browser.CanGoForward;
-            extract.Enabled = loaded && !extracting && SameOrigin(browser.Source);
+            chrome.Back.Enabled = browser.CanGoBack;
+            chrome.Forward.Enabled = browser.CanGoForward;
+            chrome.Finish.Enabled = loaded && !extracting && SameOrigin(browser.Source);
         }
 
         private async Task<Dictionary<string, object>> DevTools(string method, object parameters)
@@ -451,7 +543,7 @@ namespace GaoYanJiu.Portal
             int generation = navigationGeneration;
             extracting = true;
             UpdateButtons();
-            SetStatus(Translate("正在提取当前页面稿件…", "Extracting submissions from this page…"));
+            SetStatus(Translate("正在提取当前页面的稿件…", "Extracting submissions from this page…"), PortalStatus.Busy);
             try
             {
                 var frames = await DevTools("Page.getFrameTree", new object());
@@ -486,7 +578,7 @@ namespace GaoYanJiu.Portal
                 var papers = result.ContainsKey("papers") ? result["papers"] as IList : null;
                 if (papers == null || papers.Count == 0)
                 {
-                    SetStatus(Translate("本页没有识别到完整的稿件标题和状态。", "No complete submission title and status were found on this page."));
+                    SetStatus(Translate("未找到稿件标题或状态。请打开稿件列表后重试。", "No submission titles or statuses found. Open the submission list and try again."), PortalStatus.Warning);
                     Send("ready", "no-papers", null);
                     if (smoke) Close();
                     return;
@@ -500,7 +592,7 @@ namespace GaoYanJiu.Portal
             {
                 if (!IsDisposed)
                 {
-                    SetStatus(Translate("提取失败。请确认页面已加载完成并重试。", "Extraction failed. Wait for the page to finish loading and retry."));
+                    SetStatus(Translate("提取失败。请在页面加载完成后重试。", "Extraction failed. Try again after the page finishes loading."), PortalStatus.Warning);
                     Send("ready", "extract-failed", null);
                     if (smoke) Close();
                 }
@@ -512,13 +604,13 @@ namespace GaoYanJiu.Portal
             }
         }
 
-        private void SetStatus(string text) { if (!IsDisposed) status.Text = text; }
+        private void SetStatus(string text, PortalStatus mood) { if (!IsDisposed) chrome.SetStatus(text, mood); }
 
         private void Fail(string notice, string text)
         {
             if (IsDisposed) return;
             hasFatalError = true;
-            SetStatus(text);
+            SetStatus(text, PortalStatus.Warning);
             Send("error", notice, null);
             Close();
         }
@@ -531,6 +623,25 @@ namespace GaoYanJiu.Portal
                 string response = Program.Json.Serialize(new { state = state, capture = capture });
                 if (Encoding.UTF8.GetByteCount(response) >= Program.CaptureLimit) throw new InvalidDataException();
                 output.WriteLine(response);
+            }
+        }
+    }
+
+    internal sealed class PortalPopup : Form
+    {
+        private readonly bool offscreen;
+
+        internal PortalPopup(bool offscreenMode) { offscreen = offscreenMode; }
+
+        protected override bool ShowWithoutActivation { get { return offscreen; } }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams parameters = base.CreateParams;
+                if (offscreen) parameters.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE
+                return parameters;
             }
         }
     }

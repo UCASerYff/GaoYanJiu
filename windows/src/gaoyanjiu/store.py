@@ -259,6 +259,8 @@ class ResearchStore:
         papers = list((self.library.data or {}).get("papers") or [])
         if scope == "hidden":
             papers = [paper for paper in papers if paper.get("hidden")]
+        elif scope == "followup":
+            papers = self.follow_ups()
         elif scope == "changed":
             papers = [paper for paper in papers if paper.get("changed") and not paper.get("hidden")]
         elif not include_hidden:

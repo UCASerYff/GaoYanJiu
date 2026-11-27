@@ -7,43 +7,44 @@
   <title>搞研究</title>
   <link rel="icon" href="/assets/AcademicAchievementManagerIcon.png">
   <link rel="stylesheet" href="/assets/style.css">
+  <link rel="stylesheet" href="/assets/submissions.css">
+  <link rel="stylesheet" href="/assets/collections.css">
   <link rel="stylesheet" href="/assets/city.css">
 </head>
 <body data-theme="system">
   <section id="gate" class="gate" hidden>
     <div class="gate-card card">
-      <img class="mark" src="/assets/AcademicAchievementManagerIcon.png" alt="">
-      <h1 data-zh="搞研究" data-en="GaoYanJiu">搞研究</h1>
-      <p id="gate-text"></p>
-      <button id="gate-create" class="primary" type="button" hidden data-zh="创建我的资料库" data-en="Create my library">创建我的资料库</button>
-      <button id="gate-retry" type="button" data-zh="重新载入" data-en="Reload">重新载入</button>
-      <button id="gate-quit" type="button" data-zh="退出" data-en="Quit">退出</button>
+      <div class="gate-title"><img class="mark" src="/assets/AcademicAchievementManagerIcon.png" alt="">
+        <h1 data-zh="搞研究" data-en="GaoYanJiu">搞研究</h1></div>
+      <p id="gate-text" role="status"></p>
+      <div class="row gate-actions">
+        <button id="gate-create" class="primary" type="button" hidden data-zh="创建我的资料库" data-en="Create my library">创建我的资料库</button>
+        <button id="gate-retry" type="button" data-zh="重新载入" data-en="Reload">重新载入</button>
+        <button id="gate-quit" class="quiet" type="button" data-zh="退出" data-en="Quit">退出</button>
+      </div>
     </div>
   </section>
   <div id="shell" class="shell" hidden>
     <aside id="sidebar" class="sidebar">
       <div class="brand">
         <img class="mark" src="/assets/AcademicAchievementManagerIcon.png" alt="">
-        <div>
-          <strong data-zh="搞研究" data-en="GaoYanJiu">搞研究</strong>
-          <small data-zh="投稿、成果与研究资产" data-en="Submissions, works and research assets">投稿、成果与研究资产</small>
-        </div>
+        <strong data-zh="搞研究" data-en="GaoYanJiu">搞研究</strong>
       </div>
       <nav id="nav" class="nav" aria-label="研究工作台"></nav>
-      <div id="sidebar-status" class="sidebar-status"></div>
+      <div id="utilities" class="utilities"></div>
     </aside>
     <div class="workspace">
       <header class="topbar">
-        <div id="utilities" class="utilities"></div>
+        <div class="page-identity"><div id="nav-toggle"></div><h1 id="page-title">在投管理</h1></div>
+        <div class="search-wrap">
+          <div class="search" role="search">
+            <span id="search-icon"></span>
+            <input id="search" type="search" autocomplete="off">
+            <button id="clear-search" type="button" class="icon-button" hidden></button>
+          </div>
+        </div>
         <div id="page-tools" class="page-tools"></div>
       </header>
-      <div class="search-wrap">
-        <div class="search" role="search">
-          <span id="search-icon"></span>
-          <input id="search" type="search" autocomplete="off">
-          <button id="clear-search" type="button" class="icon-button" hidden></button>
-        </div>
-      </div>
       <main id="main" class="main"></main>
     </div>
   </div>

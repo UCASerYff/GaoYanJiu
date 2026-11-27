@@ -762,29 +762,38 @@ class RewardCityScene {
   }
 }
 
-function previewAsset(canvas, asset) {
-  if (!asset || !canvas.getContext("2d")) return;
-  const ctx = canvas.getContext("2d"), faces = [];
+function paintPreview(canvas, faces, camera, zoom) {
+  const ctx = canvas.getContext("2d");
+  if (!faces.length || !ctx) return;
+  const {width, height} = canvas;
   const ratio = Math.min(2, window.devicePixelRatio || 1);
-  const width = Number(canvas.getAttribute("width")), height = Number(canvas.getAttribute("height"));
-  canvas.width = width * ratio;
-  canvas.height = height * ratio;
-  ctx.scale(ratio, ratio);
+  canvas.width = Math.round(width * ratio);
+  canvas.height = Math.round(height * ratio);
+  ctx.setTransform(canvas.width / width, 0, 0, canvas.height / height, 0, 0);
+  const projected = projectedFaces(faces, project(camera, width, height, zoom));
+  const points = projected.flatMap(({polygon}) => polygon);
+  const xs = points.map(([x]) => x), ys = points.map(([, y]) => y);
+  const left = Math.min(...xs), right = Math.max(...xs), top = Math.min(...ys), bottom = Math.max(...ys);
+  const fit = Math.min(1, width * 0.88 / (right - left), height * 0.88 / (bottom - top));
+  ctx.translate((width - (left + right) * fit) / 2, (height - (top + bottom) * fit) / 2);
+  ctx.scale(fit, fit);
+  for (const face of projected) paintPolygon(ctx, face);
+}
+
+function previewAsset(canvas, asset) {
+  if (!asset) return;
+  const faces = [];
   addModel(faces, asset, 0, 0, 0);
   const camera = {x: asset.width / 2, z: asset.depth / 2, yaw: 35, elevation: 32};
-  const projector = project(camera, width, height * 1.55, Math.min(width, height) * 0.74 / Math.max(asset.width, asset.depth));
-  for (const face of projectedFaces(faces, projector)) paintPolygon(ctx, face);
+  paintPreview(canvas, faces, camera, Math.min(canvas.width, canvas.height) * 0.74 / Math.max(asset.width, asset.depth));
 }
 
 function previewTerrain(canvas, kind, variant) {
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return;
-  const width = canvas.width, height = canvas.height;
   const faces = terrainMesh(kind, variant, 0, 0);
   const base = new Mesh();
   base.box(1.5, -0.22, 1.5, 3, 0.24, 3, terrainColors[kind]);
-  const projection = project({x: 1.5, z: 1.5, yaw: 43, elevation: 39}, width, height * 1.17, Math.min(width, height) * 0.25);
-  for (const face of projectedFaces([...base.faces, ...faces], projection)) paintPolygon(ctx, face);
+  const camera = {x: 1.5, z: 1.5, yaw: 43, elevation: 39};
+  paintPreview(canvas, [...base.faces, ...faces], camera, Math.min(canvas.width, canvas.height) * 0.25);
 }
 
 window.RewardCityScene = RewardCityScene;

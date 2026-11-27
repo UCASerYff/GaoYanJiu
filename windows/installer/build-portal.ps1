@@ -55,7 +55,7 @@ $compilerArguments = @('/nologo', '/utf8output', '/langversion:5', '/target:wine
     "/out:$exe", "/win32icon:$IconFile", "/win32manifest:$manifest",
     '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Web.Extensions.dll')
 $compilerArguments += @($managedNames | ForEach-Object { '/reference:' + (Join-Path $lib $_) })
-$compilerArguments += (Join-Path $sources 'PortalWindow.cs'), $versionInfo
+$compilerArguments += (Join-Path $sources 'PortalWindow.cs'), (Join-Path $sources 'PortalChrome.cs'), $versionInfo
 & $compiler @compilerArguments
 if ($LASTEXITCODE -ne 0) { throw "WebView2 portal helper compilation failed with exit code $LASTEXITCODE." }
 foreach ($name in $managedNames) { Copy-Item -LiteralPath (Join-Path $lib $name) -Destination $OutputDirectory -Force }

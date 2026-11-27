@@ -31,7 +31,7 @@ function openPaperEditor(paper = null) {
     formGroup(tr("补充信息", "Additional information"),
       field(tr("投稿网页链接（可选）", "Submission page (optional)"), "url", paper?.url),
       field(tr("备注", "Notes"), "notes", paper?.submissionHistory, "area")),
-  ], {subtitle: tr("适用于会议、期刊自建系统等需手动跟踪的稿件。", "For submissions tracked manually, including conferences and independent journal sites."),
+  ], {size: "paper-editor",
     submitLabel: paper ? tr("保存", "Save") : tr("添加", "Add"), submit: async (values) => {
       await post("/api/papers", {...values, ...(paper ? {key: paper.key} : {})});
       closeDialog(); await refresh();
@@ -70,27 +70,66 @@ async function openPaperDetail(paper) {
     paper.submissionHistory && card(tr("备注与投稿历史", "Notes and submission history"), "", el("p", "text-preview", paper.submissionHistory)),
   ].filter(Boolean), {subtitle: paper.journal, actions});
 }
-function paperRow(paper, query) {
-  const title = button(paper.title, () => openPaperDetail(paper), {style: "text-button"});
+function paperTone(paper, due) {
+  if (/accept|publish|已接受|接收|录用|已发表/i.test(paper.status)) return "teal";
+  if (due || paper.changed) return "attention";
+  return TERMINAL.test(paper.status) ? "neutral" : "";
+}
+function paperProgress(paper) {
+  const last = (paper.history || []).at(-1);
+  return {
+    title: paper.previousStatus ? `${paper.previousStatus} → ${paper.status}`
+      : last?.status || paper.status,
+    date: last?.checkedAt || paper.statusSince || paper.checkedAt,
+  };
+}
+function paperRow(paper, due, canReorder, select) {
+  const title = button(paper.title, () => select(paper), {style: "text-button"});
+  title.dataset.paperKey = paper.key;
+  title.setAttribute("aria-pressed", String(state.paperSelection === paper.key));
+  const manual = paper.sourceID === "manual";
+  const primary = manual ? button(tr("更新状态", "Update status"), () => openPaperEditor(paper),
+    {style: "paper-update", disabled: !state.writable})
+    : external(tr("打开稿件", "Open manuscript"), paper.url);
   const actions = popover(tr("论文操作", "Submission actions"), "ellipsis", [
     button(tr("查看详情", "View details"), () => openPaperDetail(paper), {symbol: "document"}),
     button(paper.hidden ? tr("恢复追踪", "Resume tracking") : tr("归档", "Archive"), () => archivePaper(paper), {symbol: "archive", disabled: !state.writable}),
     button(tr("删除", "Delete"), () => deletePaper(paper), {symbol: "trash", style: "danger", disabled: !state.writable}),
   ], true);
+  const progress = paperProgress(paper);
   const days = statusDays(paper.statusSince);
-  const row = el("article", "paper-row" + (paper.changed ? " changed" : ""),
-    el("span", paper.changed ? "record-mark clay" : "record-mark", icon(paper.changed ? "bell" : "document")),
-    el("div", "record-summary", el("div", "record-meta", el("span", "site", String(paper.site || "").toUpperCase()),
-      el("span", "", "·"), el("span", "", displayedManuscript(paper)), paper.changed && badge(tr("有更新", "Updated"), "clay")),
-    title, el("small", "muted", paper.journal)),
-    el("div", "record-status", badge(paper.status, paper.changed ? "clay" : ""),
-      el("small", "", tr("此阶段 " + days + " 天", days + " days in this status")),
-      el("small", "", tr("更新于 " + formatDate(paper.checkedAt), "Updated " + formatDate(paper.checkedAt)))),
-    el("span", "grip", icon("grip")), actions);
-  row.addEventListener("click", (event) => {
-    if (!event.target.closest("button, details, a") && !window.getSelection()?.toString()) title.click();
-  });
-  return reorderItem(row, "paper", paper.key, !query);
+  const row = el("article", "paper-row",
+    el("div", "paper-identity", title, el("small", "muted", [paper.journal,
+      displayedManuscript(paper)].filter(Boolean).join(" · "))),
+    el("div", "paper-stage", badge(paper.status, paperTone(paper, due)),
+      paper.changed && badge(tr("有更新", "Updated"), "attention"),
+      due && badge(tr("待跟进", "Follow up"), "attention"),
+      el("small", "muted", tr(`${days} 天`, `${days} days`))),
+    el("div", "paper-progress", el("span", "", progress.title), el("small", "muted", formatDate(progress.date))),
+    el("div", "paper-actions", canReorder && state.writable && el("span", "grip", icon("grip")), primary, actions));
+  return reorderItem(row, "paper", paper.key, canReorder);
+}
+function paperContext(papers, selected, due, select) {
+  if (selected) {
+    const steps = (selected.history || []).slice(-5).reverse();
+    return el("section", "card paper-context is-selected",
+      el("div", "section-head", el("h2", "", tr("稿件进度", "Manuscript progress")),
+        button(tr("关闭稿件预览", "Close manuscript preview"), () => select(), {symbol: "close", iconOnly: true})),
+      el("h3", "paper-context-title", selected.title),
+      el("div", "row", badge(selected.status, paperTone(selected, due.has(selected.key))),
+        due.has(selected.key) && badge(tr("待跟进", "Follow up"), "attention")),
+      el("small", "muted", [selected.journal, displayedManuscript(selected)].filter(Boolean).join(" · ")),
+      el("ol", "paper-events", steps.map((entry) => el("li", "", el("span", "", entry.status),
+        el("small", "muted", formatDate(entry.checkedAt))))),
+      button(tr("查看完整详情", "View full details"), () => openPaperDetail(selected), {symbol: "document"}));
+  }
+  const recent = papers.map((paper) => ({paper, ...paperProgress(paper)}))
+    .sort((a, b) => (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0)).slice(0, 5);
+  return el("section", "card paper-context", el("h2", "", tr("最近进度", "Recent progress")),
+    recent.length ? el("ul", "paper-events paper-recent", recent.map(({paper, title, date}) => el("li", "",
+      button(paper.title, () => select(paper), {style: "text-button"}),
+      el("small", "muted", [title, formatDate(date)].filter(Boolean).join(" · ")))))
+      : el("p", "muted", tr("当前列表没有进度记录。", "There is no progress history in this list.")));
 }
 function tally(values) {
   const counts = new Map();
@@ -98,7 +137,6 @@ function tally(values) {
   return [...counts].map(([label, count]) => ({label, count}));
 }
 function submissionStatistics(papers) {
-  const detail = el("details", "disclosure", el("summary", "", tr("投稿统计与趋势", "Submission statistics and trends")));
   const counts = tally(papers.map((paper) => paper.status || tr("未填写", "Unspecified")))
     .sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
   const durations = papers.map((paper) => {
@@ -107,21 +145,35 @@ function submissionStatistics(papers) {
     const note = terminal ? "" : count >= 90 ? tr("超期", "Overdue") : count >= 60 ? tr("关注", "Watch") : "";
     return {label: paper.title + " · " + displayedManuscript(paper), count, note, tone: terminal ? "terminal" : note ? "clay" : ""};
   }).sort((a, b) => b.count - a.count || a.label.localeCompare(b.label));
-  detail.append(el("div", "analytics-layout",
+  return el("div", "analytics-layout",
     chart(tr("当前投稿状态分布", "Current submission status"), tr("按当前列表中的论文状态自动统计", "Counts for the submissions in this list"), counts, {height: Math.max(190, counts.length * 30)}),
     chart(tr("各论文状态持续时间", "Time spent in current status"),
       tr("60–89 天标为关注，满 90 天标为超期。终态稿件不提醒。", "Watch at 60–89 days and overdue at 90 days. Completed submissions are excluded from reminders."),
-      durations, {height: Math.max(220, durations.length * 32), unit: tr(" 天", " d")})));
-  detail.open = state.analyticsOpen;
-  detail.addEventListener("toggle", () => { state.analyticsOpen = detail.open; });
-  return detail;
+      durations, {height: Math.max(220, durations.length * 32), unit: tr(" 天", " d")}));
 }
 async function pageSubmissions(_page, query) {
   const scope = state.scope;
-  const [{papers}, {portals}] = await Promise.all([
+  const [{papers, followUpKeys}, {portals}] = await Promise.all([
     api("/api/papers?" + new URLSearchParams({scope, q: query})), api("/api/portals"),
   ]);
   const info = state.overview.submissions;
+  const due = new Set(followUpKeys);
+  const statuses = [...new Set([...papers.map((paper) => paper.status), state.paperStatus].filter(Boolean))].sort((a, b) => a.localeCompare(b));
+  const visible = state.paperStatus ? papers.filter((paper) => paper.status === state.paperStatus) : papers;
+  const inspector = el("aside", "submission-inspector");
+  const rows = el("div", "submission-list");
+  function updateInspector() {
+    const selected = visible.find((paper) => paper.key === state.paperSelection);
+    inspector.replaceChildren(paperContext(visible, selected, due, selectPaper), portalPanel(portals));
+    rows.querySelectorAll("[data-paper-key]").forEach((item) => item.setAttribute("aria-pressed", String(item.dataset.paperKey === state.paperSelection)));
+  }
+  function selectPaper(paper = null) {
+    if (paper && !inspector.getClientRects().length) return openPaperDetail(paper);
+    state.paperSelection = paper?.key || "";
+    const restore = !paper || inspector.contains(document.activeElement);
+    updateInspector();
+    if (restore) inspector.querySelector("button")?.focus();
+  }
   const manual = () => openPaperEditor();
   const publisherPicker = () => openPortalPicker();
   const tabBar = el("div", "tabs");
@@ -129,51 +181,68 @@ async function pageSubmissions(_page, query) {
   tabBar.setAttribute("aria-label", tr("投稿范围", "Submission scope"));
   const tabs = [
     ["all", tr("全部", "All"), info.count],
-    ["changed", tr("状态更新", "Updated"), info.changed],
+    ["changed", tr("有更新", "Updated"), info.changed],
+    ["followup", tr("待跟进", "Follow up"), due.size],
     ["hidden", tr("已归档", "Archived"), info.hidden],
   ];
   for (const [key, label, count] of tabs) {
-    const tab = button(label, async () => { state.scope = key; await render(); });
+    const tab = button(label, async () => {
+      Object.assign(state, {scope: key, paperStatus: "", paperSelection: ""});
+      await render();
+      document.querySelector(`.tabs [data-scope="${key}"]`)?.focus();
+    });
     tab.dataset.scope = key;
     tab.setAttribute("aria-pressed", String(scope === key));
     tab.append(el("span", "tab-count", count));
     tabBar.append(tab);
   }
-  const portalNarrow = button(tr("门户", "Portals"), () => modal(tr("投稿门户", "Submission portals"),
-    [portalPanel(portals, false)], {size: "compact"}), {style: "portal-narrow", symbol: "link"});
-  const addition = popover(tr("添加在投", "Add submission"), "plus", [
-    button(tr("手动添加", "Add manually"), manual, {symbol: "edit", disabled: !state.writable}),
-    button(tr("从投稿系统导入", "Import from a portal"), publisherPicker, {symbol: "globe", disabled: !state.writable}),
-  ]);
-  const list = papers.length ? el("div", "submission-list",
-    scope === "all" && submissionStatistics(papers), papers.map((paper) => paperRow(paper, query))
-  ) : emptyState(scope === "hidden" ? "archive" : "document",
-    query ? tr("没有找到匹配的论文", "No matching submissions")
+  const portalAction = button(tr("投稿门户", "Submission portals"), () => modal(tr("投稿门户", "Submission portals"),
+    [portalPanel(portals, false)], {size: "compact"}), {symbol: "link"});
+  const addition = button(tr("添加稿件", "Add manuscript"), manual, {symbol: "plus", style: "primary", disabled: !state.writable});
+  const status = selectField(tr("状态筛选", "Filter by status"), "paperStatus", state.paperStatus,
+    [["", tr("全部状态", "All statuses")], ...statuses.map((value) => [value, value])]);
+  status.classList.add("paper-status-filter");
+  status.addEventListener("change", async (event) => {
+    Object.assign(state, {paperStatus: event.target.value, paperSelection: ""});
+    await render();
+    document.querySelector(".paper-status-filter select")?.focus();
+  });
+  updateInspector();
+  rows.append(...(visible.length ? [
+    el("div", "paper-table-head", ...[tr("稿件", "Manuscript"), tr("状态", "Status"), tr("最近进度", "Recent progress"),
+      tr("操作", "Actions")].map((label) => el("span", "", label))),
+    ...visible.map((paper) => paperRow(paper, due.has(paper.key), !query && !state.paperStatus && scope === "all", selectPaper)),
+  ] : [emptyState(scope === "hidden" ? "archive" : "document",
+    query || state.paperStatus ? tr("没有找到匹配的论文", "No matching submissions")
       : scope === "hidden" ? tr("归档中没有论文", "No archived submissions")
+      : scope === "followup" ? tr("没有需要跟进的稿件", "No submissions need a follow-up")
       : scope === "changed" ? tr("暂时没有新的状态变化", "No status changes") : tr("还没有在投论文", "No submissions yet"),
-    scope === "all" && !query ? tr("可以手动建立记录，也可以登录出版商系统导入。", "Add a record manually or sign in to a publisher portal to import it.")
-      : tr("状态变化会保留在本机历史记录中。", "Status updates are stored in the local submission history."),
-    ...(scope === "all" && !query ? [
-      button(tr("手动添加", "Add manually"), manual, {style: "primary", symbol: "edit", disabled: !state.writable}),
+    scope === "all" && !query && !state.paperStatus ? tr("手动建立记录，或从出版商系统导入。", "Add a record manually or import from a publisher portal.") : "",
+    ...(scope === "all" && !query && !state.paperStatus ? [
       button(tr("从投稿系统导入", "Import from a portal"), publisherPicker, {symbol: "globe", disabled: !state.writable}),
-    ] : []));
-  return {tools: [portalNarrow, addition], nodes: [
-    dashboard(latestLabel(info.latest, tr("连接投稿门户，开始整理你的学术成果", "Connect a submission portal to start organizing your work"), true), [
-      [info.count, tr("论文记录", "Submissions"), "document"], [info.active, tr("仍在投", "In progress"), "paperplane", "teal"],
-      [info.accepted, tr("已接受", "Accepted"), "seal"], [info.changed, tr("状态更新", "Status changes"), "bell", "clay"],
+    ] : []))]));
+  return {tools: [portalAction, addition], nodes: [
+    dashboard("", [
+      [info.active, tr("仍在投", "In progress"), "paperplane", "teal"],
+      [info.accepted, tr("已接受", "Accepted"), "seal"],
+      [due.size, tr("待跟进", "Follow up"), "bell", "clay"],
     ]),
-    tabBar, el("div", "submission-layout", list, portalPanel(portals)),
+    el("div", "submission-layout",
+      el("section", "submission-board",
+        el("div", "paper-filters", tabBar,
+          el("div", "paper-filter-actions", papers.length > 0 && status,
+            papers.length > 0 && button(tr("趋势", "Trends"), () => modal(tr("投稿统计与趋势", "Submission statistics and trends"),
+              [submissionStatistics(visible)], {size: "wide"}), {symbol: "chart"}))), rows),
+      inspector),
   ]};
 }
 function portalPanel(portals, wide = true) {
   const count = portals.length;
   const panel = el("section", "card stack portal-panel" + (wide ? " portal-wide" : ""),
-    el("div", "section-head", el("h2", "row", icon("link"), tr("投稿门户", "Submission portals")),
-      button(tr("从投稿系统导入", "Import from a portal"), openPortalPicker, {iconOnly: true, symbol: "plus", disabled: !state.writable})),
-    el("small", "muted", tr(count + " 个投稿门户", count + " submission portals")));
+    el("div", "section-head", wide && el("h2", "", tr("投稿门户", "Submission portals")),
+      count > 0 && button(tr("添加投稿门户", "Add submission portal"), openPortalPicker, {iconOnly: wide, symbol: "plus", disabled: !state.writable})));
   if (!count) {
-    panel.append(el("p", "muted", tr("连接投稿门户，开始整理你的学术成果", "Connect a portal to import and track submissions")),
-      el("div", "", button(tr("从投稿系统导入", "Import from a portal"), openPortalPicker, {style: "primary", disabled: !state.writable})));
+    panel.append(button(tr("从投稿系统导入", "Import from a portal"), openPortalPicker, {symbol: "link", disabled: !state.writable}));
     return panel;
   }
   for (const portal of portals) {
