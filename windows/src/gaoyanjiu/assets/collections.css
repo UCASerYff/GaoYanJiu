@@ -253,6 +253,50 @@
 .document-preview-metadata { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .document-preview-metadata > :first-child { max-width: 100%; }
 .document-ocr-pages button { white-space: nowrap; }
+.ocr-pending-button {
+  min-height: 25px;
+  padding: 2px 7px;
+  background: var(--accent-soft);
+  border-color: var(--border);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 650;
+}
+.ocr-pending-button:hover { border-color: var(--accent); color: var(--accent); }
+.ocr-document-pending, .ocr-review-note {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-raised);
+}
+.ocr-document-pending { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
+.ocr-queue-list { border: 1px solid var(--border); border-radius: 8px; }
+.ocr-queue-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  padding: 9px 11px;
+}
+.ocr-queue-row + .ocr-queue-row { border-top: 1px solid var(--border); }
+.ocr-queue-title { display: grid; gap: 2px; min-width: 0; flex: 1 1 200px; overflow-wrap: anywhere; }
+.ocr-review-source, .ocr-review-page, .ocr-review-preview { display: grid; min-width: 0; gap: 6px; }
+.ocr-review-source {
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.ocr-review-source-head, .ocr-review-page-head { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 9px; }
+.ocr-review-source-head { justify-content: space-between; }
+.ocr-review-source-head h3, .ocr-review-page-head h4 { min-width: 0; overflow-wrap: anywhere; }
+.ocr-review-page-head button { margin-inline-start: auto; min-height: 28px; font-size: 12px; }
+.ocr-review-page { padding: 6px 9px; border-radius: 6px; background: var(--surface-raised); }
+.ocr-review-page .ocr-page-text { max-height: 29vh; overflow: auto; padding-block: 4px; }
+.ocr-review-preview { padding: 6px; border: 1px solid var(--border); border-radius: 6px; }
+.ocr-review-preview .pdf-preview { min-height: 220px; height: min(45vh, 390px); }
+.ocr-review-source details { margin: 0; }
+.ocr-review-source code { overflow-wrap: anywhere; }
 #editor.catalog-editor .dialog-header h2, #editor.catalog-detail .dialog-header h2 { overflow-wrap: anywhere; }
 .journal-suggestions button { white-space: normal; overflow-wrap: anywhere; }
 @container (max-width: 800px) {

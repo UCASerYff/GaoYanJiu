@@ -1,16 +1,16 @@
 # 搞研究 Windows V4.14
 
-适用于 Windows 10 和 11 x64。Windows 构建号为 4，命令行报告 4.14+4。安装包由 Windows Installer 管理，包含界面和命令行程序。已有 4.14+3 MSI 会按当前用户升级。
+适用于 Windows 10 和 11 x64。Windows 构建号为 5，命令行报告 4.14+5。安装包由 Windows Installer 管理，包含界面和命令行程序。已有 4.14+4 MSI 会按当前用户升级。
 
 ## 安装与资料
 
-1. 下载发行附件 `GaoYanJiu-Windows-4.14-build4-x64.msi` 及同名 `.sha256` 文件。
+1. 下载发行附件 `GaoYanJiu-Windows-4.14-build5-x64.msi` 及同名 `.sha256` 文件。
 2. 在 PowerShell 中计算 SHA-256，与校验文件中的值比较。安装包没有 Authenticode 签名。
 3. 退出旧版搞研究，在当前 Windows 用户下双击 MSI，完成后从开始菜单打开「搞研究」。默认安装目录为 `%LOCALAPPDATA%\GaoYanJiu\`。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\GaoYanJiu-Windows-4.14-build4-x64.msi
-Get-Content .\GaoYanJiu-Windows-4.14-build4-x64.msi.sha256
+Get-FileHash -Algorithm SHA256 .\GaoYanJiu-Windows-4.14-build5-x64.msi
+Get-Content .\GaoYanJiu-Windows-4.14-build5-x64.msi.sha256
 ```
 
 旧版 Windows 资料继续使用 `%APPDATA%\GaoSeries\Research\AcademicAchievementManager\`。首次使用时需确认创建资料库。若资料确实存在但缺失、损坏或版本不受支持，界面会报告原因并保护原文件。卸载 MSI 保留资料。旧便携版的程序文件可以在验证新版本后自行移除。
@@ -28,6 +28,7 @@ Get-Content .\GaoYanJiu-Windows-4.14-build4-x64.msi.sha256
 | 页面 | 可用操作 |
 | --- | --- |
 | 在投管理 | 直接添加稿件和更新状态，按有更新、待跟进、归档和投稿状态筛选。宽窗口右侧显示最近进度、稿件预览和门户。窄窗口通过工具栏打开门户，点稿件标题查看详情 |
+| 稿件下一步 | 在活跃稿件详情设置具体行动和日期。从在投页的集中清单访问逾期、今天、未来七天和更晚的事项，可回到稿件状态时间线。由用户标记行动完成，稿件状态变化和系统待跟进设置各自保留 |
 | 投稿门户 | 在工作台的投稿门户打开内嵌 WebView2，登录后主动提取当前稿件，回工作台逐项审核导入。多门户可按顺序刷新 |
 | 待跟进提醒 | 在设置中启用 Windows 系统提醒并设定天数。系统对活跃稿件的同一状态阶段去重，点击打开对应稿件 |
 | 成果管理 | 默认显示成果清单，按需切换统计。维护成果类型、专利子类、署名、日期、编号、链接和 PDF/图片附件 |
@@ -45,7 +46,8 @@ Get-Content .\GaoYanJiu-Windows-4.14-build4-x64.msi.sha256
 
 ### 跨应用交接
 
-- 在研究资料条目的操作菜单中选择「送搞操作识别文字（OCR）」。在搞操作审核、执行识别并导出 `OCR-<UUID>.gaoaction`。回到搞研究的「资料交接与回执」打开结果，在有效期内接收后审核并应用。原件保留，OCR 派生件按来源及页码建立索引。源 PDF 与交接摘要一致时，支持定位原页。
+- 在研究资料条目的操作菜单中选择「送搞操作识别文字（OCR）」。配套版本的搞操作经用户审核、识别并完成导出后，可通过当前用户的固定回传目录交回结果。原资料条目和侧栏「OCR 待审核」均可打开复核，查看原件、页码和识别文字。确认应用后，派生件才归档和建立索引，原件及页码关联保留。
+- 无法自动回传时，可在搞操作导出 `OCR-<UUID>.gaoaction`，再从「资料交接与回执」在结果有效期内手动接收。自动回传请求的有效期沿用 GaoAction V1。已安全收到的自动回传可稍后审核。
 - 「从搞文件选择资料」使用 GaoAction V1 文件选择。编辑流程会给搞文件发送副本，用户可把编辑结果回导为同一资料的新版本或关联附件。也可审核从搞文件直接收到的资料并导出回执。
 - 已安装的同伴应用可通过能力查询及交接启动参数接入。若同伴不可用或其版本不提供相应启动入口，应用会保留端到端交接包供手动打开。Windows 版同时识别旧 Windows 搞文件的历史收件方标识；新交接使用 `com.academic-achievement.manager`。
 - 搞文件 V1.11+2 安装版支持自动打开搞研究签发的回执。来自搞研究的选件和编辑请求需要搞文件提供带审核的 GaoAction 启动入口。
@@ -53,13 +55,13 @@ Get-Content .\GaoYanJiu-Windows-4.14-build4-x64.msi.sha256
 ## 验收边界
 
 - 在 Windows 11 x64 用隔离资料验收。七页覆盖浅色和深色，高缩放覆盖 175% 及 150% 窄窗。还检查了长稿名、真实状态变化、设置、加载、错误恢复和通知深链。Windows 10 实机留待复核。
-- Windows Installer 用隔离的 MSI 标识验证 4.14+3 到 4.14+4 原位升级和卸载，并前后核对资料、附件和正式安装。
+- Windows Installer 用隔离的 MSI 标识验证 4.14+4 到 4.14+5 原位升级和卸载，并前后核对资料、附件和正式安装。
 - 用真实 Windows 通知区域接口验证图标添加、更新和移除。向隔离窗口发送任务栏创建消息验证恢复。最终打包程序在独立 Windows 桌面上验证关窗留驻、普通入口立即重开和退出后的端口清理。另以独立 Edge 进程核对退出范围，并验证取消退出、保存和深链转发。
 - 内嵌投稿门户使用 150% Windows 显示缩放下的合成站点验收，覆盖登录子窗口、主动提取和逐项审核。真实出版商登录和 EasyScholar 密钥尚未验收。
 - 使用独立 Windows 通知标识和合成稿件验证投递、重启去重和归档后撤回。测试关闭了通知横幅，通知深链通过无头工作台验证。
 - 研究城复用原始天空、草地、岩石贴图和原目录标识。建筑与地形用 Canvas 三维几何重建，SceneKit 材质、阴影和部分模型细节有差异。
 - 桌面小组件以独立 Windows 小窗运行，保留统计和链接。Windows 11 Widgets 面板无系统注册。
-- 本构建用合成 OCR 结果验证先审核后应用及派生件全文检索。上一构建已用搞操作 V1.16 x64 安装版验证合成 PNG 和双页 PDF 原生 OCR、来源摘要及去重，并用搞文件 V1.11+2 x64 安装版验证自动打开并核验回执。
+- 本构建使用合成资料验证 NTFS 回传路径、摘要与页码绑定、可重查的待审核状态和确认后索引。联调使用搞操作当前源码及 Windows 原生 OCR 识别合成数字图片，并核对实际导出、回传和三种派生文件。配套安装版的联调沿用历史验收记录。
 
 ## 构建与复现
 
@@ -67,7 +69,7 @@ Get-Content .\GaoYanJiu-Windows-4.14-build4-x64.msi.sha256
 
 ```powershell
 pwsh -File .\windows\build.ps1 -Python C:\path\to\venv\Scripts\python.exe
-python .\windows\tests\smoke_install.py .\windows\dist\GaoYanJiu-Windows-4.14-build4-x64.msi
+python .\windows\tests\smoke_install.py .\windows\dist\GaoYanJiu-Windows-4.14-build5-x64.msi
 node .\windows\tests\smoke_browser.mjs "C:\Program Files\Google\Chrome\Application\chrome.exe" C:\path\to\venv\Scripts\python.exe
 ```
 

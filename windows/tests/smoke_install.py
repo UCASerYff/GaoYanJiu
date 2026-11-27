@@ -163,11 +163,19 @@ def exercise(install: Path, profile: Path, fixture: dict, env: dict, release: st
 
         paper = request("/api/papers", {"title": "隔离安装论文", "venue": "Nature", "status": "Under Review",
                                          "statusSince": "2026-11-14"})["key"]
+        has_submission_actions = int(release.partition("+")[2]) >= 5
+        if has_submission_actions:
+            action = request("/api/papers/next-action", {"key": paper, "operation": "save", "revision": None,
+                                                        "text": "核对审稿意见", "dueDate": "2025-12-31"})["nextAction"]
+            assert request("/api/papers?scope=all")["nextActions"]["overdue"][0]["key"] == paper
         request("/api/papers", {"key": paper, "title": "隔离安装论文", "venue": "Nature", "status": "Accepted",
                                 "statusSince": "2026-11-25"})
         papers = request("/api/papers?scope=all")["papers"]
         assert len(papers) == 1 and papers[0]["title"] == "隔离安装论文"
         assert [row["status"] for row in papers[0]["history"]] == ["Under Review", "Accepted"]
+        if has_submission_actions:
+            assert papers[0]["nextAction"] == action and action["completedAt"] is None
+            assert all(not rows for rows in request("/api/papers?scope=all")["nextActions"].values())
         reference = hashlib.sha256(json.dumps([paper], separators=(",", ":")).encode("ascii")).hexdigest()[:40]
         activation = subprocess.run([str(cli), f"gaoyanjiu://follow-up/{reference}", "--no-browser"],
                                     env=env, creationflags=NO_WINDOW, capture_output=True, timeout=35, check=True)
@@ -416,8 +424,11 @@ def smoke(package: Path, legacy: Path | None, register_shell: bool, previous: Pa
         install = root / "安装 # Windows"
         profile = root / "旧版 # 资料"
         runtime = root / "runtime"
+        local_appdata = root / "local appdata"
         runtime.mkdir()
-        env = dict(os.environ, GAO_RESEARCH_DATA_DIR=str(profile), PYTHONUTF8="1", TEMP=str(runtime), TMP=str(runtime))
+        local_appdata.mkdir()
+        env = dict(os.environ, GAO_RESEARCH_DATA_DIR=str(profile), LOCALAPPDATA=str(local_appdata),
+                   PYTHONUTF8="1", TEMP=str(runtime), TMP=str(runtime))
         cli = install / "GaoYanJiu-cli.exe"
         app = install / "GaoYanJiu.exe"
         namespace = uuid.uuid4()

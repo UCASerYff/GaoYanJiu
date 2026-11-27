@@ -2,6 +2,7 @@
 
 const TERMINAL = /accept|publish|reject|withdraw|declin|cancel|已接受|接收|录用|已发表|拒稿|已拒|撤稿|已撤/i;
 const COMMON_STATUSES = ["已投稿", "初审中", "审稿中", "小修", "大修", "修回后审稿", "已接受", "已发表", "已拒稿", "已撤稿"];
+let laterActionsExpanded = false;
 
 function statusDays(value) {
   const date = new Date(value || "");
@@ -12,6 +13,139 @@ function statusDays(value) {
 }
 function displayedManuscript(paper) {
   return paper.manuscriptID?.startsWith("pending:") ? tr("期刊尚未分配稿号", "Manuscript ID pending") : paper.manuscriptID;
+}
+function paperIsActive(paper) {
+  return !paper.hidden && !TERMINAL.test(paper.status);
+}
+function currentPaperAction(paper) {
+  const action = paper.nextAction;
+  return action && typeof action.revision === "string" && typeof action.text === "string"
+    && typeof action.dueDate === "string" && /^\d{4}-\d{2}-\d{2}$/.test(action.dueDate) ? action : null;
+}
+function paperActionDate(value) {
+  const day = new Date(value + "T12:00:00");
+  return Number.isFinite(day.getTime()) ? formatDate(day) : value;
+}
+function actionControl(key, label, run, options) {
+  const control = button(label, run, options);
+  control.dataset.nextAction = key;
+  return control;
+}
+async function submitPaperAction(paper, operation, fields = {}) {
+  return post("/api/papers/next-action", {key: paper.key, operation,
+    revision: currentPaperAction(paper)?.revision || null, ...fields});
+}
+async function openPaperByKey(key) {
+  const {paper} = await api("/api/papers/detail?" + new URLSearchParams({key}));
+  return openPaperDetail(paper);
+}
+async function refreshPaperAction(key) {
+  await refresh();
+  await openPaperByKey(key);
+  const heading = document.querySelector("#editor[open] .paper-next-action h2") || $("dialog-heading");
+  if (heading) {
+    heading.tabIndex = -1;
+    safeFocus(heading);
+  }
+}
+function openPaperActionEditor(paper) {
+  const current = currentPaperAction(paper);
+  const action = current?.completedAt ? null : current;
+  const text = field(tr("具体行动", "Action"), "actionText", action?.text || "");
+  const textInput = text.querySelector("input");
+  textInput.required = true;
+  textInput.maxLength = 240;
+  textInput.placeholder = tr("例如：整理审稿意见并提交修订稿", "For example, submit the revised manuscript");
+  const date = field(tr("截止日期", "Due date"), "dueDate", action?.dueDate || dateInput(), "date");
+  date.querySelector("input").required = true;
+  modal(action ? tr("编辑下一步行动", "Edit next action") : tr("设置下一步行动", "Set next action"),
+    [text, date], {size: "compact paper-action-editor", subtitle: paper.title, submit: async ({actionText, dueDate}) => {
+      await submitPaperAction(paper, "save", {text: actionText, dueDate});
+      await refreshPaperAction(paper.key);
+    }});
+}
+async function updatePaperAction(paper, operation) {
+  await submitPaperAction(paper, operation);
+  await refreshPaperAction(paper.key);
+}
+function removePaperAction(paper) {
+  modal(tr("移除下一步行动？", "Remove the next action?"),
+    [el("p", "submission-action-text", currentPaperAction(paper).text)], {size: "compact",
+      dismissLabel: tr("取消", "Cancel"), actions: [
+        button(tr("移除", "Remove"), () => updatePaperAction(paper, "remove"), {style: "danger"}),
+      ]});
+}
+function paperNextAction(paper) {
+  const action = currentPaperAction(paper);
+  const active = paperIsActive(paper);
+  if (!action && !active) return null;
+  const complete = Boolean(action?.completedAt);
+  const editLabel = complete ? tr("添加新行动", "Set a new action")
+    : action ? tr("编辑行动", "Edit action") : tr("设置行动", "Set action");
+  const panel = el("section", "card paper-next-action",
+    el("div", "section-head", el("h2", "", tr("下一步行动", "Next action")),
+      action && badge(complete ? tr("已完成", "Completed") : tr("未完成", "Open"), complete ? "teal" : "attention")));
+  if (action) {
+    const due = el("time", "", paperActionDate(action.dueDate));
+    due.dateTime = action.dueDate;
+    panel.append(el("p", "submission-action-text", action.text),
+      el("div", "paper-action-dates", el("span", "", tr("截止", "Due"), " ", due),
+        complete && el("span", "", tr("完成", "Completed"), " ", formatDate(action.completedAt, true))));
+  }
+  const controls = [
+    active && actionControl("edit", editLabel, () => openPaperActionEditor(paper),
+      {symbol: action && !complete ? "edit" : "plus", disabled: !state.writable}),
+    action && !complete && actionControl("complete", tr("标记完成", "Mark complete"), () => updatePaperAction(paper, "complete"),
+      {style: "primary", disabled: !state.writable}),
+    action && complete && active && actionControl("reopen", tr("重新打开行动", "Reopen action"), () => updatePaperAction(paper, "reopen"),
+      {disabled: !state.writable}),
+    action && actionControl("remove", tr("移除行动", "Remove action"), () => removePaperAction(paper),
+      {style: "quiet", disabled: !state.writable}),
+  ].filter(Boolean);
+  if (controls.length) panel.append(el("div", "row paper-action-controls", controls));
+  return panel;
+}
+function submissionActionBoard(groups) {
+  const labels = {
+    overdue: tr("已逾期", "Overdue"), today: tr("今天到期", "Due today"),
+    upcoming: tr("临近（7 天内）", "Upcoming (next 7 days)"), later: tr("稍后（7 天以后）", "Later (after 7 days)"),
+  };
+  const anyActions = Object.keys(labels).some((key) => groups[key]?.length);
+  const sections = Object.entries(labels).filter(([key]) => key !== "later" || groups.later?.length).map(([key, label]) => {
+    const later = key === "later";
+    const items = groups[key] || [];
+    const heading = el(later ? "summary" : "h3", "submission-action-heading", label, " ", el("span", "submission-action-count", items.length));
+    const group = el(later ? "details" : "section", "submission-action-group", heading);
+    if (later) {
+      group.open = laterActionsExpanded;
+      group.addEventListener("toggle", () => { laterActionsExpanded = group.open; });
+    } else heading.tabIndex = -1;
+    group.dataset.actionGroup = key;
+    if (items.length) {
+      group.append(el("ul", "submission-action-list", items.map((paper) => {
+        const action = paper.nextAction;
+        const due = el("time", "muted", paperActionDate(action.dueDate));
+        due.dateTime = action.dueDate;
+        const finish = actionControl("complete", tr("完成", "Complete"), async () => {
+          await submitPaperAction(paper, "complete");
+          await refresh();
+          const header = document.querySelector('.submission-action-group[data-action-group="' + key + '"] .submission-action-heading');
+          (header || document.querySelector(".submission-action-board h2"))?.focus();
+        }, {style: "quiet", disabled: !state.writable});
+        finish.setAttribute("aria-label", tr("完成行动", "Complete action") + " · " + action.text);
+        return el("li", "submission-action-row",
+          el("div", "submission-action-main", el("strong", "submission-action-text", action.text),
+            button(paper.title, () => openPaperByKey(paper.key), {style: "text-button submission-action-paper"})),
+          el("div", "submission-action-meta", due, finish));
+      })));
+    }
+    return group;
+  });
+  const heading = el("h2", "", tr("下一步行动", "Next actions"));
+  heading.tabIndex = -1;
+  return el("section", "card submission-action-board", heading,
+    el("div", "submission-action-groups", sections.slice(0, 3)), sections[3],
+    !anyActions && el("p", "muted", tr("暂无未完成的行动。可在稿件详情中设置。", "No open actions. Set one in the manuscript details.")));
 }
 function openPaperEditor(paper = null) {
   const title = field(tr("论文标题（必填）", "Paper title (required)"), "title", paper?.title);
@@ -66,6 +200,7 @@ async function openPaperDetail(paper) {
       [tr("上一状态", "Previous status"), paper.previousStatus], [tr("进入此状态", "Status began"), formatDate(paper.statusSince)],
       [tr("状态起始依据", "Status date source"), paper.statusSinceSource], [tr("最近检查", "Last checked"), formatDate(paper.checkedAt, true)]),
       external(tr("打开投稿网页", "Open submission page"), paper.url)),
+    paperNextAction(paper),
     events.length && card(tr("状态历史", "Status history"), "", logs),
     paper.submissionHistory && card(tr("备注与投稿历史", "Notes and submission history"), "", el("p", "text-preview", paper.submissionHistory)),
   ].filter(Boolean), {subtitle: paper.journal, actions});
@@ -93,14 +228,19 @@ function paperRow(paper, due, canReorder, select) {
     : external(tr("打开稿件", "Open manuscript"), paper.url);
   const actions = popover(tr("论文操作", "Submission actions"), "ellipsis", [
     button(tr("查看详情", "View details"), () => openPaperDetail(paper), {symbol: "document"}),
+    paperIsActive(paper) && button(tr("下一步行动", "Next action"), () => openPaperActionEditor(paper),
+      {symbol: "calendar", disabled: !state.writable}),
     button(paper.hidden ? tr("恢复追踪", "Resume tracking") : tr("归档", "Archive"), () => archivePaper(paper), {symbol: "archive", disabled: !state.writable}),
     button(tr("删除", "Delete"), () => deletePaper(paper), {symbol: "trash", style: "danger", disabled: !state.writable}),
   ], true);
   const progress = paperProgress(paper);
+  const action = currentPaperAction(paper);
   const days = statusDays(paper.statusSince);
   const row = el("article", "paper-row",
     el("div", "paper-identity", title, el("small", "muted", [paper.journal,
-      displayedManuscript(paper)].filter(Boolean).join(" · "))),
+      displayedManuscript(paper)].filter(Boolean).join(" · ")),
+    paperIsActive(paper) && action && !action.completedAt && el("small", "paper-action-hint",
+      icon("calendar"), tr("行动截止 ", "Action due "), paperActionDate(action.dueDate))),
     el("div", "paper-stage", badge(paper.status, paperTone(paper, due)),
       paper.changed && badge(tr("有更新", "Updated"), "attention"),
       due && badge(tr("待跟进", "Follow up"), "attention"),
@@ -119,6 +259,7 @@ function paperContext(papers, selected, due, select) {
       el("div", "row", badge(selected.status, paperTone(selected, due.has(selected.key))),
         due.has(selected.key) && badge(tr("待跟进", "Follow up"), "attention")),
       el("small", "muted", [selected.journal, displayedManuscript(selected)].filter(Boolean).join(" · ")),
+      paperNextAction(selected),
       el("ol", "paper-events", steps.map((entry) => el("li", "", el("span", "", entry.status),
         el("small", "muted", formatDate(entry.checkedAt))))),
       button(tr("查看完整详情", "View full details"), () => openPaperDetail(selected), {symbol: "document"}));
@@ -153,7 +294,7 @@ function submissionStatistics(papers) {
 }
 async function pageSubmissions(_page, query) {
   const scope = state.scope;
-  const [{papers, followUpKeys}, {portals}] = await Promise.all([
+  const [{papers, followUpKeys, nextActions}, {portals}] = await Promise.all([
     api("/api/papers?" + new URLSearchParams({scope, q: query})), api("/api/portals"),
   ]);
   const info = state.overview.submissions;
@@ -227,6 +368,7 @@ async function pageSubmissions(_page, query) {
       [info.accepted, tr("已接受", "Accepted"), "seal"],
       [due.size, tr("待跟进", "Follow up"), "bell", "clay"],
     ]),
+    submissionActionBoard(nextActions || {}),
     el("div", "submission-layout",
       el("section", "submission-board",
         el("div", "paper-filters", tabBar,

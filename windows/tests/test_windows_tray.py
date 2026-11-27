@@ -115,6 +115,9 @@ def test_native_tray_desktop_lifecycle(tmp_path, monkeypatch):
     monkeypatch.setattr(session, "open_application", unexpected_workbench_fallback)
     monkeypatch.setattr(session.webbrowser, "open", lambda url: external.append(url) or True)
     profile = tmp_path / "tray profile"
+    local_appdata = tmp_path / "local appdata"
+    local_appdata.mkdir()
+    monkeypatch.setenv("LOCALAPPDATA", str(local_appdata))
     monkeypatch.setenv("GAO_RESEARCH_DATA_DIR", str(profile))
     Library(profile).open().create_empty()
     arguments = ["--data-dir", str(profile)]

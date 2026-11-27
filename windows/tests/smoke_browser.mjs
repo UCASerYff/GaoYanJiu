@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import {spawn} from "node:child_process";
 import {createHash, randomBytes, randomUUID} from "node:crypto";
-import {mkdtemp, mkdir, readFile, rm, writeFile} from "node:fs/promises";
+import {mkdtemp, mkdir, readFile, rename, rm, writeFile} from "node:fs/promises";
 import {createServer} from "node:http";
 import {setTimeout as delay} from "node:timers/promises";
 import {tmpdir} from "node:os";
@@ -17,6 +17,8 @@ const tempRoot = path.resolve(tmpdir());
 const workspace = await mkdtemp(path.join(tempRoot, "gaoyanjiu-browser-"));
 const dataDir = path.join(workspace, "data");
 const profile = path.join(workspace, "chromium");
+const local = path.join(workspace, "local");
+await mkdir(local);
 const screenshotArg = flags.indexOf("--screenshots");
 const screenshots = screenshotArg >= 0 ? path.resolve(flags[screenshotArg + 1]) : null;
 if (screenshots) await mkdir(screenshots, {recursive: true});
@@ -31,8 +33,8 @@ const portalFixture = createServer((_request, response) => {
 await new Promise((resolve) => portalFixture.listen(0, "127.0.0.1", resolve));
 const portalURL = "http://127.0.0.1:" + portalFixture.address().port + "/journal/";
 
-function worker(program, args) {
-  const child = spawn(program, args, {stdio: ["ignore", "pipe", "pipe"], windowsHide: true});
+function worker(program, args, env = process.env) {
+  const child = spawn(program, args, {stdio: ["ignore", "pipe", "pipe"], windowsHide: true, env});
   children.push(child);
   child.stdout.on("data", (data) => logs.push(String(data)));
   child.stderr.on("data", (data) => logs.push(String(data)));
@@ -50,10 +52,62 @@ async function poll(check, title) {
   }
   throw new Error("Timed out waiting for " + title + (last ? ": " + last.message : ""));
 }
+function syntheticPdf() {
+  const stream = (page) => {
+    const text = `BT /F1 22 Tf 52 734 Td (Synthetic original page ${page}) Tj ET`;
+    return `<< /Length ${text.length} >>\nstream\n${text}\nendstream`;
+  };
+  const page = (content) => `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792]
+    /Resources << /Font << /F1 7 0 R >> >> /Contents ${content} 0 R >>`;
+  const objects = ["<< /Type /Catalog /Pages 2 0 R >>", "<< /Type /Pages /Count 2 /Kids [3 0 R 4 0 R] >>",
+    page(5), page(6), stream(1), stream(2), "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"];
+  let pdf = "%PDF-1.4\n";
+  const offsets = objects.map((entry, index) => {
+    const offset = pdf.length;
+    pdf += `${index + 1} 0 obj\n${entry}\nendobj\n`;
+    return offset;
+  });
+  const xref = pdf.length;
+  pdf += `xref\n0 8\n0000000000 65535 f \n${offsets.map((offset) => String(offset).padStart(10, "0") + " 00000 n \n").join("")}`;
+  return Buffer.from(pdf + `trailer\n<< /Size 8 /Root 1 0 R >>\nstartxref\n${xref}\n%%EOF\n`, "ascii");
+}
+
+async function writeOcrFixture(outbound, source, pages) {
+  const originalManifest = await readFile(path.join(outbound.path, "manifest.json"));
+  const requestManifest = JSON.parse(originalManifest);
+  const binding = {sourceID: randomUUID(), sourceItemID: requestManifest.items[0].id, sourceSHA256: source.sha256};
+  const output = Buffer.from(JSON.stringify({schemaVersion: 1, sources: [
+    {id: binding.sourceID, sha256: source.sha256, byteCount: requestManifest.items[0].byteCount, pages},
+  ]}));
+  const replyID = randomUUID();
+  const reply = {
+    schemaVersion: 1, kind: "result", requestID: replyID, inReplyTo: outbound.requestID, action: requestManifest.action,
+    sourceBundleID: requestManifest.targetBundleID, targetBundleID: requestManifest.sourceBundleID,
+    createdAt: requestManifest.createdAt, expiresAt: requestManifest.expiresAt, nonce: randomBytes(32).toString("base64"),
+    parameters: requestManifest.parameters, status: "partial", references: [],
+    items: [{id: "contents", relativePath: "OCR.json", uti: "public.json",
+      byteCount: output.length, sha256: createHash("sha256").update(output).digest("hex")}],
+    provenance: {
+      engine: "FixtureOCR",
+      sources: [{...binding, outputItemIDs: ["contents"], pages: pages.map(({page, status, lines}) => ({pageNumber: page, status, lineCount: lines.length}))}],
+      outputs: [{...binding, resultItemID: "contents", format: "json"}],
+      ...(outbound.autoReturn ? {requestManifestSHA256: createHash("sha256").update(originalManifest).digest("hex")} : {}),
+    },
+  };
+  const folder = outbound.autoReturn ? path.join(local, "GaoSeries", "GaoAction", "OcrReturns-v1", outbound.requestID) : workspace;
+  const replyPath = path.join(folder, outbound.autoReturn ? "result.gaoaction" : replyID + ".gaoaction");
+  const staging = path.join(folder, replyID + ".test-staging");
+  await mkdir(path.join(staging, "payload"), {recursive: true});
+  await writeFile(path.join(staging, "payload", "OCR.json"), output);
+  await writeFile(path.join(staging, "manifest.json"), JSON.stringify(reply));
+  await rename(staging, replyPath);
+  return {replyID, replyPath, sourceItemID: binding.sourceItemID};
+}
+
 const app = worker(executable, [
   ...(flags.includes("--frozen") ? [] : [path.join(windows, "launch.py")]),
   "--serve", "--no-browser", "--port", "0", "--data-dir", dataDir,
-]);
+], {...process.env, LOCALAPPDATA: local});
 worker(browser, [
   "--headless=new", "--no-first-run", "--no-default-browser-check", "--disable-gpu", "--disable-crash-reporter",
   "--disable-background-networking", "--disable-component-update", "--disable-sync", "--remote-debugging-port=0",
@@ -148,6 +202,7 @@ try {
   await screenshot("first-run");
   await press("#gate-create");
   await current("submissions");
+  await has("#pending-ocr-inbox[hidden]");
   assert.equal(await evaluate("document.querySelectorAll('#nav button').length"), 7);
   assert.equal(await evaluate("getComputedStyle(document.querySelector('.sidebar')).width"), "198px");
   assert.equal(await evaluate("getComputedStyle(document.querySelector('.portal-wide')).display"), "grid");
@@ -330,30 +385,10 @@ try {
   await has("#editor button[type=submit]");
   await byText("#editor .dialog-foot button", "取消");
   const outbound = await request("/api/exchange/prepare", {action: "ocr.files", documentIDs: [source.id], launch: false});
-  const requestManifest = JSON.parse(await readFile(path.join(outbound.path, "manifest.json"), "utf8"));
-  const binding = {sourceItemID: requestManifest.items[0].id, sourceSHA256: source.sha256};
   const ocrText = "合成 OCR 搜索内容";
-  const output = Buffer.from(JSON.stringify({schemaVersion: 1, sources: [{sha256: source.sha256, pages: [
+  const {replyPath} = await writeOcrFixture(outbound, source, [
     {page: 1, status: "completed", lines: [{text: ocrText}]}, {page: 2, status: "failed", lines: []},
-  ]}]}));
-  const replyID = randomUUID();
-  const reply = {
-    schemaVersion: 1, kind: "result", requestID: replyID, inReplyTo: outbound.requestID, action: requestManifest.action,
-    sourceBundleID: requestManifest.targetBundleID, targetBundleID: requestManifest.sourceBundleID,
-    createdAt: requestManifest.createdAt, expiresAt: requestManifest.expiresAt, nonce: randomBytes(32).toString("base64"),
-    parameters: requestManifest.parameters, status: "partial", references: [],
-    items: [{id: "contents", relativePath: "OCR.json", uti: "public.json",
-      byteCount: output.length, sha256: createHash("sha256").update(output).digest("hex")}],
-    provenance: {
-      engine: "FixtureOCR",
-      sources: [{...binding, outputItemIDs: ["contents"], pages: [{pageNumber: 1, status: "completed"}, {pageNumber: 2, status: "failed"}]}],
-      outputs: [{...binding, resultItemID: "contents", format: "json"}],
-    },
-  };
-  const replyPath = path.join(workspace, replyID + ".gaoaction");
-  await mkdir(path.join(replyPath, "payload"), {recursive: true});
-  await writeFile(path.join(replyPath, "payload", "OCR.json"), output);
-  await writeFile(path.join(replyPath, "manifest.json"), JSON.stringify(reply));
+  ]);
   await byText(".folder-toolbar summary", "资料交接");
   await byText(".folder-toolbar .popover-menu button", "交接回执");
   await has("#editor [name=path]");
@@ -371,6 +406,164 @@ try {
   await byText(".document-row .text-button", "OCR");
   await has("#editor .text-preview");
   assert.equal(await evaluate(css("#editor .text-preview") + ".textContent"), ocrText);
+  await byText("#editor .dialog-foot button", "完成");
+
+  const pdf = syntheticPdf();
+  const pdfPath = path.join(workspace, "隔离双页原件.pdf");
+  await writeFile(pdfPath, pdf);
+  const {document: pdfOriginal} = await request("/api/documents/import-path", {folderID: lab.folderID, path: pdfPath});
+  await evaluate(`(() => {
+    window.fixtureFetchBeforeOcr = window.fetch;
+    window.fixtureOcrPolls = 0;
+    window.fetch = (...args) => {
+      if (args[0] === "/api/exchange/ocr-returns" && args[1]?.method === "POST") ++window.fixtureOcrPolls;
+      return window.fixtureFetchBeforeOcr(...args);
+    };
+    Object.defineProperty(document, "hidden", {configurable: true, get: () => true});
+    document.dispatchEvent(new Event("visibilitychange"));
+  })()`);
+  const automatic = await request("/api/exchange/prepare",
+    {action: "ocr.files", documentIDs: [pdfOriginal.id], launch: false, autoReturn: true});
+  assert.equal(automatic.autoReturn, true);
+  await evaluate("refresh()");
+  const pageTwoText = "待审核第二页全文索引核对";
+  const {replyID: automaticID, sourceItemID} = await writeOcrFixture(automatic, pdfOriginal, [
+    {page: 1, status: "failed", lines: []}, {page: 2, status: "completed", lines: [{text: pageTwoText}]},
+  ]);
+  const pdfQuery = "/api/documents?" + new URLSearchParams({kind: "experimentData", folder: lab.folderID, q: pageTwoText});
+  const sourceTextURL = "/api/documents/text?" + new URLSearchParams({id: pdfOriginal.id});
+  const originalText = (await request(sourceTextURL)).text;
+  const rowMark = '[data-pending-ocr-document="' + pdfOriginal.id + '"]';
+  const queueEntry = '[data-ocr-review="' + automaticID + '"]';
+  await delay(2200);
+  assert.equal(await evaluate("window.fixtureOcrPolls"), 0);
+  const waiting = await request("/api/exchange/ocr-returns");
+  assert.equal(waiting.waiting, true);
+  assert.equal(waiting.pending.length, 0);
+  await evaluate('delete document.hidden; document.dispatchEvent(new Event("visibilitychange"))');
+  await has(".document-row " + rowMark);
+  await has("#pending-ocr-inbox:not([hidden])");
+  assert.equal((await request(pdfQuery)).documents.length, 0);
+  const drainedPolls = await evaluate("window.fixtureOcrPolls");
+  assert.ok(drainedPolls > 0);
+  await delay(2200);
+  assert.equal(await evaluate("window.fixtureOcrPolls"), drainedPolls);
+  await evaluate("window.fetch = window.fixtureFetchBeforeOcr");
+  await screenshot("ocr-pending-original-light");
+
+  await openPage("works");
+  await press("#pending-ocr-inbox");
+  await has("#editor[open] " + queueEntry);
+  assert.match(await evaluate(css("#editor .ocr-queue-row") + ".textContent"), /隔离双页原件/);
+  await screenshot("ocr-pending-queue-light");
+  await press(queueEntry);
+  await has('#editor [data-ocr-page="2"]');
+  assert.equal(await evaluate(css('#editor [data-ocr-page="2"] .ocr-page-text') + ".textContent"), pageTwoText);
+  assert.equal((await request(pdfQuery)).documents.length, 0);
+  await byText("#editor .dialog-foot button", "取消");
+
+  await settings("dark");
+  await cdp("Emulation.setDeviceMetricsOverride", {width: 590, height: 720, deviceScaleFactor: 1.5, mobile: false});
+  await openPage("experimentData");
+  await byText(".document-row .text-button", "隔离双页原件");
+  await has("#editor .ocr-document-pending " + rowMark);
+  await press("#editor .ocr-document-pending " + rowMark);
+  await has('#editor [name="acceptPartial"]');
+  await press("#editor button[type=submit]");
+  await has("#editor .dialog-error:not([hidden])");
+  assert.equal((await request(pdfQuery)).documents.length, 0);
+  await press('#editor [name="acceptPartial"]');
+  await press('#editor [data-ocr-open-page="2"]');
+  await has("#editor .ocr-review-preview iframe");
+  const iframeURL = new URL(await evaluate(css("#editor .ocr-review-preview iframe") + ".src"));
+  assert.equal(iframeURL.hash, "#page=2");
+  assert.equal(iframeURL.searchParams.get("ocrReview"), automaticID);
+  assert.equal(iframeURL.searchParams.get("ocrItem"), sourceItemID);
+  const preview = await fetch(iframeURL);
+  assert.equal(preview.status, 200);
+  assert.match(preview.headers.get("Content-Type"), /^application\/pdf/);
+  assert.deepEqual(Buffer.from(await preview.arrayBuffer()), pdf);
+  assert.equal(await evaluate(css('#editor [name="acceptPartial"]') + ".checked"), true);
+  assert.equal(await evaluate("document.querySelector('#editor').scrollWidth<=document.querySelector('#editor').clientWidth+1"), true);
+  await delay(650);
+  await screenshot("ocr-reviewed-source-page-narrow-dark-150");
+  await byText("#editor .ocr-review-preview button", "收起原件");
+  await press("#editor button[type=submit]");
+  await poll(() => evaluate("!document.querySelector('#editor button[type=submit]')"), "explicit automatic OCR import");
+  await has("#pending-ocr-inbox[hidden]");
+  await byText("#editor .dialog-foot button", "返回原件");
+  await has("#editor .document-preview-content .pdf-preview");
+  assert.equal(await evaluate("Boolean(document.querySelector('#editor .ocr-document-pending'))"), false);
+  assert.equal((await request(sourceTextURL)).text, originalText);
+  await byText("#editor .dialog-foot button", "完成");
+  assert.equal((await request(pdfQuery)).documents.length, 1);
+  await addText("#search", pageTwoText);
+  await poll(() => evaluate("state.query === " + JSON.stringify(pageTwoText) + " && document.querySelectorAll('.document-row').length === 1"), "approved OCR indexed");
+  await byText(".document-row .text-button", "隔离双页原件");
+  await byText("#editor .document-ocr-pages button", "原件第 2 页");
+  await has("#editor iframe.pdf-preview");
+  const reviewedURL = new URL(await evaluate(css("#editor iframe.pdf-preview") + ".src"));
+  assert.equal(reviewedURL.hash, "#page=2");
+  assert.ok(reviewedURL.searchParams.has("ocrSource"));
+  const reviewedPreview = await fetch(reviewedURL);
+  assert.equal(reviewedPreview.status, 200);
+  assert.deepEqual(Buffer.from(await reviewedPreview.arrayBuffer()), pdf);
+  await byText("#editor .dialog-foot button", "完成");
+  await press("#clear-search");
+  await cdp("Emulation.setDeviceMetricsOverride", {width: 1440, height: 940, deviceScaleFactor: 1, mobile: false});
+  await settings("light");
+
+  const dateFromToday = (offset) => {
+    const date = new Date();
+    date.setDate(date.getDate() + offset);
+    return [date.getFullYear(), date.getMonth() + 1, date.getDate()].map((part) => String(part).padStart(2, "0")).join("-");
+  };
+  await openPage("submissions");
+  const targetPaper = (await request("/api/papers?q=MS-101")).papers[0];
+  const targetURL = "/api/papers/detail?" + new URLSearchParams({key: targetPaper.key});
+  const originalPaper = (await request(targetURL)).paper;
+  const dueFixture = {status: "审稿中", statusSince: dateFromToday(0)};
+  const todayPaper = await request("/api/papers", {title: "隔离今天到期稿件", ...dueFixture});
+  const upcomingPaper = await request("/api/papers", {title: "隔离即将到期稿件", ...dueFixture});
+  for (const [paper, text, offset] of [[todayPaper, "核对补交材料", 0], [upcomingPaper, "准备返修清单", 7]]) {
+    await request("/api/papers/next-action", {key: paper.key, operation: "save", revision: null, text, dueDate: dateFromToday(offset)});
+  }
+  await evaluate("refresh()");
+  const readPaperDetail = async () => {
+    await byText(".paper-row .text-button", targetPaper.title);
+    await byText(".paper-context button", "查看完整详情");
+    await has("#editor[open] .paper-next-action");
+  };
+  const actionControl = (action) => '#editor[open] .paper-next-action [data-next-action="' + action + '"]';
+  const overdueGroup = '[data-action-group="overdue"]';
+  await readPaperDetail();
+  await press(actionControl("edit"));
+  await has("#editor[open] [name=actionText]");
+  await addText("#editor [name=actionText]", "整理返修意见并核对合成学术稿件");
+  await addText("#editor [name=dueDate]", dateFromToday(-1));
+  await press("#editor button[type=submit]");
+  await has(actionControl("complete"));
+  await byText("#editor .dialog-foot button", "完成");
+  await has(overdueGroup + " .submission-action-row");
+  await has('[data-action-group="today"] .submission-action-row');
+  await has('[data-action-group="upcoming"] .submission-action-row');
+  await screenshot("next-actions-light");
+  await press(overdueGroup + " .submission-action-paper");
+  await has(actionControl("complete"));
+  await byText("#editor .dialog-foot button", "完成");
+  await press(overdueGroup + ' [data-next-action="complete"]');
+  await poll(() => evaluate("!document.querySelector(" + JSON.stringify(overdueGroup + " .submission-action-row") + ")"), "completed action leaves overdue list");
+  await readPaperDetail();
+  await press(actionControl("reopen"));
+  await has(actionControl("complete"));
+  await press(actionControl("remove"));
+  await byText("#editor .dialog-foot button.danger", "移除");
+  await has(actionControl("edit"));
+  assert.equal(await evaluate("Boolean(" + css(actionControl("complete")) + ")"), false);
+  const changedPaper = (await request(targetURL)).paper;
+  assert.equal(changedPaper.nextAction, null);
+  assert.equal(changedPaper.status, originalPaper.status);
+  assert.deepEqual(changedPaper.history, originalPaper.history);
   await byText("#editor .dialog-foot button", "完成");
 
   await openPage("city");
@@ -423,6 +616,8 @@ try {
     assert.equal(await evaluate(`(()=>{const node=${css(name)};return node.scrollWidth<=node.clientWidth+1})()`), true, name);
   }
   await screenshot("submissions-narrow-dark-150");
+  await evaluate(css(".submission-action-board") + '.scrollIntoView({block: "center"})');
+  await screenshot("next-actions-narrow-dark-150");
   await press(".paper-row .text-button");
   await has("#editor[open] .pairs");
   await screenshot("submission-detail-narrow-dark-150");

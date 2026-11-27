@@ -120,13 +120,23 @@ function fileSize(value) {
 }
 async function previewDocument(document) {
   const media = storedPreview("document", document.folderID, document);
-  const {text} = await api("/api/documents/text?" + new URLSearchParams({id: document.id}));
+  const pages = document.windowsProvenance?.pages || [];
+  const sourceID = document.windowsProvenance?.targetRecordID || document.windowsProvenance?.sourceDocumentID;
+  const query = new URLSearchParams({id: document.id});
+  const [{text}, checkedSource] = await Promise.all([
+    api("/api/documents/text?" + query),
+    sourceID && pages.length ? api("/api/documents/ocr-source?" + query).catch(() => null) : null,
+  ]);
+  const context = exchangeContext({document, returnToDocument: () => previewDocument(document)});
+  const pending = window.researchExchange?.pendingButton(context, document);
   const detail = el("div", "document-preview-content",
     el("div", "document-preview-metadata",
       el("span", "muted", document.originalName),
       el("span", "", fileSize(document.byteCount)),
       el("span", "", formatDate(document.uploadedAt, true))),
-    document.tags?.length > 0 && el("div", "row", document.tags.map((tag) => badge(tag, "teal"))));
+    document.tags?.length > 0 && el("div", "row", document.tags.map((tag) => badge(tag, "teal"))),
+    pending && el("div", "ocr-document-pending",
+      pending, el("span", "muted", tr("审核后才会添加到资料库和搜索。", "Review is required before library and search import."))));
   if (media) detail.append(media);
   if (text) {
     const indexedText = el("details", "catalog-form-options", el("summary", "", tr("全文索引", "Indexed text")),
@@ -135,15 +145,12 @@ async function previewDocument(document) {
     detail.append(indexedText);
   }
   if (!media && !text) detail.append(el("p", "muted", tr("此文件可下载到本机打开。", "Download this file to open it on your computer.")));
-  const pages = document.windowsProvenance?.pages || [];
-  const source = document.windowsProvenance?.targetRecordID || document.windowsProvenance?.sourceDocumentID;
-  if (source && pages.length && /\.pdf$/i.test(document.windowsProvenance?.sourceName || "")) {
+  if (checkedSource?.original) {
+    const {original} = checkedSource;
     const originals = el("div", "row document-ocr-pages");
-    const query = state.query.toLowerCase();
-    for (const page of pages.filter((page) => !query || String(page.text || "").toLowerCase().includes(query))) {
+    for (const page of pages) {
       if (!Number.isSafeInteger(page.pageNumber) || page.pageNumber < 1) continue;
-      originals.append(button(tr("原件第 " + page.pageNumber + " 页", "Original page " + page.pageNumber), async () => {
-        const {original} = await api("/api/documents/ocr-source?" + new URLSearchParams({id: document.id}));
+      originals.append(button(tr("原件第 " + page.pageNumber + " 页", "Original page " + page.pageNumber), () => {
         modal(original.originalName, [
           storedPreview("document", original.folderID, original, page.pageNumber),
           page.text && el("p", "text-preview", page.text),
@@ -155,13 +162,16 @@ async function previewDocument(document) {
   }
   const actions = el("div", "row", downloadLink("document", document.folderID, document),
     button(tr("在文件资源管理器中显示", "Show in File Explorer"), () => post("/api/files/reveal", {kind: "document", ownerID: document.folderID, name: document.storedName}), {symbol: "folder"}));
-  window.researchExchange?.document(actions, exchangeContext({document}));
+  window.researchExchange?.document(actions, context);
   modal(document.displayName, [detail], {size: "wide", actions: [actions]});
 }
 function documentRow(document, manualOrder) {
   const buttons = el("div", "exchange-menu-staging");
-  window.researchExchange?.document(buttons, exchangeContext({document}));
-  const name = button(document.displayName, () => previewDocument(document), {style: "text-button"});
+  const showDocument = () => previewDocument(document);
+  const context = exchangeContext({document, returnToDocument: showDocument});
+  const pending = window.researchExchange?.pendingButton(context, document);
+  window.researchExchange?.document(buttons, context);
+  const name = button(document.displayName, showDocument, {style: "text-button"});
   const quickDownload = downloadLink("document", document.folderID, document);
   quickDownload.replaceChildren(icon("download"));
   quickDownload.classList.add("icon-button", "document-download");
@@ -181,7 +191,7 @@ function documentRow(document, manualOrder) {
     el("div", "catalog-item-name",
       el("span", "catalog-type-icon", icon(imageFile ? "image" : "document")),
       el("div", "record-summary", name, originalLabel && el("small", "muted", originalLabel),
-      el("div", "record-meta", tags.map((tag) => badge(tag, "teal")), showOcr && badge("OCR")))),
+      el("div", "record-meta", pending, tags.map((tag) => badge(tag, "teal")), showOcr && badge("OCR")))),
     fileType,
     el("span", "library-document-size muted", fileSize(document.byteCount)),
     el("span", "library-document-date muted", formatDate(document.uploadedAt)),

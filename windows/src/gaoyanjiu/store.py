@@ -4,7 +4,7 @@ import json
 import random
 import shutil
 import uuid
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from gaoyanjiu.analytics import (
@@ -54,6 +54,7 @@ from gaoyanjiu.widget import SNAPSHOT_NAME, read_snapshot, snapshot_metadata, st
 
 FILE_CAP = 512 * 1024 * 1024
 TEXT_LIMIT = 100_000
+SUBMISSION_ACTION_LIMIT = 240
 
 
 def _clean(value: str, limit: int = 500) -> str:
@@ -69,6 +70,38 @@ def _matches(query: str, *parts) -> bool:
         return True
     haystack = "\n".join(str(part or "") for part in parts).casefold()
     return needle in haystack
+
+
+def _active_paper(paper: dict) -> bool:
+    return not paper.get("hidden") and not is_terminal(str(paper.get("status") or ""))
+
+
+def _action_date(value: object) -> date:
+    if not isinstance(value, str) or len(value) != 10:
+        raise ValueError("Invalid calendar date")
+    parsed = date.fromisoformat(value)
+    if parsed.isoformat() != value:
+        raise ValueError("Invalid calendar date")
+    return parsed
+
+
+def _submission_action(paper: dict) -> dict | None:
+    action = paper.get("nextAction")
+    if not isinstance(action, dict):
+        return None
+    revision, text = action.get("revision"), action.get("text")
+    if not isinstance(revision, str) or len(revision) != 32:
+        return None
+    if not isinstance(text, str) or not text.strip() or len(text) > SUBMISSION_ACTION_LIMIT:
+        return None
+    try:
+        _action_date(action.get("dueDate"))
+        parse_iso(action.get("updatedAt") or "")
+        if action.get("completedAt") is not None:
+            parse_iso(action["completedAt"])
+    except (TypeError, ValueError, AttributeError):
+        return None
+    return action
 
 
 def _find(items: list, key: str, value: str) -> dict:
@@ -145,13 +178,15 @@ class ResearchStore:
             raise AppError(self.library.message_code or "not_ready", 409)
         return self.library.data
 
-    def _commit(self) -> None:
+    def _commit(self, *, refresh_related: bool = True) -> None:
         try:
             self.library.save()
         except Exception:
             self.library.open()
             self.settings = self._read_settings()
             raise
+        if not refresh_related:
+            return
         try:
             self.write_snapshot()
         except OSError:
@@ -279,6 +314,75 @@ class ResearchStore:
         ]
         papers.sort(key=lambda paper: (paper.get("sortOrder") is None, paper.get("sortOrder") or 0))
         return papers
+
+    def paper_detail(self, key: str) -> dict:
+        paper = _find(self._view()["papers"], "key", key)
+        return {**paper, "nextAction": _submission_action(paper)}
+
+    def submission_actions(self) -> dict[str, list[dict]]:
+        groups = {"overdue": [], "today": [], "upcoming": [], "later": []}
+        local_day = self.clock().astimezone().date()
+        today = local_day.isoformat()
+        week_end = (local_day + timedelta(days=7)).isoformat()
+        for paper in (self.library.data or {}).get("papers") or []:
+            if not _active_paper(paper):
+                continue
+            action = _submission_action(paper)
+            if not action or action.get("completedAt"):
+                continue
+            due = action["dueDate"]
+            if due < today:
+                group = "overdue"
+            elif due == today:
+                group = "today"
+            elif due <= week_end:
+                group = "upcoming"
+            else:
+                group = "later"
+            groups[group].append({"key": paper["key"], "title": paper.get("title") or "",
+                                  "journal": paper.get("journal") or "", "nextAction": action})
+        for rows in groups.values():
+            rows.sort(key=lambda row: (row["nextAction"]["dueDate"], row["title"].casefold(), row["key"]))
+        return groups
+
+    def change_submission_action(self, key: str, operation: str, revision: str | None,
+                                 text: str | None = None, due_date: str | None = None) -> dict | None:
+        if operation not in ("save", "complete", "reopen", "remove"):
+            raise AppError("invalid_field")
+        paper = _find(self._data()["papers"], "key", key)
+        action = _submission_action(paper)
+        if revision != (action["revision"] if action else None):
+            raise AppError("changed_since_read", 409)
+        if operation in ("save", "reopen") and not _active_paper(paper):
+            raise AppError("invalid_field")
+        if operation != "save" and action is None:
+            raise AppError("not_found", 404)
+
+        now = format_iso(self.clock())
+        if operation == "save":
+            try:
+                due = _action_date(due_date).isoformat()
+            except ValueError as exc:
+                raise AppError("invalid_field") from exc
+            label = _clean(text, SUBMISSION_ACTION_LIMIT) if isinstance(text, str) else ""
+            if not label:
+                raise AppError("invalid_field")
+            if action and not action.get("completedAt") and action["text"] == label and action["dueDate"] == due:
+                return action
+            next_action = {**(action or {}), "text": label, "dueDate": due, "completedAt": None}
+        elif operation == "remove":
+            paper.pop("nextAction")
+            self._commit(refresh_related=False)
+            return None
+        else:
+            complete = operation == "complete"
+            if bool(action.get("completedAt")) == complete:
+                return action
+            next_action = {**action, "completedAt": now if complete else None}
+        next_action.update(revision=uuid.uuid4().hex, updatedAt=now)
+        paper["nextAction"] = next_action
+        self._commit(refresh_related=False)
+        return next_action
 
     def save_paper(
         self,

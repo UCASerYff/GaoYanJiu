@@ -254,6 +254,7 @@ function storedPreview(kind, owner, row, page = null) {
   if (!/^(pdf|jpe?g|png|gif|webp|bmp|avif)$/.test(extension)) return null;
   let url = downloadURL(kind, owner, row, true);
   if (row.ocrSource) url += "&ocrSource=" + encodeURIComponent(row.ocrSource);
+  if (row.ocrReview && row.ocrItem) url += "&" + new URLSearchParams({ocrReview: row.ocrReview, ocrItem: row.ocrItem});
   if (extension === "pdf") {
     const frame = el("iframe", "pdf-preview");
     frame.title = tr("PDF 预览", "PDF preview");
@@ -343,8 +344,12 @@ function utilities() {
     control.append(el("span", "nav-label", label));
     return control;
   };
-  $("utilities").replaceChildren(utility(tr("回收站", "Trash"), openTrash, "trash"),
+  const inbox = utility(tr("OCR 待审核", "OCR pending review"), () =>
+    window.researchExchange?.openPending({api, folderID: state.folder, refresh, language: state.language}), "document");
+  inbox.id = "pending-ocr-inbox";
+  $("utilities").replaceChildren(inbox, utility(tr("回收站", "Trash"), openTrash, "trash"),
     utility(tr("设置", "Settings"), openSettings, "settings"));
+  syncOcrInbox();
   $("page-title").textContent = pageLabel(state.page);
   $("search-icon").replaceChildren(icon("search"));
   document.querySelector(".search-wrap").hidden = state.page === "city";
@@ -477,6 +482,47 @@ async function checkDesktop() {
     checkingDesktop = false;
   }
 }
+let ocrReturns = {waiting: false, pending: []};
+let ocrGeneration = 0;
+let ocrCheck;
+let checkingOcr = false;
+function syncOcrInbox() {
+  const inbox = $("pending-ocr-inbox");
+  if (!inbox) return;
+  const count = ocrReturns.pending.length;
+  inbox.hidden = count === 0;
+  inbox.querySelector(".nav-label").textContent = tr(`OCR 待审核（${count}）`, `OCR pending review (${count})`);
+}
+function readOcrState(data) {
+  ocrGeneration += 1;
+  ocrReturns = {waiting: data?.waiting === true, pending: Array.isArray(data?.pending) ? data.pending : []};
+  syncOcrInbox();
+  return window.researchExchange?.setPending(ocrReturns.pending);
+}
+function mayCheckOcr() {
+  return ocrReturns.waiting && state.writable && !document.hidden && !$("shell").hidden && !leavingWorkbench;
+}
+function scheduleOcrCheck(delay = 2000) {
+  clearTimeout(ocrCheck);
+  if (mayCheckOcr()) ocrCheck = setTimeout(checkOcrReturns, delay);
+}
+async function checkOcrReturns() {
+  if (checkingOcr || !mayCheckOcr()) return;
+  checkingOcr = true;
+  const generation = ocrGeneration;
+  let delay = 2000;
+  try {
+    const result = await post("/api/exchange/ocr-returns");
+    if (generation !== ocrGeneration) return;
+    const changed = readOcrState(result);
+    if (changed && DOCUMENT_PAGES.includes(state.page)) await render();
+  } catch {
+    delay = 4000;
+  } finally {
+    checkingOcr = false;
+    scheduleOcrCheck(delay);
+  }
+}
 async function pageCity() {
   const data = await api("/api/reward");
   const city = renderRewardCity({data, request: api, language: state.language, onUpdate: (next) => {
@@ -520,6 +566,7 @@ async function refresh(info = null) {
   const data = info || await api("/api/bootstrap");
   Object.assign(state, {settings: data.settings, language: data.settings.language || "zh-Hans", overview: data.overview,
     build: data.build, version: data.version, writable: data.writable, libraryMessage: data.message, desktop: data.desktop === true});
+  readOcrState(data.ocrReturns);
   applyChrome();
   if (data.status !== "ready") {
     $("gate").hidden = false;
@@ -528,11 +575,13 @@ async function refresh(info = null) {
     const empty = data.status === "needs_create";
     $("gate-create").hidden = !empty;
     $("gate-retry").hidden = empty;
+    scheduleOcrCheck();
     return;
   }
   $("gate").hidden = true;
   $("shell").hidden = false;
   await render();
+  scheduleOcrCheck(0);
 }
 async function applyRoute() {
   const route = decodeURIComponent(location.hash.slice(1));
@@ -559,6 +608,7 @@ function applySearch() {
   searchTimer = setTimeout(() => render().catch(report), 150);
 }
 document.addEventListener("DOMContentLoaded", async () => {
+  document.addEventListener("visibilitychange", () => scheduleOcrCheck(0));
   window.addEventListener("beforeunload", (event) => {
     if (hasDraft() && !leavingWorkbench) {
       event.preventDefault();

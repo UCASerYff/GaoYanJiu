@@ -4,6 +4,74 @@
   gap: 14px;
   align-items: start;
 }
+.submission-action-board {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+.submission-action-board :is(h2, h3, p), .paper-next-action :is(h2, p) { margin: 0; }
+.submission-action-board h2, .paper-next-action h2 { font-size: 15px; }
+.submission-action-groups {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: start;
+  gap: 8px;
+}
+.submission-action-group {
+  min-width: 0;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  overflow: hidden;
+}
+.submission-action-group .submission-action-heading {
+  padding: 6px 9px;
+  color: var(--muted);
+  background: var(--surface-raised);
+  font-size: 13px;
+  font-weight: 630;
+}
+.submission-action-group summary { cursor: pointer; }
+.submission-action-group :is(h3, summary):focus-visible { outline-offset: -2px; }
+.submission-action-group[data-action-group="overdue"]:has(.submission-action-row) .submission-action-heading {
+  color: var(--attention);
+  background: var(--attention-soft);
+}
+.submission-action-count { margin-inline-start: 3px; font-variant-numeric: tabular-nums; }
+.submission-action-list {
+  list-style: none;
+  max-height: 176px;
+  margin: 0;
+  padding: 0;
+  overflow: auto;
+}
+.submission-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+  gap: 6px;
+  align-items: start;
+  padding: 7px 9px;
+  border-top: 1px solid var(--border);
+}
+.submission-action-main, .submission-action-meta { display: grid; gap: 2px; min-width: 0; }
+.submission-action-meta { justify-items: end; text-align: right; }
+.submission-action-meta time { font-size: 12px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.submission-action-meta button { min-height: 26px; padding: 2px 6px; font-size: 12px; }
+.submission-action-text { overflow-wrap: anywhere; }
+.submission-action-paper { justify-self: start; font-size: 12px; overflow-wrap: anywhere; }
+.paper-next-action { display: grid; min-width: 0; gap: 8px; }
+.paper-context .paper-next-action { background: var(--surface-raised); }
+.paper-action-dates {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 15px;
+  color: var(--muted);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.paper-action-controls, .paper-action-hint { display: flex; flex-wrap: wrap; gap: 5px; }
+.paper-action-hint { color: var(--accent); align-items: baseline; }
+.paper-action-hint .symbol { font-size: 11px; }
+.paper-action-editor .dialog-heading-text p { overflow-wrap: anywhere; }
 .submission-board {
   min-width: 0;
   border: 1px solid var(--border);
@@ -134,6 +202,7 @@ dialog.paper-editor .dialog-body > :last-child { grid-column: 1 / -1; }
   .submission-inspector { display: none; }
 }
 @container workspace (max-width: 650px) {
+  .submission-action-groups { grid-template-columns: minmax(0, 1fr); gap: 5px; }
   .paper-filters { align-items: start; }
   .paper-table-head { display: none; }
   .paper-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 7px 9px; }

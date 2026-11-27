@@ -92,7 +92,14 @@ class Api:
             return 200, {
                 "papers": store.list_papers(query.get("scope", "all"), query.get("q", "")),
                 "followUpKeys": [paper["key"] for paper in store.follow_ups()],
+                "nextActions": store.submission_actions(),
             }
+        if path == "/api/papers/detail" and method == "GET":
+            return 200, {"paper": store.paper_detail(query["key"])}
+        if path == "/api/papers/next-action" and method == "POST":
+            return 200, {"nextAction": store.change_submission_action(
+                body["key"], body["operation"], body.get("revision"), body.get("text"), body.get("dueDate")
+            )}
         if path == "/api/papers" and method == "POST":
             key = store.save_paper(
                 body.get("key") or None,
@@ -312,10 +319,18 @@ class Api:
                 return exchange.overview()
             if action == "review":
                 return exchange.review(query["id"])
+            if action == "ocr-returns":
+                return exchange.ocr_returns_state()
+            if action == "ocr-source":
+                original, _ = exchange.ocr_source(query["id"], query["sourceItemID"])
+                return {"original": {field: original[field] for field in
+                                     ("folderID", "storedName", "fileExtension", "originalName")}}
         if method == "POST":
             if action == "prepare":
                 return exchange.prepare(body["action"], body.get("documentIDs"), body.get("folderID") or "",
-                                        launch=body.get("launch") is not False)
+                                        launch=body.get("launch") is not False, auto_return=body.get("autoReturn") is True)
+            if action == "ocr-returns":
+                return exchange.poll_ocr_returns()
             if action == "receive":
                 return exchange.receive(Path(body["path"]))
             if action == "apply":
@@ -348,6 +363,7 @@ class Api:
             "counts": self.store.counts(),
             "overview": workspace_overview(self.store),
             "followUps": len(self.store.follow_ups()) if library.data else 0,
+            "ocrReturns": self.exchange.ocr_returns_state() if library.data else {"waiting": False, "pending": []},
             "dataDir": str(library.root),
         }
 
@@ -623,10 +639,17 @@ class ResearchHandler(BaseHTTPRequestHandler):
                 if query.get("preview") == "1" and not inline_type:
                     raise AppError("invalid_field", 415)
                 stream = path.open("rb")
-                if query.get("ocrSource"):
+                if any(field in query for field in ("ocrSource", "ocrReview", "ocrItem")):
                     try:
-                        original, expected = original_ocr_pdf(store, query["ocrSource"])
-                        if (kind, owner, name, inline_type) != ("document", original["folderID"], original["storedName"], "application/pdf"):
+                        if query.get("ocrSource") and not {"ocrReview", "ocrItem"} & query.keys():
+                            original, expected = original_ocr_pdf(store, query["ocrSource"])
+                            valid_preview = inline_type == "application/pdf"
+                        elif query.get("ocrReview") and query.get("ocrItem") and "ocrSource" not in query:
+                            original, expected = self.server.api.exchange.ocr_source(query["ocrReview"], query["ocrItem"])
+                            valid_preview = bool(inline_type)
+                        else:
+                            raise AppError("ocr_source_missing", 404)
+                        if not valid_preview or (kind, owner, name) != ("document", original["folderID"], original["storedName"]):
                             raise AppError("ocr_source_missing", 404)
                         _verify_ocr_source(stream, expected)
                         stream.seek(0)

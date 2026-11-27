@@ -2,15 +2,16 @@
 
 from __future__ import annotations
 
-import math
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import uuid
 from datetime import datetime, timezone
+from itertools import islice
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
@@ -21,6 +22,7 @@ from gaoyanjiu.gaoaction import (
     MAX_FILE_BYTES, MAX_MANIFEST_BYTES, decode_json, digest_value, encode_json, envelope, fresh,
     identifier, load_package, payload_parts, read_bytes, regular, safe_parts,
 )
+from gaoyanjiu.ocr_returns import OcrReturns
 from gaoyanjiu.textutil import extract_text
 from gaoyanjiu.timeutil import format_iso, parse_iso
 from gaoyanjiu.winidentity import version_strings
@@ -46,6 +48,9 @@ IMAGE_UTIS = {
 OCR_FORMATS = {"txt": "text", "md": "markdown", "json": "json", "pdf": "searchablePDF"}
 PROVIDER_FILE_CAP = 128 * 1024 * 1024
 MAX_REVIEW_METADATA = 16 * 1024 * 1024
+OCR_DISCOVERY_BATCH = 96
+OCR_POLL_BATCH = 4
+OCR_PENDING_LIMIT = 100
 PAGE_STATES = ("completed", "failed", "lowConfidence", "cancelled", "pending")
 REVIEW_LOCK = threading.RLock()
 NAMESPACE = uuid.UUID("c8234bb2-1236-43ad-8993-eeaa66c2be91")
@@ -276,7 +281,7 @@ def _pages(values) -> list[dict]:
                 fields = ("x", "y", "width", "height")
                 items = [box.get(key) for key in fields] if isinstance(box, dict) else []
                 if (
-                    len(items) != 4 or not all(type(item) in {float, int} and math.isfinite(item) and item >= 0 for item in items)
+                    len(items) != 4 or not all(type(item) in {float, int} and 0 <= item <= sys.float_info.max for item in items)
                     or not all(items[2:]) or (coordinate == "normalized" and
                     (items[0] + items[2] > 1.000001 or items[1] + items[3] > 1.000001))
                 ):
@@ -289,7 +294,7 @@ def _pages(values) -> list[dict]:
     return [pages[number] for number in sorted(pages)]
 
 
-def _json_pages(payload: bytes, digest: str) -> list[dict]:
+def _json_pages(payload: bytes, digest: str, *, automatic=False) -> list[dict]:
     if len(payload) > MAX_REVIEW_METADATA:
         raise AppError("payload_too_large")
     artifact = decode_json(payload)
@@ -297,12 +302,12 @@ def _json_pages(payload: bytes, digest: str) -> list[dict]:
     if not isinstance(sources, list):
         raise _error("invalid_manifest", "OCR JSON 缺少可核对的原件。")
     matches = [item for item in sources if isinstance(item, dict) and str(item.get("sha256", "")).lower() == digest]
-    if len(matches) != 1:
+    if len(matches) != 1 or (automatic and len(sources) != 1):
         raise _error("invalid_manifest", "OCR JSON 与请求的原件摘要不匹配。")
     source = matches[0]
     if isinstance(source.get("pages"), list):
         used = source["pages"]
-    elif isinstance(artifact.get("pages"), list) and isinstance(source.get("id"), str):
+    elif not automatic and isinstance(artifact.get("pages"), list) and isinstance(source.get("id"), str):
         used = [page for page in artifact["pages"] if isinstance(page, dict) and page.get("sourceID") == source["id"]]
         if any(str(page.get("originalSHA256", "")).lower() != digest for page in used):
             raise _error("invalid_manifest", "OCR JSON 的页与请求原件不匹配。")
@@ -331,20 +336,25 @@ def _merge_pages(declared: list[dict], verified: list[dict]) -> list[dict]:
     return sorted(merged.values(), key=lambda page: page["pageNumber"])
 
 
-def _ocr_result(manifest: dict, staged: list, bindings: list) -> tuple[list, list]:
+def _ocr_result(manifest: dict, staged: list, bindings: list, *, automatic=False) -> tuple[list, list]:
     provenance = manifest["provenance"]
     by_input = {binding["itemID"]: binding for binding in bindings}
     by_output = {entry[0]["id"]: entry for entry in staged}
-    if not staged and manifest["status"] in {"failed", "cancelled", "unsupported", "pending"}:
+    if not automatic and not staged and manifest["status"] in {"failed", "cancelled", "unsupported", "pending"}:
         return [], []
     sources = provenance.get("sources")
     outputs = provenance.get("outputs")
-    if sources is None and len(bindings) == 1 and provenance.get("sourceItemID"):
+    failures = provenance.get("exportFailures", [])
+    if not isinstance(failures, list) or (automatic and any(not isinstance(failure, str) for failure in failures)):
+        raise AppError("invalid_manifest")
+    if not automatic and sources is None and len(bindings) == 1 and provenance.get("sourceItemID"):
         sources = [{**provenance, "outputItemIDs": list(by_output)}]
-    if outputs is None and len(bindings) == 1 and provenance.get("sourceItemID"):
+    if not automatic and outputs is None and len(bindings) == 1 and provenance.get("sourceItemID"):
         outputs = [{**provenance, "resultItemID": item_id} for item_id in by_output]
     if not isinstance(sources, list) or not isinstance(outputs, list):
         raise _error("invalid_manifest", "OCR 结果缺少原件或输出映射。")
+    if automatic and (manifest["status"] not in {"completed", "partial"} or not staged or len(sources) != len(bindings)):
+        raise _error("invalid_manifest", "OCR 回传缺少可审核输出或未逐一对应请求中的原件。")
 
     def source_binding(row):
         if not isinstance(row, dict) or not isinstance(row.get("sourceItemID"), str):
@@ -354,7 +364,7 @@ def _ocr_result(manifest: dict, staged: list, bindings: list) -> tuple[list, lis
             raise _error("checksum_mismatch", "OCR 结果的原件编号或摘要与原请求不一致。")
         return source
 
-    by_source = {}
+    by_source, provider_sources = {}, set()
     for row in sources:
         source = source_binding(row)
         item_id = source["itemID"]
@@ -364,6 +374,11 @@ def _ocr_result(manifest: dict, staged: list, bindings: list) -> tuple[list, lis
                  or len(set(declared)) != len(declared))):
             raise AppError("invalid_manifest")
         by_source[item_id] = (row, _pages(row.get("pages")))
+        if automatic:
+            provider_id = identifier(row.get("sourceID"))
+            if provider_id in provider_sources or not isinstance(declared, list) or not by_source[item_id][1]:
+                raise _error("invalid_manifest", "OCR 回传缺少可核对的原件编号、输出或页码。")
+            provider_sources.add(provider_id)
     mappings, page_artifacts = {}, {}
     output_formats = set()
     requested_formats = set(manifest["parameters"].get("outputs", []))
@@ -374,10 +389,13 @@ def _ocr_result(manifest: dict, staged: list, bindings: list) -> tuple[list, lis
         if not isinstance(item_id, str) or item_id not in by_output or item_id in mappings or source_id not in by_source:
             raise AppError("invalid_manifest")
         row, pages = by_source[source_id]
+        source_pages = {page["pageNumber"]: page["status"] for page in pages} if automatic else {}
         if "outputItemIDs" in row and item_id not in row["outputItemIDs"]:
             raise AppError("invalid_manifest")
         if (row.get("sourceID") is not None and output.get("sourceID") is not None
                 and row["sourceID"] != output["sourceID"]):
+            raise AppError("invalid_manifest")
+        if automatic and (row["sourceID"] != output.get("sourceID") or output.get("resultItemID") != item_id):
             raise AppError("invalid_manifest")
         item, content = by_output[item_id]
         ext = _format_uti(item["uti"])
@@ -390,7 +408,10 @@ def _ocr_result(manifest: dict, staged: list, bindings: list) -> tuple[list, lis
         if ext == "json":
             if source_id in page_artifacts:
                 raise AppError("invalid_manifest")
-            page_artifacts[source_id] = _json_pages(content, binding["sha256"])
+            verified = _json_pages(content, binding["sha256"], automatic=automatic)
+            if automatic and source_pages != {page["pageNumber"]: page["status"] for page in verified}:
+                raise _error("invalid_manifest", "OCR JSON 的页码和状态与回传清单不一致。")
+            page_artifacts[source_id] = verified
         metadata = {**provenance, **row, **output}
         revision = metadata.get("engineRevision")
         if revision is not None and (type(revision) is not int or not 0 <= revision <= 2 ** 31 - 1):
@@ -400,6 +421,9 @@ def _ocr_result(manifest: dict, staged: list, bindings: list) -> tuple[list, lis
             not isinstance(lang, str) or not re.fullmatch(r"[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*", lang) for lang in languages
         ):
             raise AppError("invalid_manifest")
+        output_pages = _pages(output.get("pages", provenance.get("pages")))
+        if automatic and output_pages and source_pages != {page["pageNumber"]: page["status"] for page in output_pages}:
+            raise _error("invalid_manifest", "OCR 输出的页码和状态与回传清单不一致。")
         mappings[item_id] = {
             "itemID": item_id,
             "sourceItemID": source_id,
@@ -411,7 +435,7 @@ def _ocr_result(manifest: dict, staged: list, bindings: list) -> tuple[list, lis
             "engine": metadata.get("engine", metadata.get("ocrEngine")),
             "engineVersion": metadata.get("engineVersion", metadata.get("ocrEngineVersion", None if revision is None else f"revision {revision}")),
             "languages": languages,
-            "pages": _merge_pages(pages, _pages(output.get("pages", provenance.get("pages")))),
+            "pages": _merge_pages(pages, output_pages),
         }
         if any(value is not None and not isinstance(value, str) for value in (mappings[item_id]["engine"], mappings[item_id]["engineVersion"])):
             raise AppError("invalid_manifest")
@@ -425,7 +449,7 @@ def _ocr_result(manifest: dict, staged: list, bindings: list) -> tuple[list, lis
     warnings = []
     if manifest["status"] == "completed":
         covered = {output["sourceItemID"] for output in mappings.values()}
-        if covered != set(by_input) or provenance.get("exportFailures") or any(
+        if covered != set(by_input) or failures or any(
             requested_formats - {output["format"] for output in mappings.values() if output["sourceItemID"] == source}
             for source in covered
         ):
@@ -442,11 +466,14 @@ def _ocr_result(manifest: dict, staged: list, bindings: list) -> tuple[list, lis
             warnings.append("部分 OCR 坐标未声明单位。")
     all_pages = [page for _row, entries in by_source.values() for page in entries]
     all_pages += [page for output in mappings.values() for page in output["pages"]]
+    if automatic and not any(page["status"] in {"completed", "lowConfidence"}
+                             for output in mappings.values() for page in output["pages"]):
+        raise _error("invalid_manifest", "OCR 回传缺少可复核的识别页。")
     if manifest["status"] == "completed" and any(
         page["status"] != "completed" or page.get("confidence", 1) < 0.5 for page in all_pages
     ):
         raise _error("invalid_manifest", "OCR 含失败、取消或低置信度页，不能标为完成。")
-    for failure in provenance.get("exportFailures", []):
+    for failure in failures:
         if isinstance(failure, str):
             warnings.append(failure[:400])
     return list(mappings.values()), list(dict.fromkeys(warnings))
@@ -518,9 +545,16 @@ def _chosen_reference(reference: dict, path: Path) -> bytes:
 
 
 class ResearchExchange:
-    def __init__(self, store):
+    def __init__(self, store, *, ocr_returns: OcrReturns | None = None):
         self.store = store
         self.root = store.library.root / "WindowsExchange"
+        self.ocr_returns = ocr_returns if ocr_returns is not None else OcrReturns()
+        self._ocr_lock = threading.Lock()
+        self._ocr_poll_lock = threading.Lock()
+        self._ocr_scans = {"Incoming": None, "Outgoing": None}
+        self._ocr_waiting = {}
+        self._ocr_received = {}
+        self._ocr_pending = {}
 
     def _root_path(self, branch: str, value: str) -> Path:
         return self.root / branch / identifier(value)
@@ -585,7 +619,7 @@ class ResearchExchange:
         except (AppError, OSError):
             pass
 
-    def prepare(self, action: str, document_ids=None, folder_id: str = "", launch: bool = True) -> dict:
+    def prepare(self, action: str, document_ids=None, folder_id: str = "", launch: bool = True, *, auto_return=False) -> dict:
         if action not in PROVIDERS:
             raise AppError("unknown_action")
         data = self.store._data()
@@ -630,12 +664,177 @@ class ResearchExchange:
                              "folderID": document["folderID"]})
             copies.append((name, payload))
         record = {"manifest": manifest, "bindings": bindings, "folderID": folder_id}
+        if action == OCR and auto_return is True:
+            record["ocrAutoReturn"] = True
+        automatic = False
         with REVIEW_LOCK:
             location = self._stage("Outgoing", record, copies, request=True) / "request.gaoaction"
+            if record.get("ocrAutoReturn") is True:
+                now = self.store.clock()
+                try:
+                    fresh(manifest, now)
+                    digest = sha256_bytes(read_bytes(location / "manifest.json", MAX_MANIFEST_BYTES))
+                    self.ocr_returns.prepare(manifest["requestID"], digest, manifest["expiresAt"], now)
+                    automatic = True
+                except (AppError, OSError):
+                    pass
+        if automatic:
+            with self._ocr_lock:
+                self._ocr_waiting[manifest["requestID"]] = parse_iso(manifest["expiresAt"])
         message = _launch_provider(product, location, manifest) if launch else "交接包已生成；请在提供方复核。"
-        return {"requestID": manifest["requestID"], "path": str(location), "expiresAt": manifest["expiresAt"], "message": message}
+        return {"requestID": manifest["requestID"], "path": str(location), "expiresAt": manifest["expiresAt"],
+                "message": message, "autoReturn": automatic}
 
-    def receive(self, path: Path) -> dict:
+    def receive_ocr_return(self, request_id: str) -> dict | None:
+        request_id = identifier(request_id)
+        session = self._record("Outgoing", request_id)
+        original = session["manifest"]
+        fresh(original, self.store.clock())
+        if session.get("ocrAutoReturn") is not True or original["kind"] != "request" or original["action"] != OCR:
+            raise AppError("request_conflict", 409)
+        with self.ocr_returns.open_result(request_id, self.store.clock()) as ready:
+            if ready is None:
+                return None
+            ticket, path = ready
+            return self.receive(path, _ocr_ticket=ticket)
+
+    def _note_ocr_return(self, summary: dict) -> None:
+        if summary["autoReturned"]:
+            request_id = summary["inReplyTo"]
+            self._ocr_received[request_id] = parse_iso(summary["expiresAt"])
+            self._ocr_waiting.pop(request_id, None)
+        if summary["canApply"]:
+            fields = ("id", "kind", "action", "inReplyTo", "status", "providerStatus", "createdAt",
+                      "expiresAt", "sourceDocumentIDs", "sourceNames", "canApply", "autoReturned")
+            self._ocr_pending[summary["id"]] = {key: summary[key] for key in fields}
+        else:
+            self._ocr_pending.pop(summary["id"], None)
+
+    def _summarize_received(self, record: dict) -> dict:
+        summary = self._summary(record)
+        if summary["action"] == OCR and summary["kind"] == "result":
+            with self._ocr_lock:
+                self._note_ocr_return(summary)
+        return summary
+
+    def _discover_ocr_returns(self, now) -> None:
+        # The profile may already have years of handoffs. Resume a bounded scan
+        # across bootstrap and poll calls instead of assuming the newest names.
+        for branch, scan in self._ocr_scans.items():
+            if scan is False:
+                continue
+            if scan is None:
+                try:
+                    scan = os.scandir(self.root / branch)
+                except OSError:
+                    self._ocr_scans[branch] = False
+                    continue
+                self._ocr_scans[branch] = scan
+            for _ in range(OCR_DISCOVERY_BATCH):
+                try:
+                    entry = next(scan)
+                except (StopIteration, OSError):
+                    scan.close()
+                    self._ocr_scans[branch] = False
+                    break
+                try:
+                    request_id = identifier(entry.name)
+                    if request_id != entry.name:
+                        continue
+                    regular(Path(entry.path), directory=True)
+                    record = self._record(branch, request_id)
+                    manifest = record["manifest"]
+                    if manifest["action"] != OCR:
+                        continue
+                    if branch == "Incoming":
+                        if manifest["kind"] == "result":
+                            self._note_ocr_return(self._summary(record))
+                    elif (manifest["kind"] == "request" and record.get("ocrAutoReturn") is True
+                          and request_id not in self._ocr_received):
+                        fresh(manifest, now)
+                        if self.ocr_returns.ticket(request_id, now) is not None:
+                            self._ocr_waiting[request_id] = parse_iso(manifest["expiresAt"])
+                except (AppError, KeyError, OSError):
+                    continue
+
+    def _ocr_state(self, now) -> dict:
+        for entries in (self._ocr_waiting, self._ocr_received):
+            for request_id in tuple(entries):
+                if entries[request_id] <= now:
+                    entries.pop(request_id)
+        if self._ocr_pending:
+            receipts = self._business()
+            for result_id in tuple(self._ocr_pending):
+                row = self._ocr_pending[result_id]
+                if "envelope:" + result_id in receipts:
+                    self._ocr_pending.pop(result_id)
+                elif not row["autoReturned"] and row["status"] != "interrupted" and parse_iso(row["expiresAt"]) <= now:
+                    # A failed approved import can still be resumed with the saved intent.
+                    self._note_ocr_return(self._summary(self._record("Incoming", result_id)))
+        pending = sorted(self._ocr_pending.values(), key=lambda row: row["createdAt"], reverse=True)
+        return {"waiting": bool(self._ocr_waiting) or any(scan is not False for scan in self._ocr_scans.values()),
+                "pending": pending[:OCR_PENDING_LIMIT]}
+
+    def ocr_returns_state(self) -> dict:
+        if self.store.library.data is None:
+            return {"waiting": False, "pending": []}
+        with self._ocr_lock:
+            now = self.store.clock()
+            self._discover_ocr_returns(now)
+            return self._ocr_state(now)
+
+    def poll_ocr_returns(self) -> dict:
+        if self.store.library.data is None or not self._ocr_poll_lock.acquire(blocking=False):
+            return self.ocr_returns_state()
+        try:
+            with self._ocr_lock:
+                now = self.store.clock()
+                self._discover_ocr_returns(now)
+                self._ocr_state(now)
+                requests = tuple(islice(self._ocr_waiting, OCR_POLL_BATCH))
+                for request_id in requests:
+                    self._ocr_waiting[request_id] = self._ocr_waiting.pop(request_id)
+            for request_id in requests:
+                try:
+                    self.receive_ocr_return(request_id)
+                except (AppError, OSError):
+                    continue
+            with self._ocr_lock:
+                return self._ocr_state(self.store.clock())
+        finally:
+            self._ocr_poll_lock.release()
+
+    def _check_ocr_return(self, manifest: dict, session: dict, ticket: dict) -> None:
+        original = session["manifest"]
+        now = self.store.clock()
+        fresh(original, now)
+        fresh(manifest, now)
+        if (
+            session.get("ocrAutoReturn") is not True or original["kind"] != "request" or manifest["kind"] != "result"
+            or original["requestID"] != ticket["requestID"] or manifest["inReplyTo"] != ticket["requestID"]
+            or identifier(manifest["requestID"]) == ticket["requestID"]
+            or original["action"] != OCR or manifest["action"] != OCR
+            or original["sourceBundleID"] != ticket["sourceBundleID"] or manifest["targetBundleID"] != original["sourceBundleID"]
+            or original["targetBundleID"] != ticket["targetBundleID"] or manifest["sourceBundleID"] != original["targetBundleID"]
+            or manifest["parameters"] != original["parameters"] or original["expiresAt"] != ticket["expiresAt"]
+            or parse_iso(manifest["createdAt"]) < parse_iso(original["createdAt"])
+        ):
+            raise _error("request_conflict", "OCR 回传与本机发起的请求不一致。")
+        source_path = self._root_path("Outgoing", ticket["requestID"]) / "request.gaoaction" / "manifest.json"
+        raw = read_bytes(source_path, MAX_MANIFEST_BYTES)
+        digest = ticket["requestManifestSHA256"]
+        if (sha256_bytes(raw) != digest or decode_json(raw) != original
+                or manifest["provenance"].get("requestManifestSHA256") != digest):
+            raise AppError("checksum_mismatch")
+        inputs = {item["id"]: str(item["sha256"]).lower() for item in original["items"]}
+        bindings = session["bindings"]
+        if len(bindings) != len(inputs) or {item["itemID"]: item["sha256"] for item in bindings} != inputs:
+            raise AppError("checksum_mismatch")
+        data = self.store._view()
+        for binding in bindings:
+            self._validate_binding(data, binding, check_version=False)
+
+    def receive(self, path: Path, *, _ocr_ticket: dict | None = None) -> dict:
         if self.store.library.status != "needs_create":
             self.store._view()
         if not path.is_absolute():
@@ -644,14 +843,20 @@ class ResearchExchange:
         result_id = identifier(manifest["requestID"])
         with REVIEW_LOCK:
             stage = self._root_path("Incoming", result_id)
+            auto_session = None
+            saved = None
+            if _ocr_ticket is not None:
+                auto_session = self._record("Outgoing", _ocr_ticket["requestID"])
+                self._check_ocr_return(manifest, auto_session, _ocr_ticket)
             if stage.exists():
                 saved = self._record("Incoming", result_id)
                 if saved["manifestSHA256"] != digest:
                     raise AppError("request_conflict", 409)
-                return self._summary(saved)
+                if auto_session is None:
+                    return self._summarize_received(saved)
             record = {"manifest": manifest, "manifestSHA256": digest, "outputs": [], "warnings": []}
             if manifest["kind"] == "result":
-                session = self._record("Outgoing", manifest["inReplyTo"])
+                session = auto_session or self._record("Outgoing", manifest["inReplyTo"])
                 original = session["manifest"]
                 if (
                     identifier(manifest["inReplyTo"]) != identifier(original["requestID"])
@@ -661,7 +866,7 @@ class ResearchExchange:
                 ):
                     raise _error("request_conflict", "结果与原请求的提供方、动作或参数不一致。")
                 request_digest = manifest["provenance"].get("requestManifestSHA256")
-                if request_digest is not None:
+                if request_digest is not None and auto_session is None:
                     source_path = self._root_path("Outgoing", manifest["inReplyTo"]) / "request.gaoaction/manifest.json"
                     if request_digest != sha256_bytes(read_bytes(source_path, MAX_MANIFEST_BYTES)):
                         raise AppError("checksum_mismatch")
@@ -669,7 +874,8 @@ class ResearchExchange:
                 action = manifest["action"]
                 if action == OCR:
                     orphan = {**manifest, "parameters": original["parameters"]}
-                    record["outputs"], record["warnings"] = _ocr_result(orphan, items, session["bindings"])
+                    record["outputs"], record["warnings"] = _ocr_result(orphan, items, session["bindings"],
+                                                                         automatic=auto_session is not None)
                     record["sources"] = _ocr_review_sources(manifest["provenance"], session["bindings"], record["outputs"])
                 elif action == EDIT:
                     if items or manifest["references"]:
@@ -686,8 +892,33 @@ class ResearchExchange:
                         raise AppError("invalid_parameters")
                     if selected > 1 and not original["parameters"].get("multiple", False):
                         raise AppError("invalid_parameters")
-            self._stage("Incoming", record, [(item["relativePath"], payload) for item, payload in items])
-            return self._summary(record)
+            if auto_session is not None:
+                accepted = self.store.clock()
+                fresh(auto_session["manifest"], accepted)
+                fresh(manifest, accepted)
+                record["ocrReturnedAt"] = format_iso(accepted)
+            if saved is None:
+                self._stage("Incoming", record, [(item["relativePath"], payload) for item, payload in items])
+            elif "ocrReturnedAt" not in saved:
+                # The same bytes may already be staged by the manual import route.
+                self._stage_payload(saved)
+                encoded = encode_json(record)
+                if len(encoded) > MAX_REVIEW_METADATA:
+                    raise AppError("payload_too_large")
+                atomic_write(stage / "record.json", encoded)
+            else:
+                record = saved
+            return self._summarize_received(record)
+
+    def _ocr_sources(self, record: dict) -> list[dict]:
+        sources = record.get("sources", [])
+        if not any("sourceDocumentID" not in row for row in sources):
+            return sources
+        try:
+            session = self._record("Outgoing", record["manifest"]["inReplyTo"])
+        except AppError:
+            return sources
+        return _ocr_review_sources(record["manifest"]["provenance"], session["bindings"], record["outputs"])
 
     def _summary(self, record: dict, include_pages: bool = False) -> dict:
         manifest = record["manifest"]
@@ -698,7 +929,7 @@ class ResearchExchange:
             manifest["action"] in (OCR, CHOOSE) and manifest.get("status") in ("completed", "partial")
             and bool(manifest["items"] or manifest["references"])
         )
-        expired = self.store.clock() >= parse_iso(manifest["expiresAt"])
+        expired = "ocrReturnedAt" not in record and self.store.clock() >= parse_iso(manifest["expiresAt"])
         approved = self._approval(record) if not applied else None
         resume = approved is not None and not applied
         folder_id = approved["intent"].get("folderID", "") if resume else record.get("folderID", "")
@@ -717,9 +948,15 @@ class ResearchExchange:
                             "sha256": reference.get("sha256")} for reference in manifest["references"]],
             "counts": receipt.get("counts"),
         }
+        if manifest["action"] == OCR:
+            sources = self._ocr_sources(record)
+            summary["sourceDocumentIDs"] = [row["sourceDocumentID"] for row in sources
+                                            if "sourceDocumentID" in row]
+            summary["sourceNames"] = [row["sourceName"] for row in sources]
+            summary["autoReturned"] = "ocrReturnedAt" in record
         if include_pages:
             summary["outputs"] = record["outputs"]
-            summary["sources"] = record.get("sources", [])
+            summary["sources"] = sources if manifest["action"] == OCR else []
             summary["errorCode"] = manifest.get("errorCode")
             summary["workflowState"] = (manifest.get("provenance") or {}).get("workflowState")
         return summary
@@ -736,6 +973,16 @@ class ResearchExchange:
 
     def review(self, value: str) -> dict:
         return self._summary(self._record("Incoming", value), True)
+
+    def ocr_source(self, value: str, source_item_id: str) -> tuple[dict, str]:
+        result = self._record("Incoming", value)["manifest"]
+        if result["kind"] != "result" or result["action"] != OCR:
+            raise AppError("not_found", 404)
+        session = self._record("Outgoing", result["inReplyTo"])
+        binding = next((item for item in session["bindings"] if item["itemID"] == source_item_id), None)
+        if binding is None:
+            raise AppError("not_found", 404)
+        return self._validate_binding(self.store._view(), binding, check_version=False), binding["sha256"]
 
     def reveal(self, value: str) -> dict:
         folder = self._root_path("Outgoing", value) / "request.gaoaction"
@@ -834,7 +1081,7 @@ class ResearchExchange:
                     return {"duplicate": True, **receipts[key]["counts"]}
                 raise AppError("request_conflict", 409)
             reserved = self._approval(record)
-            if reserved is None:
+            if reserved is None and "ocrReturnedAt" not in record:
                 fresh(manifest, self.store.clock())
             provider_status = manifest.get("status")
             if manifest["kind"] == "result" and (action == EDIT or provider_status not in ("completed", "partial")):
@@ -1113,5 +1360,7 @@ def _ocr_review_sources(provenance: dict, bindings: list, outputs: list) -> list
         for output in outputs:
             if output["sourceItemID"] == binding["itemID"]:
                 pages = _merge_pages(pages, output["pages"])
-        reviews.append({"sourceItemID": binding["itemID"], "sourceName": binding["name"], "sha256": binding["sha256"], "pages": pages})
+        reviews.append({"sourceItemID": binding["itemID"], "sourceDocumentID": binding["documentID"],
+                        "sourceName": binding["name"], "folderID": binding["folderID"],
+                        "sha256": binding["sha256"], "pages": pages})
     return reviews
