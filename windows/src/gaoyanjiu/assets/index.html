@@ -1,41 +1,60 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="gao-token" content="__GAO_TOKEN__">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>搞研究</title>
+  <link rel="icon" href="/assets/AcademicAchievementManagerIcon.png">
   <link rel="stylesheet" href="/assets/style.css">
+  <link rel="stylesheet" href="/assets/city.css">
 </head>
 <body data-theme="system">
-  <header class="topbar">
-    <div class="brand">
-      <span class="mark" aria-hidden="true">研</span>
-      <div>
-        <strong id="brand-name">搞研究</strong>
-        <small id="brand-version"></small>
-      </div>
-    </div>
-    <label class="search">
-      <span data-i18n="search">搜索</span>
-      <input id="search" type="search" autocomplete="off">
-    </label>
-    <button id="quit" type="button" data-i18n="quit">退出</button>
-  </header>
   <section id="gate" class="gate" hidden>
-    <div class="gate-card">
-      <p class="eyebrow">GaoYanJiu</p>
-      <h1>搞研究</h1>
+    <div class="gate-card card">
+      <img class="mark" src="/assets/AcademicAchievementManagerIcon.png" alt="">
+      <h1 data-zh="搞研究" data-en="GaoYanJiu">搞研究</h1>
       <p id="gate-text"></p>
-      <button id="gate-create" type="button" hidden data-i18n="createLibrary">创建我的资料库</button>
+      <button id="gate-create" class="primary" type="button" hidden data-zh="创建我的资料库" data-en="Create my library">创建我的资料库</button>
+      <button id="gate-retry" type="button" data-zh="重新载入" data-en="Reload">重新载入</button>
+      <button id="gate-quit" type="button" data-zh="退出" data-en="Quit">退出</button>
     </div>
   </section>
   <div id="shell" class="shell" hidden>
-    <nav id="nav" class="nav"></nav>
-    <main id="main" class="main"></main>
+    <aside id="sidebar" class="sidebar">
+      <div class="brand">
+        <img class="mark" src="/assets/AcademicAchievementManagerIcon.png" alt="">
+        <div>
+          <strong data-zh="搞研究" data-en="GaoYanJiu">搞研究</strong>
+          <small data-zh="投稿、成果与研究资产" data-en="Submissions, works and research assets">投稿、成果与研究资产</small>
+        </div>
+      </div>
+      <nav id="nav" class="nav" aria-label="研究工作台"></nav>
+      <div id="sidebar-status" class="sidebar-status"></div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar">
+        <div id="utilities" class="utilities"></div>
+        <div id="page-tools" class="page-tools"></div>
+      </header>
+      <div class="search-wrap">
+        <div class="search" role="search">
+          <span id="search-icon"></span>
+          <input id="search" type="search" autocomplete="off">
+          <button id="clear-search" type="button" class="icon-button" hidden></button>
+        </div>
+      </div>
+      <main id="main" class="main"></main>
+    </div>
   </div>
-  <dialog id="editor"></dialog>
-  <div id="toast" class="toast" role="status"></div>
-  <script src="/assets/app.js"></script>
+  <dialog id="editor" aria-labelledby="dialog-heading"></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite"></div>
+  <script defer src="/assets/city-scene.js"></script>
+  <script defer src="/assets/city.js"></script>
+  <script defer src="/assets/exchange.js"></script>
+  <script defer src="/assets/app.js"></script>
+  <script defer src="/assets/submissions.js"></script>
+  <script defer src="/assets/records.js"></script>
+  <script defer src="/assets/library-ui.js"></script>
 </body>
 </html>

@@ -1,144 +1,59 @@
-# 搞研究 Windows 版
+# 搞研究 Windows V4.14
 
-面向 Windows 10/11 x64 的独立版本，营销版本与当前 Mac 版同为 **4.14**，Windows 构建号为 **1**。代码只放在 `windows/`，不改 Mac 版的 Swift 源码、签名或资料路径。
+适用于 Windows 10 和 11 x64。Windows 构建号为 1，命令行报告 4.14+1。安装包由 Windows Installer 管理，包含界面和命令行程序。
 
-界面在本机浏览器中打开。服务只监听 `127.0.0.1`，不对外网提供页面，也不把个人资料上传到 GitHub。
+## 安装与资料
 
-## 选型
-
-使用 **Python 3.12 标准库** 实现业务，界面是随程序打包的本地网页，安装包用 **PyInstaller** 在 `windows-latest` 上打成单个 exe。
-
-这样选，是因为：
-
-- 业务和测试可以在 Linux 上完成，不需要 Windows SDK 或 Xcode。
-- GitHub Actions 的 `windows-latest` 能直接跑测试、打包，并上传 exe。
-- 没有 Electron 或自带运行时的 .NET 自包含发布那么大的体积，也没有第二套 UI 框架要维护。
-- 资料仍是 Mac 版的 schema 32 `library.json`。未知字段会原样保留，方便以后把同一份资料拷回 Mac。
-
-没有做成原生 WinUI。三维研究城、WidgetKit 和 Mac 同伴应用本来就依赖 AppKit / SceneKit，换成浏览器界面可以把已经对齐的业务先跑起来。
-
-## 构建
-
-在 Windows 10/11 x64 上安装 Python 3.12，然后：
+1. 下载发行附件 `GaoYanJiu-Windows-4.14-x64.msi` 及同名 `.sha256` 文件。
+2. 在 PowerShell 中计算 SHA-256，与校验文件中的值比较。安装包没有 Authenticode 签名。
+3. 退出旧版搞研究，在当前 Windows 用户下双击 MSI，完成后从开始菜单打开「搞研究」。安装目录是 `%LOCALAPPDATA%\GaoYanJiu\`。
 
 ```powershell
-cd windows
-powershell -ExecutionPolicy Bypass -File .\build.ps1
+Get-FileHash -Algorithm SHA256 .\GaoYanJiu-Windows-4.14-x64.msi
+Get-Content .\GaoYanJiu-Windows-4.14-x64.msi.sha256
 ```
 
-脚本会安装开发依赖、运行单元测试，并在 `windows/dist/` 生成：
+旧版 Windows 资料继续使用 `%APPDATA%\GaoSeries\Research\AcademicAchievementManager\`。首次使用时需确认创建资料库。若资料确实存在但缺失、损坏或版本不受支持，界面会报告原因并保护原文件。卸载 MSI 保留资料。旧便携版的程序文件可以在验证新版本后自行移除。
 
-- `GaoYanJiu.exe`：打开界面的窗口程序
-- `GaoYanJiu-cli.exe`：命令行，用于检查资料和生成统计快照
+`library.json` 沿用 schema 32，保留扩展字段、历史项目、历史资金、回收站、附件与研究城状态。V4.14 工作区已移除项目管理和资金栏目。Windows 凭据由本机 DPAPI 加密，保存在资料目录的 `secrets\`。应用通过本机回环访问界面及资料，常规入口使用 Edge 应用窗口，Edge 不可用时用系统浏览器打开。
 
-GitHub Actions 工作流 `.github/workflows/windows.yml` 在 `windows-latest` 上执行同一套步骤。打包之后会用临时目录后台启动 `GaoYanJiu.exe`（`--serve --no-browser --port --data-dir`，不打开浏览器），轮询到本机 HTTP 200，再通过该服务新建并读回一次 `library.json`，然后结束进程。两个 exe 作为 artifact `GaoYanJiu-Windows-4.14` 上传。这个工作流不会创建 GitHub Release。
+## 工作流
 
-只跑测试：
-
-```powershell
-cd windows
-python -m pip install -r requirements-dev.txt
-python -m pytest -q
-```
-
-在 Linux 或 macOS 上也可以跑同一套测试。开发时启动界面：
-
-```sh
-cd windows
-PYTHONPATH=src python3 launch.py --data-dir /tmp/gaoyanjiu-dev --no-browser --port 8765
-```
-
-然后用浏览器打开 `http://127.0.0.1:8765/`。
-
-## 运行与安装
-
-不需要安装程序。把 `GaoYanJiu.exe` 放到任意文件夹，双击运行。程序会打开系统浏览器。关闭窗口后，在页面右上角选择“退出”，进程才会结束。
-
-资料目录：
-
-`%APPDATA%\GaoSeries\Research\AcademicAchievementManager\`
-
-第一次打开时需要本人确认“创建我的资料库”。程序不会在资料缺失、损坏或版本更高时用空库覆盖原文件，也不会写自动备份。
-
-`GaoYanJiu.exe` 与 `GaoYanJiu-cli.exe` 使用同一组参数。不带参数时会打开系统浏览器。后台启动不打开浏览器：
-
-```powershell
-.\GaoYanJiu.exe --data-dir $env:TEMP\GaoYanJiuSmoke --serve --no-browser --port 18765
-```
-
-| 参数 | 作用 |
+| 页面 | 可用操作 |
 | --- | --- |
-| `--data-dir` | 资料目录。不设时使用 `%APPDATA%\GaoSeries\Research\AcademicAchievementManager\`，也可用环境变量 `GAO_RESEARCH_DATA_DIR` |
-| `--serve` | 启动只监听 `127.0.0.1` 的本地服务。无其他命令时也会启动服务 |
-| `--no-browser` | 不调用系统浏览器 |
-| `--port` | 服务端口。`0` 表示由系统分配 |
-| `--create-empty` | 在空目录明确新建 schema 32 资料库后退出；与 `--serve` 同时使用时新建后继续服务 |
-| `--inspect` | 只读打印记录条数，不打印标题或正文 |
-| `--widget-snapshot` | 写出只含计数的 `widget-snapshot.json` |
-| `--version` | 打印 `4.14+1` |
+| 在投管理 | 手动新增、编辑、上下文搜索、拖动排序、查看状态历史、标记已读、归档、恢复追踪及回收站。宽窗口右侧显示门户，窄窗口通过工具栏打开 |
+| 投稿门户 | 选择内置或自定义投稿系统、保存门户、在浏览器登录、提取当前稿件、逐项审核导入、更新状态和检查时间。多门户可按顺序刷新 |
+| 成果管理 | 成果类型、专利子类、署名、日期、编号、链接、PDF/图片附件。提供成果类别、署名和年度图表，两列图表随工作区宽度排列 |
+| 刊物指标 | 成果编辑器通过 Crossref 推荐刊名和 ISSN。输入 EasyScholar 密钥后可查询并随成果保存指标 |
+| 实验数据、总结报告、重要文献 | 文件夹、标签、时间和标签排序、拖放与批量上传、去重、文件名及全文搜索、PDF/图片和索引文本预览、下载、编辑和回收站 |
+| 证书 | 名称、日期、标签、附件、可排序记录表、年度及标签图表 |
+| 研究城 | 三维视角、平移、旋转、缩放，房屋摆件和地形的放置、移动及收回，相邻扩建、祈愿、库存、金币、票券和历史 |
+| 桌面小组件 | 从开始菜单打开「搞研究 - 在投状态持续时间」或「搞研究 - 成果与署名分布」。两者使用同一资料库的本地统计快照，点击可定位到主界面 |
+
+全文索引支持常见文本、DOCX/PPTX/XLSX，以及含文字层的 PDF（最大 128 MiB，每份最多索引前 300 页）。扫描件可以送搞操作识别。浏览器单次上传限制为 256 MiB，需要导入更大的单个资料文件时可在文件夹的资料交接菜单中指定本机路径。
+
+### 跨应用交接
+
+- 在研究资料条目的操作菜单中选择「送搞操作识别文字（OCR）」。在搞操作审核、执行识别并导出 `OCR-<UUID>.gaoaction`。回到搞研究的「资料交接与回执」打开结果，在有效期内接收后审核并应用。原件保留，OCR 派生件按来源及页码建立索引。源 PDF 与交接摘要一致时，支持定位原页。
+- 「从搞文件选择资料」使用 GaoAction V1 文件选择。编辑流程会给搞文件发送副本，用户可把编辑结果回导为同一资料的新版本或关联附件。也可审核从搞文件直接收到的资料并导出回执。
+- 已安装的同伴应用可通过能力查询及交接启动参数接入。若同伴不可用或其版本不提供相应启动入口，应用会保留端到端交接包供手动打开。Windows 版同时识别旧 Windows 搞文件的历史收件方标识；新交接使用 `com.academic-achievement.manager`。
+
+## 验收边界
+
+- 在 Windows 11 x64 用隔离数据验收。七页的浅色、深色、宽窄布局及 175% 模拟缩放通过 Chromium 无头回归。Windows 10 和 macOS V4.14 的实机并排截图尚未验收。
+- 投稿门户使用浏览器捕获并经人工审核。需手动登录和刷新，待跟进提醒在应用内显示。真实出版商登录和真实 EasyScholar 密钥尚未验收。
+- 研究城复用原始天空、草地、岩石贴图和原目录标识。建筑与地形用 Canvas 三维几何重建，SceneKit 材质、阴影和部分模型细节有差异。
+- 桌面小组件以独立 Windows 小窗运行，保留统计和链接。Windows 11 Widgets 面板无系统注册。
+- 搞操作 V1.16 x64 安装版已用合成 PNG 和双页 PDF 测试原生 OCR、6 份结果、来源摘要和重复去重。搞文件已用 Windows 源码测试选择、编辑回导和回执。两个同伴应用的前台交互尚未验收。
+
+## 构建与复现
+
+在 Windows x64 上使用干净的 CPython 3.12 环境运行以下命令。正常构建会安装开发依赖、运行回归并输出 MSI 及 SHA-256 到 `windows/dist/`。GitHub Actions 上传 Windows 构建产物。
 
 ```powershell
-.\GaoYanJiu-cli.exe --version
-.\GaoYanJiu-cli.exe --data-dir D:\ResearchData --create-empty
-.\GaoYanJiu-cli.exe --inspect
-.\GaoYanJiu-cli.exe --widget-snapshot
+pwsh -File .\windows\build.ps1 -Python C:\path\to\venv\Scripts\python.exe
+python .\windows\tests\smoke_install.py .\windows\dist\GaoYanJiu-Windows-4.14-x64.msi
+node .\windows\tests\smoke_browser.mjs "C:\Program Files\Google\Chrome\Application\chrome.exe" C:\path\to\venv\Scripts\python.exe
 ```
 
-`--inspect` 只打印记录条数和奖励城字段名，不打印标题、正文或路径里的个人内容。环境变量 `GAO_RESEARCH_DATA_DIR` 可以改资料目录，和 Mac 版的测试钩子同名。
-
-门户密码和 EasyScholar Secret Key 在 Windows 上用 DPAPI 加密，放在资料目录的 `secrets\` 下，不写入 `library.json`。
-
-## 数据与网络
-
-| 位置 | 内容 |
-| --- | --- |
-| `library.json` | schema 32：在投、成果、证书、资料、回收站、门户账号、历史项目和资金、研究城 |
-| `Attachments\`、`CertificateAttachments\`、`ManagedDocuments\`、`TrashStorage\` | 附件副本 |
-| `settings.json` | 外观、语言、待跟进天数 |
-| `secrets\` | EasyScholar 密钥和门户密码 |
-| `widget-snapshot.json` | 只含计数的 Windows 统计快照 |
-
-会主动访问的网络接口：
-
-- `https://api.crossref.org/journals`：期刊名建议
-- `https://www.easyscholar.cc/open/getPublicationRank`：填写密钥后查询期刊指标
-- 内置投稿网站只在浏览器中打开，程序不登录、不抓取稿件状态
-
-Mac 版的投稿页内嵌浏览器、搞文件、搞操作、搞门户和 WidgetKit 都不在这些请求里。
-
-## 功能对齐
-
-| 功能 | 状态 | 说明 |
-| --- | --- | --- |
-| 在投记录的新建、编辑、状态历史、归档、搜索 | 已对齐 | 状态文本变化会记下上一状态 |
-| “状态更新”页 | 部分 | Mac 手动保存会把更新标记清掉。Windows 没有网页抓取，保存时默认也不标记；需要时在新建框里选择“标为状态更新” |
-| 成果类型、专利细分、署名、类别条形图 | 已对齐 | 高度规则与 Mac 相同：`max(215, 类别数 × 30 + 35)`。窄窗口改为上下排列 |
-| 成果和证书附件 | 已对齐 | 按 SHA-256 管理资料文件；附件移入回收站后才能从原位置删除 |
-| 实验数据、总结报告、重要文献 | 部分 | 文件夹、导入、标签、下载和同文件夹去重已有。文本索引覆盖 txt/md/csv/json/xml/yaml、docx/pptx/xlsx，以及未压缩 PDF 里的可见文字 |
-| 回收站 | 已对齐 | 保留 30 天，恢复时发现原位置已有同一条会停止。超期清理在打开界面时执行 |
-| schema 32 资料往返 | 已对齐 | 额外字段保留。低于或高于 32 的库只读，不改磁盘文件 |
-| 损坏、缺失、未来版本不覆盖 | 已对齐 | 发现附件目录等既有痕迹时，不能新建空库 |
-| 不制作备份 | 已对齐 | 保存使用临时文件原子替换，替换完成后不保留副本 |
-| Crossref 期刊建议、EasyScholar 指标解析 | 已对齐 | 解析规则与 Mac 版相同，包括自定义评价和空值过滤 |
-| 21 个内置投稿系统 | 部分 | 可以打开网站并保存账号。没有内嵌浏览器，也不会自动读出稿件状态 |
-| 研究城券、保底、金币、相邻购地、抽奖、地形 | 部分 | 房屋券、摆件券、79 抽保底、72 小时金币上限和 100 金币购地与 Mac 相同。界面是二维地块，一地放一件，没有 SceneKit 旋转占地和三维模型 |
-| 历史项目、历史资金 | 部分 | 只读显示并在保存其他资料时保留。Mac 4.14 已去掉项目页；资金由搞积蓄管理，Windows 上没有这个应用 |
-| `research.importDocuments` 交接包 | 部分 | 校验版本、目标、120 秒有效期、nonce、路径和 SHA-256 后导入所选文件夹。带 `targetRecordID` 的旧参数会拒绝，不会自动选第一个文件夹 |
-| 向搞文件、搞操作、搞门户发起编辑、OCR、选择文件 | 未实现 | 这些同伴应用是 macOS bundle，Windows 上没有对应程序 |
-| OCR 派生件、外部编辑回导和导入事务日志 | 未实现 | Mac 版依赖上述同伴应用和完整 journal |
-| WidgetKit 桌面小组件 | 部分 | 会写 `widget-snapshot.json` 计数。Windows 没有 WidgetKit，也不能注册 Mac 的 App Group |
-| 系统通知 | 部分 | 打开时提示超过设定天数仍未终态的在投。没有 Windows 通知横幅 |
-| 中英文与浅色/深色 | 部分 | 导航和主要按钮有中英切换，外观可跟随系统。不是 Mac 版的全量文案 |
-| `gaoyanjiu://` 深链 | 未实现 | 没有注册 Windows URL 协议 |
-| 启动耗时私有日志 | 未实现 | 命令行只提供只读 `--inspect` |
-| 三维场景、游戏贴图、macOS 小组件扩展 | 未实现 | 资源和使用它们的代码都是 AppKit / SceneKit / WidgetKit |
-
-单个导入文件的上限是 512 MiB。浏览器上传上限是 256 MiB。交接包沿用 Mac 的 256 项和 2 GiB 总量上限。更大的文件可以用“粘贴本机路径”导入，由程序直接读磁盘。
-
-## 已知问题
-
-- 窗口程序没有自己的原生窗口，关闭浏览器标签不会退出进程，需要点“退出”。
-- 二维研究城不检查建筑占地是否跨地块，也不绘制 Mac 版的模型。
-- 压缩过的 PDF、扫描件和旧版 `.doc` 不会进入全文索引。
-- DPAPI 凭据不能在另一台 Windows 电脑上解开，也不能被 Mac 钥匙串读取。
-- 同一份 `library.json` 不要同时被 Mac 版和 Windows 版打开写入。
+`GaoYanJiu-cli.exe` 支持 `--version`、`--inspect`、`--create-empty`、`--widget-snapshot`、`--widget submissions|works` 和 `--capabilities`。可用 `--data-dir` 或 `GAO_RESEARCH_DATA_DIR` 指定隔离资料。`--gaoaction PATH` 打开待审交接。`gaoyanjiu://submissions` 和 `gaoyanjiu://works` 定位页面，`gaoyanjiu://widget` 打开桌面组件。

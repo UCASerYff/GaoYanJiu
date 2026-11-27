@@ -1,711 +1,473 @@
-const token = document.querySelector('meta[name="gao-token"]').content;
-const state = { page: "submissions", scope: "all", kind: "experimentData", folder: "", selection: null, language: "zh-Hans" };
-const I18N = {
-  "zh-Hans": {
-    search: "搜索", quit: "退出", createLibrary: "创建我的资料库",
-    submissions: "在投管理", works: "成果管理", documents: "资料库", certificates: "证书",
-    trash: "回收站", city: "研究城", portals: "投稿门户", history: "历史记录", settings: "设置",
-    all: "全部", changed: "状态更新", hidden: "已归档", create: "新建", edit: "编辑", archive: "归档",
-    unarchive: "取消归档", remove: "移入回收站", restore: "恢复", purge: "清理超过 30 天", forever: "彻底删除",
-    save: "保存", cancel: "取消", follow: "待跟进", open: "打开网站", collect: "收取金币", draw: "抽一次",
-    buy: "购买相邻地皮", place: "放置", experimentData: "实验数据", summaryReports: "总结报告",
-    importantLiterature: "重要文献", importFile: "导入文件", newFolder: "新建文件夹"
-  },
-  en: {
-    search: "Search", quit: "Quit", createLibrary: "Create my library",
-    submissions: "Submissions", works: "Works", documents: "Library", certificates: "Certificates",
-    trash: "Trash", city: "Research city", portals: "Portals", history: "History", settings: "Settings",
-    all: "All", changed: "Updated", hidden: "Archived", create: "New", edit: "Edit", archive: "Archive",
-    unarchive: "Unarchive", remove: "Move to trash", restore: "Restore", purge: "Purge after 30 days", forever: "Delete forever",
-    save: "Save", cancel: "Cancel", follow: "Follow up", open: "Open site", collect: "Collect coins", draw: "Draw once",
-    buy: "Buy a neighboring plot", place: "Place", experimentData: "Experiments", summaryReports: "Reports",
-    importantLiterature: "Literature", importFile: "Import file", newFolder: "New folder"
-  }
-};
-const t = (key) => (I18N[state.language] || I18N["zh-Hans"])[key] || I18N["zh-Hans"][key] || key;
-const $ = (id) => document.getElementById(id);
+"use strict";
 
+const $ = (id) => document.getElementById(id);
+const token = document.querySelector('meta[name="gao-token"]').content;
+const DOCUMENT_PAGES = ["experimentData", "summaryReports", "importantLiterature"];
+const PAGE_LABELS = {
+  submissions: ["在投管理", "Submissions"], works: ["成果管理", "Works"],
+  experimentData: ["实验数据", "Experiment Data"], summaryReports: ["总结报告", "Summary Reports"],
+  importantLiterature: ["重要文献", "Important Literature"], certificates: ["证书", "Certificates"], city: ["研究城", "Research City"],
+};
+const PAGE_ICONS = {submissions: "document", works: "seal", experimentData: "flask", summaryReports: "report", importantLiterature: "books", certificates: "certificate", city: "city"};
+const SYMBOLS = {
+  archive: "\uE7B8", arrow: "\uE76C", back: "\uE76B", bell: "\uEA8F", books: "\uE8F1", calendar: "\uE787", certificate: "\uEB95",
+  city: "\uE80F", clip: "\uE723", close: "\uE711", coin: "\uEC0A", document: "\uE8A5", download: "\uE896", edit: "\uE70F",
+  ellipsis: "\uE712", exit: "\uE8BB", flask: "\uEA80", folder: "\uE8B7", globe: "\uE774", grip: "\uE700", image: "\uEB9F",
+  link: "\uE71B", menu: "\uE89F", open: "\uE8E5", paperplane: "\uE724", plus: "\uE710", refresh: "\uE72C", report: "\uE9F9",
+  seal: "\uE930", search: "\uE721", settings: "\uE713", tag: "\uE8EC", ticket: "\uE8EC", trash: "\uE74D", upload: "\uE898",
+};
+const state = {
+  page: "submissions", scope: "all", folder: "", tag: "", documentSort: "uploadedAt", language: "zh-Hans", query: "",
+  certificateSort: "eventDate", certificateDescending: true, analyticsOpen: false, overview: {}, settings: {}, writable: true,
+};
+
+function tr(zh, en) { return (state.language === "en" && en) || zh; }
+function pageLabel(page) { return tr(...PAGE_LABELS[page]); }
+function el(tag, classes, ...children) {
+  const node = document.createElement(tag);
+  if (classes) node.className = classes;
+  node.append(...children.flat(Infinity).filter((child) => child !== null && child !== undefined && child !== false));
+  return node;
+}
+function icon(name) {
+  const symbol = el("span", "symbol", SYMBOLS[name] || "");
+  symbol.setAttribute("aria-hidden", "true");
+  return symbol;
+}
 function toast(message) {
   const node = $("toast");
   node.textContent = message;
   node.classList.add("show");
-  clearTimeout(toast._timer);
-  toast._timer = setTimeout(() => node.classList.remove("show"), 3200);
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => node.classList.remove("show"), 4000);
 }
-
+function report(error) {
+  const message = error.message || String(error);
+  const inline = $("editor").open && $("editor").querySelector(".dialog-error");
+  if (inline) {
+    inline.hidden = false;
+    inline.textContent = message;
+  } else toast(message);
+}
 async function api(path, options = {}) {
-  const headers = Object.assign({ "X-Gao-Token": token }, options.headers || {});
-  const response = await fetch(path, Object.assign({}, options, { headers }));
-  const isJson = (response.headers.get("content-type") || "").includes("json");
-  const payload = isJson ? await response.json() : null;
-  if (!response.ok) throw new Error((payload && payload.message) || "请求没有完成");
-  return payload;
+  const headers = Object.assign({"X-Gao-Token": token}, options.headers || {});
+  const response = await fetch(path, {...options, headers});
+  if (!response.ok || response.headers.get("content-type")?.includes("json")) {
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.message || tr("请求没有完成。", "The request did not complete."));
+    return payload;
+  }
+  return response;
+}
+function post(path, body = {}) {
+  return api(path, {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+}
+function button(label, handler, options = {}) {
+  const {symbol, style, iconOnly, disabled} = options;
+  const node = el("button", [style, iconOnly && "icon-button"].filter(Boolean).join(" "),
+    symbol && icon(symbol), !iconOnly && label);
+  node.type = "button";
+  node.disabled = Boolean(disabled);
+  if (iconOnly) {
+    node.title = label;
+    node.setAttribute("aria-label", label);
+  }
+  if (handler) node.addEventListener("click", () => Promise.resolve().then(handler).catch(report));
+  return node;
+}
+function external(label, url, symbol = "open") {
+  let safe;
+  try { safe = new URL(url); } catch { return null; }
+  if (!["https:", "http:"].includes(safe.protocol) || safe.username || safe.password) return null;
+  const link = el("a", "button", icon(symbol), label);
+  link.href = safe.href;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  return link;
+}
+function popover(label, symbol, children, iconOnly = false) {
+  const title = el("summary", iconOnly ? "icon-button" : "button", icon(symbol), !iconOnly && label);
+  title.setAttribute("aria-label", label);
+  title.title = label;
+  const menu = el("details", "popover", title, el("div", "popover-menu", children));
+  menu.addEventListener("click", (event) => {
+    if (event.target.closest(".popover-menu button, .popover-menu a")) menu.open = false;
+  });
+  return menu;
+}
+function field(label, name, value = "", type = "text") {
+  const control = el(type === "area" ? "textarea" : "input");
+  control.name = name;
+  if (type !== "area") control.type = type;
+  control.value = value ?? "";
+  control.autocomplete = type === "password" ? "new-password" : "off";
+  return el("label", "field", el("span", "field-label", label), control);
+}
+function selectField(label, name, value, options) {
+  const control = el("select");
+  control.name = name;
+  for (const [key, text] of options) {
+    const option = el("option", "", text);
+    option.value = key;
+    control.append(option);
+  }
+  control.value = value ?? "";
+  return el("label", "field", el("span", "field-label", label), control);
+}
+function formGroup(title, ...children) { return el("fieldset", "form-group stack", el("legend", "", title), children); }
+function closeDialog() { if ($("editor").open) $("editor").close(); }
+function modal(title, nodes, options = {}) {
+  const dialog = $("editor");
+  const {subtitle, submit, submitLabel, actions = [], size = "", unclosable = false} = options;
+  dialog.className = size;
+  const heading = el("h2", "", title);
+  heading.id = "dialog-heading";
+  const error = el("p", "dialog-error");
+  error.hidden = true;
+  error.setAttribute("role", "alert");
+  const body = el("div", "dialog-body stack", nodes);
+  const footer = el("footer", "dialog-foot", actions);
+  if (!unclosable) footer.append(button(submit ? tr("取消", "Cancel") : tr("完成", "Done"), closeDialog));
+  if (submit) {
+    const save = el("button", "primary", submitLabel || tr("保存", "Save"));
+    save.type = "submit";
+    footer.append(save);
+  }
+  const form = el(submit ? "form" : "div", "dialog-layout",
+    el("header", "dialog-header", heading, subtitle && el("p", "muted", subtitle)), body, error, footer);
+  if (submit) form.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const submitter = event.submitter;
+    if (submitter) submitter.disabled = true;
+    error.hidden = true;
+    try { await submit(Object.fromEntries(new FormData(form)), form); } catch (failure) { report(failure); }
+    finally { if (submitter) submitter.disabled = false; }
+  });
+  dialog.replaceChildren(form);
+  if (!dialog.open) dialog.showModal();
+  return form;
+}
+function confirmTrash(title, details, run, label = tr("删除", "Delete")) {
+  modal(title, [el("p", "", details)], {size: "compact", actions: [button(label, async () => {
+    await run(); closeDialog(); await refresh();
+  }, {style: "danger"})]});
+}
+function card(title, subtitle, ...content) {
+  return el("section", "card", title && el("h2", "section-title", title),
+    subtitle && el("p", "section-subtitle", subtitle), content);
+}
+function emptyState(symbol, title, subtitle, ...actions) {
+  return el("section", "card empty", el("div", "empty-mark", icon(symbol)), el("h2", "", title),
+    subtitle && el("p", "muted", subtitle), actions.length > 0 && el("div", "row", actions));
+}
+function pairs(...rows) {
+  return el("dl", "pairs", rows.filter(([, value]) => value || value === 0).flatMap(([label, value]) =>
+    [el("dt", "", label), el("dd", "", value)]));
+}
+function formatDate(value, withTime = false) {
+  const date = new Date(value || "");
+  if (!Number.isFinite(date.getTime())) return "—";
+  return new Intl.DateTimeFormat(state.language === "en" ? "en-US" : "zh-CN", {
+    dateStyle: "medium", ...(withTime ? {timeStyle: "short"} : {}),
+  }).format(date);
+}
+function dateInput(value) {
+  if (value) return String(value).slice(0, 10);
+  const day = new Date();
+  return `${day.getFullYear()}-${String(day.getMonth() + 1).padStart(2, "0")}-${String(day.getDate()).padStart(2, "0")}`;
+}
+function safeFocus(node) { if (node && node.isConnected) node.focus({preventScroll: true}); }
+function badge(text, style = "") { return el("span", `badge ${style}`, text); }
+function chart(title, subtitle, values, options = {}) {
+  const {height = 0, unit = "", mark = "", empty = tr("还没有可显示的数据", "No data to display")} = options;
+  const box = el("div", "chart-bars");
+  const largest = Math.max(1, ...values.map((row) => row.count));
+  for (const row of values) {
+    const fill = el("i", "chart-fill");
+    fill.style.width = `${row.count * 100 / largest}%`;
+    const line = el("div", `bar ${row.tone || mark}`, el("span", "bar-label", row.label),
+      el("span", "bar-track", fill), el("span", "bar-count", `${row.count}${unit}${row.note ? ` · ${row.note}` : ""}`));
+    box.append(line);
+  }
+  if (!values.length) box.append(el("p", "muted chart-empty", empty));
+  if (height) box.style.minHeight = `${height}px`;
+  return card(title, subtitle, box);
+}
+function reorderItem(node, kind, id, enabled = true) {
+  if (!enabled || !state.writable) return node;
+  const mime = "application/x-gaoresearch-order";
+  node.draggable = true;
+  node.addEventListener("dragstart", (event) => {
+    event.dataTransfer.setData(mime, JSON.stringify({kind, id}));
+    event.dataTransfer.effectAllowed = "move";
+  });
+  node.addEventListener("dragover", (event) => {
+    if (event.dataTransfer.types.includes(mime)) { event.preventDefault(); node.classList.add("drop-target"); }
+  });
+  node.addEventListener("dragleave", () => node.classList.remove("drop-target"));
+  node.addEventListener("drop", async (event) => {
+    const data = event.dataTransfer.getData(mime);
+    if (!data) return;
+    event.preventDefault();
+    event.stopPropagation();
+    node.classList.remove("drop-target");
+    try {
+      const from = JSON.parse(data);
+      if (from.kind !== kind || from.id === id) return;
+      await post("/api/reorder", {kind, sourceID: from.id, targetID: id});
+      await refresh();
+    } catch (error) { report(error); }
+  });
+  return node;
+}
+function downloadURL(kind, owner, row, preview = false) {
+  return `/api/download?${new URLSearchParams({kind, owner, name: row.storedName, token, ...(preview ? {preview: "1"} : {})})}`;
+}
+function downloadLink(kind, owner, row) {
+  const link = el("a", "button", icon("download"), tr("下载", "Download"));
+  link.href = downloadURL(kind, owner, row);
+  link.download = row.originalName || "";
+  return link;
+}
+function storedPreview(kind, owner, row, page = null) {
+  const extension = (row.fileExtension || (row.originalName || row.storedName).split(".").at(-1)).toLowerCase();
+  if (!/^(pdf|jpe?g|png|gif|webp|bmp|avif)$/.test(extension)) return null;
+  let url = downloadURL(kind, owner, row, true);
+  if (row.ocrSource) url += "&ocrSource=" + encodeURIComponent(row.ocrSource);
+  if (extension === "pdf") {
+    const frame = el("iframe", "pdf-preview");
+    frame.title = tr("PDF 预览", "PDF preview");
+    frame.src = url + (page ? `#page=${page}` : "");
+    return frame;
+  }
+  const image = el("img", "image-preview");
+  image.src = url;
+  image.alt = row.displayName || row.originalName;
+  return image;
+}
+function uploadFile(path, file, extra) {
+  const data = new FormData();
+  for (const [key, value] of Object.entries(extra)) data.set(key, value);
+  data.set("file", file);
+  return api(path, {method: "POST", body: data});
+}
+function chooseFiles(handler, accept = "") {
+  const input = el("input");
+  input.type = "file";
+  input.multiple = true;
+  input.accept = accept;
+  input.addEventListener("change", async () => {
+    try { await handler(Array.from(input.files)); } catch (error) { report(error); }
+  }, {once: true});
+  input.click();
 }
 
 function applyChrome() {
-  document.querySelectorAll("[data-i18n]").forEach((node) => {
-    node.textContent = t(node.dataset.i18n);
-  });
   document.documentElement.lang = state.language === "en" ? "en" : "zh-CN";
+  document.title = tr("搞研究", "GaoYanJiu");
+  document.body.dataset.theme = state.settings.appearance || "system";
+  document.querySelectorAll("[data-zh]").forEach((node) => { node.textContent = tr(node.dataset.zh, node.dataset.en); });
+}
+function setPage(page) {
+  state.page = page;
+  state.folder = "";
+  state.tag = "";
+  state.query = "";
+  if (page === "submissions") state.scope = "all";
+  $("search").value = "";
+  $("main").scrollTop = 0;
+  render().catch(report);
+}
+function navGroups() {
+  const groups = [
+    [tr("研究工作台", "Research Workspace"), ["submissions", "works"]],
+    [tr("资料与资产", "Library and Assets"), [...DOCUMENT_PAGES, "certificates"]],
+    [tr("探索", "Explore"), ["city"]],
+  ];
+  $("nav").replaceChildren(...groups.map(([label, pages]) => el("section", "nav-group", el("h2", "", label), pages.map((page) => {
+    const node = button(pageLabel(page), () => setPage(page), {symbol: PAGE_ICONS[page], style: "nav-row"});
+    node.append(el("span", "nav-count", state.overview[page]?.count ?? 0));
+    if (page === state.page) node.setAttribute("aria-current", "page");
+    return node;
+  }))));
+  const status = state.page === "submissions" ? [el("div", "status-line", el("span", "status-dot"),
+    tr(`${state.overview.portals || 0} 个投稿门户`, `${state.overview.portals || 0} submission portals`))] : [];
+  $("sidebar-status").replaceChildren(...status, el("small", "muted", tr("本地存储", "Local storage")));
+}
+function searchPrompt() {
+  return {
+    submissions: tr("搜索标题、期刊、稿号或状态", "Search title, journal, manuscript ID or status"),
+    works: tr("搜索成果、作者、期刊或编号", "Search works, authors, venues or identifiers"),
+    certificates: tr("搜索证书名称、标签或附件", "Search certificate name, tags or attachments"),
+  }[state.page] || tr("搜索文件夹、文件名、标签或正文", "Search folders, filenames, tags or text");
+}
+function utilities() {
+  const sidebar = button(tr("显示或隐藏侧栏", "Toggle sidebar"), () => {
+    const collapsed = $("shell").classList.toggle("sidebar-collapsed");
+    sidebar.setAttribute("aria-expanded", String(!collapsed));
+  }, {iconOnly: true, symbol: "menu"});
+  sidebar.setAttribute("aria-controls", "sidebar");
+  sidebar.setAttribute("aria-expanded", String(!$("shell").classList.contains("sidebar-collapsed")));
+  $("utilities").replaceChildren(sidebar,
+    button(tr("回收站", "Trash"), openTrash, {iconOnly: true, symbol: "trash"}),
+    button(tr("设置", "Settings"), openSettings, {iconOnly: true, symbol: "settings"}));
+  $("search-icon").replaceChildren(icon("search"));
+  document.querySelector(".search-wrap").hidden = state.page === "city";
+  const search = $("search");
+  search.placeholder = searchPrompt();
+  search.setAttribute("aria-label", search.placeholder);
+  $("clear-search").hidden = !state.query;
+  $("clear-search").title = tr("清除搜索", "Clear search");
+  $("clear-search").setAttribute("aria-label", $("clear-search").title);
+  $("clear-search").replaceChildren(icon("close"));
+}
+function dashboard(subtitle, stats) {
+  return el("header", "dashboard", el("h1", "", pageLabel(state.page)), el("p", "dashboard-caption", subtitle),
+    el("div", "stats", stats.map(([value, label, symbol, style]) => el("div", "stat", el("div", `stat-symbol ${style || ""}`, icon(symbol)),
+      el("div", "", el("strong", "", value ?? 0), el("small", "muted", label))))));
+}
+function latestLabel(value, empty, checked = false) {
+  if (!value) return empty;
+  const moment = formatDate(value, true);
+  return checked ? tr(`最近检查：${moment}`, `Last checked ${moment}`) : tr(`最近更新：${moment}`, `Last updated ${moment}`);
 }
 
-function setTheme(appearance) {
-  document.body.dataset.theme = appearance || "system";
-}
-
-const NAV = ["submissions", "works", "documents", "certificates", "trash", "city", "portals", "history", "settings"];
-
-function renderNav() {
-  $("nav").replaceChildren(...NAV.map((page) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.textContent = t(page);
-    if (page === state.page) button.setAttribute("aria-current", "page");
-    button.addEventListener("click", () => { state.page = page; state.selection = null; render(); });
-    return button;
-  }));
-}
-
-function field(label, name, value, type = "text") {
-  const wrap = document.createElement("label");
-  wrap.className = "stack";
-  wrap.textContent = label;
-  const input = document.createElement(type === "area" ? "textarea" : "input");
-  if (type !== "area") input.type = type;
-  input.name = name;
-  input.value = value || "";
-  wrap.append(input);
-  return wrap;
-}
-
-function selectField(label, name, value, options) {
-  const wrap = document.createElement("label");
-  wrap.className = "stack";
-  wrap.textContent = label;
-  const select = document.createElement("select");
-  select.name = name;
-  options.forEach(([id, text]) => {
-    const option = document.createElement("option");
-    option.value = id;
-    option.textContent = text;
-    if (id === (value || "")) option.selected = true;
-    select.append(option);
-  });
-  wrap.append(select);
-  return wrap;
-}
-
-function openEditor(title, nodes, onSubmit) {
-  const dialog = $("editor");
-  const form = document.createElement("form");
-  form.className = "stack";
-  const heading = document.createElement("h2");
-  heading.textContent = title;
-  const actions = document.createElement("div");
-  actions.className = "row";
-  const save = document.createElement("button");
-  save.className = "primary";
-  save.type = "submit";
-  save.textContent = t("save");
-  const cancel = document.createElement("button");
-  cancel.type = "button";
-  cancel.textContent = t("cancel");
-  cancel.addEventListener("click", () => dialog.close());
-  actions.append(save, cancel);
-  form.append(heading, ...nodes, actions);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const data = Object.fromEntries(new FormData(form).entries());
-    try {
-      await onSubmit(data);
-      dialog.close();
-      await render();
-    } catch (error) {
-      toast(error.message);
-    }
-  });
-  dialog.replaceChildren(form);
-  dialog.showModal();
-}
-
-function rowItem(title, subtitle, ...actions) {
-  const row = document.createElement("div");
-  row.className = "item";
-  const text = document.createElement("div");
-  const strong = document.createElement("strong");
-  strong.textContent = title || "未命名";
-  const span = document.createElement("span");
-  span.textContent = subtitle || "";
-  text.append(strong, span);
-  row.append(text, ...actions);
-  return row;
-}
-
-function itemButton(title, subtitle, selected, onClick) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "item";
-  if (selected) button.setAttribute("aria-selected", "true");
-  const strong = document.createElement("strong");
-  strong.textContent = title || "未命名";
-  const span = document.createElement("span");
-  span.textContent = subtitle || "";
-  button.append(strong, span);
-  button.addEventListener("click", onClick);
-  return button;
-}
-
-function actionButton(label, className, onClick) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = className || "";
-  button.textContent = label;
-  button.addEventListener("click", async () => {
-    try { await onClick(); await render(); } catch (error) { toast(error.message); }
-  });
-  return button;
-}
-
-function detailBox(rows) {
-  const box = document.createElement("div");
-  box.className = "detail";
-  rows.forEach(([label, value]) => {
-    const heading = document.createElement("h3");
-    heading.textContent = label;
-    const paragraph = document.createElement("p");
-    paragraph.textContent = value || "—";
-    box.append(heading, paragraph);
-  });
-  return box;
-}
-
-async function pageSubmissions() {
-  const data = await api(`/api/papers?scope=${state.scope}`);
-  const selected = data.papers.find((paper) => paper.key === state.selection) || data.papers[0];
-  if (selected) state.selection = selected.key;
-  const head = document.createElement("div");
-  head.className = "page-head";
-  const title = document.createElement("h1");
-  title.textContent = t("submissions");
-  const tools = document.createElement("div");
-  tools.className = "toolbar";
-  ["all", "changed", "hidden"].forEach((scope) => {
-    const button = document.createElement("button");
-    button.textContent = t(scope);
-    button.setAttribute("aria-pressed", String(scope === state.scope));
-    button.addEventListener("click", () => { state.scope = scope; state.selection = null; render(); });
-    tools.append(button);
-  });
-  tools.append(actionButton(t("create"), "primary", async () => {
-    openEditor(t("create"), [
-      field("标题", "title"), field("期刊或会议", "venue"), field("稿号", "manuscriptID"),
-      field("状态", "status", "已投稿"), field("状态日期", "statusSince", new Date().toISOString().slice(0, 10), "date"),
-      field("投稿网址", "url"), field("备注", "notes", "", "area"),
-      selectField("标为状态更新", "flagChanged", "", [["", "否"], ["yes", "是"]])
-    ], async (form) => {
-      await api("/api/papers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-        title: form.title, venue: form.venue, manuscriptID: form.manuscriptID, status: form.status,
-        statusSince: form.statusSince, url: form.url, notes: form.notes, flagChanged: form.flagChanged === "yes"
-      }) });
-    });
-  }));
-  if (selected) {
-    tools.append(actionButton(t("edit"), "", async () => {
-      openEditor(t("edit"), [
-        field("标题", "title", selected.title), field("期刊或会议", "venue", selected.journal),
-        field("稿号", "manuscriptID", selected.manuscriptID), field("状态", "status", selected.status),
-        field("状态日期", "statusSince", String(selected.statusSince || "").slice(0, 10), "date"),
-        field("投稿网址", "url", selected.url), field("备注", "notes", selected.submissionHistory || "", "area")
-      ], async (form) => {
-        await api("/api/papers", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-          key: selected.key, title: form.title, venue: form.venue, manuscriptID: form.manuscriptID,
-          status: form.status, statusSince: form.statusSince, url: form.url, notes: form.notes
-        }) });
-      });
-    }));
-    tools.append(actionButton(selected.hidden ? t("unarchive") : t("archive"), "", async () => {
-      await api("/api/papers/hidden", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: selected.key, hidden: !selected.hidden }) });
-    }));
-    tools.append(actionButton(t("remove"), "danger", async () => {
-      await api("/api/papers/trash", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ key: selected.key }) });
-      state.selection = null;
-    }));
+async function openTrash() {
+  const {items} = await api("/api/trash");
+  const rows = el("div", "list");
+  const labels = {
+    paper: tr("在投论文", "Submission"), existingWork: tr("成果", "Work"), certificate: tr("证书", "Certificate"),
+    documentFolder: tr("文件夹", "Folder"), managedDocument: tr("文件", "File"), workAttachment: tr("成果附件", "Work attachment"),
+    certificateAttachment: tr("证书附件", "Certificate attachment"), project: tr("历史项目", "Historical project"),
+    fundingRecord: tr("历史资金记录", "Historical funding record"),
+  };
+  for (const item of items) {
+    rows.append(el("article", "line-item", el("div", "grow", el("strong", "", item.title || labels[item.kind] || tr("记录", "Record")),
+      el("small", "muted block", [labels[item.kind], formatDate(item.deletedAt, true)].filter(Boolean).join(" · "))),
+    button(tr("恢复", "Restore"), async () => { await post("/api/trash/restore", {id: item.id}); await openTrash(); await refresh(); }),
+    button(tr("彻底删除", "Delete permanently"), () => modal(tr("永久删除此记录？", "Permanently delete this record?"),
+      [el("p", "", item.title || tr("这项操作无法撤销。", "This action cannot be undone."))], {size: "compact", actions: [button(tr("彻底删除", "Delete permanently"), async () => {
+        await post("/api/trash/delete", {id: item.id}); await openTrash(); await refresh();
+      }, {style: "danger"})]}), {style: "danger"})));
   }
-  head.append(title, tools);
-  const split = document.createElement("div");
-  split.className = "split";
-  const list = document.createElement("div");
-  list.className = "list";
-  data.papers.forEach((paper) => list.append(itemButton(paper.title, `${paper.journal || ""} · ${paper.status || ""}`, paper.key === state.selection, () => {
-    state.selection = paper.key; render();
-  })));
-  const history = (selected && selected.history || []).map((event) => `${event.checkedAt || ""} ${event.status || ""}`).join("\n");
-  split.append(list, detailBox(selected ? [
-    ["标题", selected.title], ["期刊", selected.journal], ["稿号", selected.manuscriptID],
-    ["状态", selected.status], ["来源", selected.site], ["历史", history], ["备注", selected.submissionHistory]
-  ] : [["提示", "还没有在投记录"]]));
-  return [head, split];
+  modal(tr("回收站", "Trash"), [el("p", "muted", tr("已删除的记录和附件保留 30 天。", "Deleted records and attachments are kept for 30 days.")),
+    items.length ? rows : emptyState("trash", tr("回收站为空", "Trash is empty"))]);
 }
-
-async function pageWorks() {
-  const data = await api("/api/works");
-  const selected = data.works.find((work) => work.id === state.selection) || data.works[0];
-  if (selected) state.selection = selected.id;
-  const head = document.createElement("div");
-  head.className = "page-head";
-  const title = document.createElement("h1");
-  title.textContent = t("works");
-  const tools = document.createElement("div");
-  tools.className = "toolbar";
-  const types = [["journalArticle", "期刊论文"], ["conferencePaper", "会议论文"], ["graduationThesis", "毕业论文"], ["book", "专著"], ["bookChapter", "书籍章节"], ["patent", "专利"], ["dataset", "数据集"], ["software", "软件成果"], ["other", "其他成果"]];
-  tools.append(actionButton(t("create"), "primary", async () => {
-    openEditor(t("create"), [
-      field("标题", "title"), selectField("类型", "type", "journalArticle", types),
-      field("发表载体", "venue"), field("作者", "authors"), field("完成日期", "completedAt", new Date().toISOString().slice(0, 10), "date"),
-      field("标识", "identifier"), field("链接", "url"), field("ISSN", "journalISSN"), field("备注", "notes", "", "area")
-    ], async (form) => { await api("/api/works", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) }); });
-  }));
-  if (selected) {
-    tools.append(actionButton(t("remove"), "danger", async () => {
-      await api("/api/works/trash", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: selected.id }) });
-      state.selection = null;
-    }));
-  }
-  head.append(title, tools);
-  const cards = document.createElement("div");
-  cards.className = "cards";
-  const chart = document.createElement("div");
-  chart.className = "card";
-  chart.style.minHeight = `${data.analytics.chartHeight}px`;
-  const max = Math.max(1, ...data.analytics.categories.map((row) => row.count));
-  data.analytics.categories.forEach((row) => {
-    const line = document.createElement("div");
-    line.className = "bar";
-    const name = document.createElement("span");
-    name.textContent = row.label;
-    const track = document.createElement("span");
-    const fill = document.createElement("i");
-    fill.style.width = `${Math.round(row.count / max * 100)}%`;
-    track.append(fill);
-    const count = document.createElement("strong");
-    count.textContent = String(row.count);
-    line.append(name, track, count);
-    chart.append(line);
-  });
-  if (!data.analytics.categories.length) chart.textContent = "还没有成果";
-  const authors = document.createElement("div");
-  authors.className = "card";
-  data.analytics.authorPositions.forEach((row) => {
-    const line = document.createElement("p");
-    line.textContent = `${row.label} ${row.count}`;
-    authors.append(line);
-  });
-  cards.append(chart, authors);
-  const list = document.createElement("div");
-  list.className = "list";
-  data.works.forEach((work) => list.append(itemButton(work.title, work.venue || work.type, work.id === state.selection, () => {
-    state.selection = work.id; render();
-  })));
-  const split = document.createElement("div");
-  split.className = "split";
-  split.append(list, detailBox(selected ? [["标题", selected.title], ["类型", selected.type], ["作者", selected.authors], ["载体", selected.venue], ["备注", selected.notes]] : [["提示", "还没有成果"]]));
-  return [head, cards, split];
+async function openSettings() {
+  const data = await api("/api/settings");
+  const links = el("div", "row", button(tr("在文件资源管理器中显示", "Show in File Explorer"),
+    () => post("/api/files/reveal", {kind: "root"}), {symbol: "folder"}));
+  links.append(button(tr("打开桌面小组件", "Open desktop widgets"),
+    () => post("/api/widgets/open", {page: state.page === "works" ? "works" : "submissions"}), {symbol: "city"}));
+  modal(tr("设置", "Settings"), [formGroup(tr("通用", "General"),
+    selectField(tr("外观", "Appearance"), "appearance", data.settings.appearance, [["system", tr("跟随系统", "System")], ["light", tr("浅色", "Light")], ["dark", tr("深色", "Dark")]]),
+    selectField(tr("语言", "Language"), "language", data.settings.language, [["zh-Hans", "简体中文"], ["en", "English"]]),
+    field(tr("待跟进天数", "Follow-up days"), "followUpDays", data.settings.followUpDays, "number")),
+  formGroup(tr("本地资料", "Local data"), el("p", "path-text", data.dataDir), links,
+    el("small", "muted", `Windows ${state.version} · build ${state.build}`))], {submit: async (values) => {
+    await post("/api/settings", {...values, followUpDays: Number(values.followUpDays)});
+    closeDialog(); await refresh();
+  }, actions: [button(tr("退出搞研究", "Quit GaoYanJiu"), quit, {symbol: "exit"})]});
 }
-
-async function pageDocuments() {
-  const data = await api(`/api/documents?kind=${state.kind}&folder=${encodeURIComponent(state.folder)}`);
-  state.folder = data.folderID || "";
-  const head = document.createElement("div");
-  head.className = "page-head";
-  const title = document.createElement("h1");
-  title.textContent = t("documents");
-  const tools = document.createElement("div");
-  tools.className = "toolbar";
-  ["experimentData", "summaryReports", "importantLiterature"].forEach((kind) => {
-    const button = document.createElement("button");
-    button.textContent = t(kind);
-    button.setAttribute("aria-pressed", String(kind === state.kind));
-    button.addEventListener("click", () => { state.kind = kind; state.folder = ""; render(); });
-    tools.append(button);
-  });
-  tools.append(actionButton(t("newFolder"), "primary", async () => {
-    const name = prompt(t("newFolder"));
-    if (!name) return;
-    const created = await api("/api/documents/folder", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ kind: state.kind, name }) });
-    state.folder = created.id;
-  }));
-  head.append(title, tools);
-  const folders = document.createElement("div");
-  folders.className = "toolbar";
-  data.folders.forEach((folder) => {
-    const button = document.createElement("button");
-    button.textContent = folder.name;
-    button.setAttribute("aria-pressed", String(folder.id === state.folder));
-    button.addEventListener("click", () => { state.folder = folder.id; render(); });
-    folders.append(button);
-  });
-  const importer = document.createElement("form");
-  importer.className = "toolbar";
-  const file = document.createElement("input");
-  file.type = "file";
-  const path = document.createElement("input");
-  path.placeholder = "或粘贴本机路径";
-  const submit = document.createElement("button");
-  submit.className = "primary";
-  submit.type = "submit";
-  submit.textContent = t("importFile");
-  importer.append(file, path, submit);
-  importer.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    if (!state.folder) { toast(state.language === "en" ? "Choose a folder first." : "请先选择资料文件夹。"); return; }
-    try {
-      if (path.value.trim()) {
-        await api("/api/documents/import-path", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ folderID: state.folder, path: path.value.trim() }) });
-      } else if (file.files[0]) {
-        const form = new FormData();
-        form.set("folderID", state.folder);
-        form.set("file", file.files[0]);
-        await api("/api/documents/import", { method: "POST", body: form });
-      }
-      await render();
-    } catch (error) { toast(error.message); }
-  });
-  const list = document.createElement("div");
-  list.className = "list";
-  data.documents.forEach((document) => {
-    const remove = actionButton(t("remove"), "danger", async () => {
-      await api("/api/documents/trash", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: document.id }) });
-    });
-    const link = document.createElement("a");
-    link.href = `/api/download?kind=document&owner=${encodeURIComponent(document.folderID)}&name=${encodeURIComponent(document.storedName)}&token=${encodeURIComponent(token)}`;
-    link.textContent = "下载";
-    list.append(rowItem(document.displayName, document.originalName, link, remove));
-  });
-  return [head, folders, importer, list];
+async function quit() {
+  await post("/api/shutdown");
+  closeDialog();
+  $("shell").hidden = true;
+  $("gate").hidden = false;
+  $("gate-text").textContent = tr("搞研究已退出。", "GaoYanJiu has quit.");
+  $("gate-create").hidden = $("gate-retry").hidden = $("gate-quit").hidden = true;
+  window.close();
 }
-
-async function pageCertificates() {
-  const data = await api("/api/certificates");
-  const head = document.createElement("div");
-  head.className = "page-head";
-  const title = document.createElement("h1");
-  title.textContent = t("certificates");
-  const tools = document.createElement("div");
-  tools.className = "toolbar";
-  tools.append(actionButton(t("create"), "primary", async () => {
-    openEditor(t("create"), [field("名称", "name"), field("日期", "eventDate", new Date().toISOString().slice(0, 10), "date"), field("标签", "tags")], async (form) => {
-      await api("/api/certificates", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ name: form.name, eventDate: form.eventDate, tags: form.tags.split(/[,，]/).map((part) => part.trim()).filter(Boolean) }) });
-    });
-  }));
-  head.append(title, tools);
-  const list = document.createElement("div");
-  list.className = "list";
-  data.certificates.forEach((record) => {
-    list.append(rowItem(
-      record.name,
-      `${String(record.eventDate || "").slice(0, 10)} ${(record.tags || []).join(" ")}`,
-      actionButton(t("remove"), "danger", async () => {
-        await api("/api/certificates/trash", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: record.id }) });
-      })
-    ));
-  });
-  const years = document.createElement("div");
-  years.className = "card";
-  data.analytics.years.forEach((row) => {
-    const line = document.createElement("p");
-    line.textContent = `${row.label} · ${row.count}`;
-    years.append(line);
-  });
-  return [head, years, list];
-}
-
-async function pageTrash() {
-  const data = await api("/api/trash");
-  const head = document.createElement("div");
-  head.className = "page-head";
-  const title = document.createElement("h1");
-  title.textContent = t("trash");
-  head.append(title, actionButton(t("purge"), "", async () => {
-    const result = await api("/api/trash/purge", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-    toast(String(result.removed));
-  }));
-  const list = document.createElement("div");
-  list.className = "list";
-  data.items.forEach((item) => {
-    list.append(rowItem(
-      item.title,
-      `${item.kind} · ${item.deletedAt}`,
-      actionButton(t("restore"), "primary", async () => {
-        await api("/api/trash/restore", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: item.id }) });
-      }),
-      actionButton(t("forever"), "danger", async () => {
-        await api("/api/trash/delete", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: item.id }) });
-      })
-    ));
-  });
-  return [head, list];
-}
-
 async function pageCity() {
   const data = await api("/api/reward");
-  const head = document.createElement("div");
-  head.className = "page-head";
-  const title = document.createElement("h1");
-  title.textContent = t("city");
-  head.append(title);
-  const summary = document.createElement("div");
-  summary.className = "card";
-  summary.textContent = `金币 ${data.coins} · 待收 ${data.pendingCoins} · 房屋券 ${data.buildingTickets} · 摆件券 ${data.decorationTickets}`;
-  const tools = document.createElement("div");
-  tools.className = "toolbar";
-  tools.append(actionButton(t("collect"), "primary", async () => { await api("/api/reward/collect", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); }));
-  const pool = document.createElement("select");
-  data.pools.forEach((item) => {
-    const option = document.createElement("option");
-    option.value = item.id;
-    option.textContent = item.title;
-    pool.append(option);
-  });
-  tools.append(pool, actionButton(t("draw"), "", async () => {
-    await api("/api/reward/draw", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ poolID: pool.value, count: 1 }) });
-  }));
-  tools.append(actionButton("特殊地皮", "", async () => {
-    await api("/api/reward/terrain", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-  }));
-  const grid = document.createElement("div");
-  grid.className = "city";
-  data.plots.forEach((plot) => {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = plot.unlocked ? "plot owned" : "plot";
-    const name = document.createElement("strong");
-    name.textContent = plot.placement ? plot.placement.name : plot.id;
-    const meta = document.createElement("small");
-    meta.textContent = plot.unlocked ? (plot.terrain || "已拥有") : "可购买";
-    button.append(name, meta);
-    button.addEventListener("click", async () => {
-      try {
-        if (!plot.unlocked) {
-          await api("/api/reward/purchase", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ plotID: plot.id }) });
-        } else if (!plot.placement) {
-          const available = data.inventory.find((item) => item.available > 0);
-          if (!available) { toast("库存里没有可放置的建筑或摆件"); return; }
-          await api("/api/reward/place", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ catalogID: available.catalogID, plotID: plot.id }) });
-        } else {
-          await api("/api/reward/remove", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ placementID: plot.placement.id }) });
-        }
-        await render();
-      } catch (error) { toast(error.message); }
+  const balances = data.city || data;
+  const stats = dashboard(tr("让每一份学术积累，长成属于你的绿色研究城", "Grow a green city with each research milestone"), [
+    [Math.floor((balances.coins || 0) + (data.pendingCoins || 0)), tr("金币", "Coins"), "coin", "clay"],
+    [balances.buildingTickets, tr("房屋券", "Building tickets"), "ticket"],
+    [balances.decorationTickets, tr("摆件券", "Decoration tickets"), "seal", "teal"],
+  ]);
+  const collect = button(tr("收取金币", "Collect coins"), async () => { await post("/api/reward/collect"); await refresh(); },
+    {symbol: "coin", disabled: (data.pendingCoins || 0) < 0.01});
+  const city = renderRewardCity({data, request: api, language: state.language, onUpdate: (next) => {
+    const latest = next.city || next;
+    [Math.floor((latest.coins || 0) + (next.pendingCoins || 0)), latest.buildingTickets, latest.decorationTickets].forEach((value, index) => {
+      stats.querySelectorAll(".stat strong")[index].textContent = value ?? 0;
     });
-    grid.append(button);
-  });
-  const inventory = document.createElement("div");
-  inventory.className = "card";
-  data.inventory.filter((item) => item.available > 0).forEach((item) => {
-    const line = document.createElement("p");
-    line.textContent = `${item.name} × ${item.available}`;
-    inventory.append(line);
-  });
-  return [head, summary, tools, grid, inventory];
+    collect.disabled = (next.pendingCoins || 0) < 0.01;
+    state.overview.city.count = next.placements?.length ?? latest.placements?.length ?? 0;
+    navGroups();
+  }});
+  return {tools: [collect], nodes: [stats, city]};
 }
 
-async function pagePortals() {
-  const publishers = await api("/api/publishers");
-  const portals = await api("/api/portals");
-  const head = document.createElement("div");
-  head.className = "page-head";
-  const title = document.createElement("h1");
-  title.textContent = t("portals");
-  head.append(title, actionButton(t("create"), "primary", async () => {
-    openEditor(t("create"), [
-      selectField("系统", "publisherID", "springer", publishers.publishers.map((item) => [item.id, item.name]).concat([["custom", "自定义"]])),
-      field("名称", "name"), field("网址", "url", "https://"), field("账号", "identity"), field("密码", "password", "", "password")
-    ], async (form) => { await api("/api/portals", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(form) }); });
-  }));
-  const builtIn = document.createElement("div");
-  builtIn.className = "list";
-  publishers.publishers.forEach((item) => {
-    const link = document.createElement("a");
-    link.href = item.url;
-    link.target = "_blank";
-    link.rel = "noreferrer";
-    link.className = "item";
-    const strong = document.createElement("strong");
-    strong.textContent = item.name;
-    const span = document.createElement("span");
-    span.textContent = item.subtitle;
-    link.append(strong, span);
-    builtIn.append(link);
-  });
-  const saved = document.createElement("div");
-  saved.className = "list";
-  portals.portals.forEach((portal) => {
-    const link = document.createElement("a");
-    link.href = portal.url;
-    link.target = "_blank";
-    link.rel = "noreferrer";
-    link.textContent = t("open");
-    saved.append(rowItem(portal.name, portal.identity || portal.url, link));
-  });
-  return [head, builtIn, saved];
-}
-
-async function pageHistory() {
-  const data = await api("/api/history");
-  const head = document.createElement("div");
-  head.className = "page-head";
-  const title = document.createElement("h1");
-  title.textContent = t("history");
-  head.append(title);
-  const note = document.createElement("p");
-  note.className = "muted";
-  note.textContent = "项目页已在 Mac 版 4.14 移除，科研资金改由搞积蓄管理。这里只读显示历史记录，不会改写。";
-  const projects = document.createElement("div");
-  projects.className = "list";
-  data.projects.forEach((project) => projects.append(itemButton(project.title, "项目", false, () => {})));
-  const funding = document.createElement("div");
-  funding.className = "list";
-  data.fundingRecords.forEach((record) => funding.append(itemButton(record.name, String(record.amount), false, () => {})));
-  return [head, note, projects, funding];
-}
-
-async function pageSettings() {
-  const data = await api("/api/settings");
-  const inspect = await api("/api/inspect");
-  const head = document.createElement("div");
-  head.className = "page-head";
-  const title = document.createElement("h1");
-  title.textContent = t("settings");
-  head.append(title);
-  const form = document.createElement("form");
-  form.className = "card stack";
-  form.append(
-    selectField("外观", "appearance", data.settings.appearance, [["system", "跟随系统"], ["light", "浅色"], ["dark", "深色"]]),
-    selectField("语言", "language", data.settings.language, [["zh-Hans", "简体中文"], ["en", "English"]]),
-    field("待跟进天数", "followUpDays", String(data.settings.followUpDays), "number")
-  );
-  const save = document.createElement("button");
-  save.className = "primary";
-  save.type = "submit";
-  save.textContent = t("save");
-  form.append(save);
-  form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const values = Object.fromEntries(new FormData(form).entries());
-    try {
-      await api("/api/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({
-        appearance: values.appearance, language: values.language, followUpDays: Number(values.followUpDays)
-      }) });
-      state.language = values.language;
-      setTheme(values.appearance);
-      applyChrome();
-      await render();
-    } catch (error) { toast(error.message); }
-  });
-  const secret = document.createElement("form");
-  secret.className = "card stack";
-  secret.append(field("EasyScholar Secret Key", "secret", "", "password"));
-  const saveKey = document.createElement("button");
-  saveKey.className = "primary";
-  saveKey.textContent = data.hasEasyScholarKey ? "更新密钥" : "保存密钥";
-  secret.append(saveKey);
-  secret.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const values = Object.fromEntries(new FormData(secret).entries());
-    try {
-      await api("/api/secrets/easyscholar", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ secret: values.secret }) });
-      toast("已保存到本机凭据，没有写入资料库。");
-    } catch (error) { toast(error.message); }
-  });
-  const lookup = document.createElement("form");
-  lookup.className = "card stack";
-  lookup.append(field("期刊名或 ISSN", "query"));
-  const find = document.createElement("button");
-  find.textContent = "查询期刊指标";
-  lookup.append(find);
-  const result = document.createElement("div");
-  lookup.append(result);
-  lookup.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const values = Object.fromEntries(new FormData(lookup).entries());
-    try {
-      const payload = await api("/api/metrics/lookup", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ query: values.query }) });
-      result.replaceChildren();
-      payload.metrics.items.forEach((item) => {
-        const line = document.createElement("p");
-        line.textContent = `${item.label} ${item.value}`;
-        result.append(line);
-      });
-    } catch (error) { toast(error.message); }
-  });
-  const meta = document.createElement("p");
-  meta.className = "muted";
-  meta.textContent = `${data.dataDir} · schema ${inspect.schema} · 论文 ${inspect.counts.papers} · 成果 ${inspect.counts.existingWorks} · 证书 ${inspect.counts.certificates}`;
-  return [head, form, secret, lookup, meta];
-}
-
-async function pageSearch(query) {
-  const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
-  const head = document.createElement("div");
-  head.className = "page-head";
-  const title = document.createElement("h1");
-  title.textContent = t("search");
-  head.append(title);
-  const list = document.createElement("div");
-  list.className = "list";
-  data.papers.forEach((paper) => list.append(itemButton(paper.title, "在投", false, () => {})));
-  data.works.forEach((work) => list.append(itemButton(work.title, "成果", false, () => {})));
-  data.certificates.forEach((record) => list.append(itemButton(record.name, "证书", false, () => {})));
-  data.documents.forEach((document) => list.append(itemButton(document.displayName, "资料", false, () => {})));
-  return [head, list];
-}
-
+let renderGeneration = 0;
 async function render() {
-  renderNav();
-  applyChrome();
-  const main = $("main");
-  const query = $("search").value.trim();
-  let nodes = [];
-  if (query) nodes = await pageSearch(query);
-  else if (state.page === "submissions") nodes = await pageSubmissions();
-  else if (state.page === "works") nodes = await pageWorks();
-  else if (state.page === "documents") nodes = await pageDocuments();
-  else if (state.page === "certificates") nodes = await pageCertificates();
-  else if (state.page === "trash") nodes = await pageTrash();
-  else if (state.page === "city") nodes = await pageCity();
-  else if (state.page === "portals") nodes = await pagePortals();
-  else if (state.page === "history") nodes = await pageHistory();
-  else nodes = await pageSettings();
-  main.replaceChildren(...nodes);
+  if ($("shell").hidden) return;
+  const generation = ++renderGeneration;
+  const page = state.page;
+  navGroups(); utilities(); applyChrome();
+  const build = {submissions: pageSubmissions, works: pageWorks, certificates: pageCertificates, city: pageCity}[page] || pageDocuments;
+  const result = await build(page, state.query);
+  if (generation !== renderGeneration || page !== state.page) return;
+  $("page-tools").replaceChildren(...result.tools);
+  const notice = state.writable ? [] : [el("p", "readonly-notice", state.libraryMessage)];
+  $("main").replaceChildren(...notice, ...result.nodes);
+  $("main").dataset.page = page;
 }
-
-async function boot() {
-  const info = await api("/api/bootstrap");
-  state.language = info.settings.language || "zh-Hans";
-  setTheme(info.settings.appearance);
-  $("brand-version").textContent = `Windows ${info.version} · build ${info.build}`;
+async function refresh(info = null) {
+  const data = info || await api("/api/bootstrap");
+  Object.assign(state, {settings: data.settings, language: data.settings.language || "zh-Hans", overview: data.overview,
+    build: data.build, version: data.version, writable: data.writable, libraryMessage: data.message});
   applyChrome();
-  if (info.status !== "ready") {
+  if (data.status !== "ready") {
     $("gate").hidden = false;
     $("shell").hidden = true;
-    $("gate-text").textContent = info.message;
-    $("gate-create").hidden = info.status !== "needs_create";
+    $("gate-text").textContent = data.message;
+    const empty = data.status === "needs_create";
+    $("gate-create").hidden = !empty;
+    $("gate-retry").hidden = empty;
     return;
   }
   $("gate").hidden = true;
   $("shell").hidden = false;
-  if (info.followUps) toast(`${t("follow")} ${info.followUps}`);
   await render();
 }
-
-$("gate-create").addEventListener("click", async () => {
+async function applyRoute() {
+  const route = decodeURIComponent(location.hash.slice(1));
+  if (!route || $("shell").hidden) return;
+  if (route === "exchange") await window.researchExchange?.open({api, folderID: state.folder, refresh, language: state.language});
+  else if (Object.hasOwn(PAGE_LABELS, route)) setPage(route);
+  else if (["changed", "hidden", "projects"].includes(route)) {
+    setPage("submissions");
+    if (route !== "projects") { state.scope = route; await render(); }
+  }
+  history.replaceState(null, "", location.pathname);
+}
+let searchTimer;
+function applySearch() {
+  state.query = $("search").value.trim();
+  $("clear-search").hidden = !state.query;
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => render().catch(report), 150);
+}
+document.addEventListener("DOMContentLoaded", async () => {
+  $("gate-create").addEventListener("click", () => post("/api/library/create").then(refresh).then(applyRoute).catch(report));
+  $("gate-retry").addEventListener("click", () => post("/api/library/reload").then(refresh).then(applyRoute).catch(report));
+  $("gate-quit").addEventListener("click", () => quit().catch(report));
+  $("search").addEventListener("input", applySearch);
+  $("clear-search").addEventListener("click", () => { $("search").value = ""; applySearch(); safeFocus($("search")); });
+  window.addEventListener("hashchange", () => applyRoute().catch(report));
+  document.addEventListener("keydown", (event) => {
+    if ($("shell").hidden || $("editor").open || !(event.ctrlKey || event.metaKey)) return;
+    if (event.key.toLowerCase() === "f" && state.page !== "city") { event.preventDefault(); safeFocus($("search")); }
+    if (event.key === ",") { event.preventDefault(); openSettings().catch(report); }
+  });
+  document.addEventListener("click", (event) => {
+    document.querySelectorAll(".popover[open]").forEach((menu) => { if (!menu.contains(event.target)) menu.open = false; });
+  });
   try {
-    await api("/api/library/create", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" });
-    await boot();
-  } catch (error) { toast(error.message); }
+    const info = await api("/api/bootstrap");
+    await refresh(info); await applyRoute();
+    if (info.followUps) toast(tr(`${info.followUps} 篇论文待跟进`, `${info.followUps} submissions to follow up`));
+  } catch (error) { report(error); }
 });
-$("quit").addEventListener("click", async () => {
-  try { await api("/api/shutdown", { method: "POST", headers: { "Content-Type": "application/json" }, body: "{}" }); } catch (error) { /* 进程即将退出 */ }
-});
-$("search").addEventListener("change", () => { if (!$("shell").hidden) render().catch((error) => toast(error.message)); });
-boot().catch((error) => toast(error.message));

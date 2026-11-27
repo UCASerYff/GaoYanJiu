@@ -4,7 +4,7 @@ import json
 import random
 import shutil
 import uuid
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from gaoyanjiu.analytics import (
@@ -23,9 +23,12 @@ from gaoyanjiu.publishers import publisher_by_id
 from gaoyanjiu.reward import (
     POOLS,
     apply_terrain,
+    asset_record,
     available_asset_count,
     available_terrain_count,
+    cell_plot,
     clear_terrain,
+    coin_rate,
     collect_coins,
     display_name,
     draw_rewards,
@@ -33,16 +36,21 @@ from gaoyanjiu.reward import (
     frontier,
     grant_certificate,
     grant_work,
+    move_placement,
+    move_terrain,
     pending_coins,
     place_asset,
+    placement_anchor,
     purchase_plot,
     remove_placement,
+    rotate_placement,
     terrain_by_id,
 )
 from gaoyanjiu.reward import asset_by_id as reward_asset
 from gaoyanjiu.status import is_terminal
 from gaoyanjiu.textutil import extract_text
 from gaoyanjiu.timeutil import format_iso, parse_date, parse_iso, utcnow
+from gaoyanjiu.widget import SNAPSHOT_NAME, read_snapshot, snapshot_metadata, statistics_projection
 
 FILE_CAP = 512 * 1024 * 1024
 TEXT_LIMIT = 100_000
@@ -73,6 +81,10 @@ def _find(items: list, key: str, value: str) -> dict:
 def _next_sort(items: list) -> int:
     orders = [item.get("sortOrder") for item in items if isinstance(item.get("sortOrder"), int)]
     return max(orders) + 1 if orders else 0
+
+
+def _document_storage_names(document: dict) -> list[str]:
+    return [document["storedName"], *(version["storedName"] for version in document.get("windowsVersions") or [])]
 
 
 def inspect_summary(data: dict) -> dict:
@@ -135,11 +147,16 @@ class ResearchStore:
     def _commit(self) -> None:
         try:
             self.library.save()
-            self.write_snapshot()
         except Exception:
             self.library.open()
             self.settings = self._read_settings()
             raise
+        try:
+            self.write_snapshot()
+        except OSError:
+            # The library is already committed. A widget write failure must not
+            # trigger deletion of files referenced by that committed library.
+            pass
 
     def _read_settings(self) -> dict:
         path = self.library.root / "settings.json"
@@ -159,7 +176,7 @@ class ResearchStore:
         language = parsed.get("language") if parsed.get("language") in {"zh-Hans", "en"} else "zh-Hans"
         days = parsed.get("followUpDays") if isinstance(parsed.get("followUpDays"), int) else 14
         days = min(365, max(1, days))
-        return {"appearance": appearance, "language": language, "followUpDays": days}
+        return {**parsed, "appearance": appearance, "language": language, "followUpDays": days}
 
     def update_settings(self, appearance: str, language: str, follow_up_days: int) -> dict:
         if self.settings_blocked:
@@ -169,6 +186,7 @@ class ResearchStore:
         if not isinstance(follow_up_days, int) or not 1 <= follow_up_days <= 365:
             raise AppError("invalid_field")
         self.settings = {
+            **self.settings,
             "appearance": appearance,
             "language": language,
             "followUpDays": follow_up_days,
@@ -177,6 +195,11 @@ class ResearchStore:
             self.library.root / "settings.json",
             (json.dumps(self.settings, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"),
         )
+        if self.library.writable:
+            try:
+                self.write_snapshot()
+            except OSError:
+                pass
         return self.settings
 
     def language(self) -> str:
@@ -185,10 +208,17 @@ class ResearchStore:
     def write_snapshot(self) -> dict:
         if self.library.data is None:
             raise AppError("not_ready", 409)
+        if not self.library.writable:
+            raise AppError(self.library.message_code or "read_only_schema", 409)
+        path = self.library.root / SNAPSHOT_NAME
         document = widget_snapshot(self.library.data, self.clock())
+        projection = statistics_projection(self.library.data, self.language())
+        source_changed = datetime.fromtimestamp(self.library.path.stat().st_mtime, timezone.utc)
+        document.update(projection)
+        document.update(snapshot_metadata(projection, read_snapshot(path), source_changed, self.settings))
         document["followUps"] = len(self.follow_ups())
         atomic_write(
-            self.library.root / "widget-snapshot.json",
+            path,
             (json.dumps(document, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"),
         )
         return document
@@ -310,19 +340,53 @@ class ResearchStore:
     def set_hidden(self, key: str, hidden: bool) -> None:
         paper = _find(self._data()["papers"], "key", key)
         paper["hidden"] = bool(hidden)
+        if hidden:
+            paper["changed"] = False
+        self._commit()
+
+    def mark_paper_read(self, key: str) -> None:
+        paper = _find(self._data()["papers"], "key", key)
+        if paper.get("changed"):
+            paper["changed"] = False
+            self._commit()
+
+    def reorder(self, kind: str, source_id: str, target_id: str) -> None:
+        fields = {
+            "paper": ("papers", "key", None),
+            "work": ("existingWorks", "id", None),
+            "folder": ("documentFolders", "id", "libraryKind"),
+            "document": ("managedDocuments", "id", "folderID"),
+        }
+        if kind not in fields:
+            raise AppError("invalid_field")
+        collection, key, group = fields[kind]
+        records = self._data()[collection]
+        source = _find(records, key, source_id)
+        target = _find(records, key, target_id)
+        if group and source.get(group) != target.get(group):
+            raise AppError("invalid_field")
+        rows = [record for record in records if not group or record.get(group) == source.get(group)]
+        rows.sort(key=lambda row: (row.get("sortOrder") is None, row.get("sortOrder") or 0))
+        origin, destination = rows.index(source), rows.index(target)
+        if origin == destination:
+            return
+        rows.insert(destination, rows.pop(origin))
+        for index, record in enumerate(rows):
+            record["sortOrder"] = index
         self._commit()
 
     def list_works(self, query: str = "") -> list[dict]:
         works = [
             work
             for work in (self.library.data or {}).get("existingWorks") or []
-            if _matches(query, work.get("title"), work.get("venue"), work.get("authors"), work.get("identifier"), work.get("notes"))
+            if _matches(query, work.get("title"), work.get("venue"), work.get("authors"), work.get("identifier"),
+                        work.get("notes"), *(attachment.get("originalName") for attachment in work.get("attachments") or []))
         ]
         works.sort(key=lambda work: (work.get("sortOrder") is None, work.get("sortOrder") or 0))
         return works
 
-    def work_analytics(self) -> dict:
-        works = (self.library.data or {}).get("existingWorks") or []
+    def work_analytics(self, query: str = "") -> dict:
+        works = self.list_works(query)
         language = self.language()
         categories = work_categories(works, language)
         return {
@@ -398,13 +462,14 @@ class ResearchStore:
         records = [
             record
             for record in (self.library.data or {}).get("certificates") or []
-            if _matches(query, record.get("name"), " ".join(record.get("tags") or []))
+            if _matches(query, record.get("name"), " ".join(record.get("tags") or []),
+                        *(attachment.get("originalName") for attachment in record.get("attachments") or []))
         ]
         records.sort(key=lambda record: str(record.get("eventDate") or ""), reverse=True)
         return records
 
-    def certificate_analytics(self) -> dict:
-        records = (self.library.data or {}).get("certificates") or []
+    def certificate_analytics(self, query: str = "") -> dict:
+        records = self.list_certificates(query)
         return {"years": certificate_years(records)}
 
     def save_certificate(self, payload: dict) -> str:
@@ -509,7 +574,7 @@ class ResearchStore:
         rows.sort(key=lambda document: (document.get("sortOrder") is None, document.get("sortOrder") or 0))
         return rows
 
-    def create_folder(self, kind: str, name: str) -> str:
+    def create_folder(self, kind: str, name: str, existing_id: str | None = None) -> str:
         if kind not in DOCUMENT_KINDS:
             raise AppError("invalid_field")
         clean = _clean(name)
@@ -517,6 +582,13 @@ class ResearchStore:
             raise AppError("empty_title")
         data = self._data()
         now = format_iso(self.clock())
+        if existing_id:
+            folder = _find(data["documentFolders"], "id", existing_id)
+            if folder.get("libraryKind") != kind:
+                raise AppError("invalid_field")
+            folder.update(name=clean, updatedAt=now)
+            self._commit()
+            return existing_id
         folder_id = str(uuid.uuid4())
         data["documentFolders"].append(
             {
@@ -775,6 +847,7 @@ class ResearchStore:
                     "count": int(item.get("count") or 0),
                     "kind": asset["kind"],
                     "rarity": asset["rarity"],
+                    "asset": asset,
                 }
             )
         terrains = []
@@ -787,45 +860,54 @@ class ResearchStore:
                     "terrainID": terrain["id"],
                     "available": available_terrain_count(city, terrain["id"]),
                     "kind": terrain["kind"],
+                    "variant": terrain["variant"],
+                    "count": int(item.get("count") or 0),
                 }
             )
-        occupied = {
-            f"{item.get('anchorRow')}:{item.get('anchorColumn')}": item
-            for item in city.get("placements") or []
-            if item.get("anchorRow") is not None
-        }
+        occupied: dict[str, list[dict]] = {}
+        placements = []
+        for item in city.get("placements") or []:
+            row, column = placement_anchor(item)
+            asset = reward_asset(str(item.get("catalogID") or ""))
+            presentation = dict(
+                item, anchorRow=row, anchorColumn=column, asset=asset,
+                name=display_name(asset, language) if asset else item.get("catalogID"),
+            )
+            placements.append(presentation)
+            occupied.setdefault(cell_plot(row, column), []).append(presentation)
         edge = frontier(unlocked)
         plots = []
         for plot_id in sorted(set(unlocked).union(edge)):
-            placement = occupied.get(plot_id)
-            asset = reward_asset(placement.get("catalogID")) if placement else None
+            plot_placements = occupied.get(plot_id, [])
             plots.append(
                 {
                     "id": plot_id,
                     "unlocked": plot_id in unlocked,
                     "frontier": plot_id in edge,
                     "terrain": (city.get("plotTerrains") or {}).get(plot_id),
-                    "placement": None
-                    if placement is None
-                    else {
-                        "id": placement.get("id"),
-                        "catalogID": placement.get("catalogID"),
-                        "name": display_name(asset, language) if asset else placement.get("catalogID"),
-                    },
+                    "placement": plot_placements[0] if plot_placements else None,
                 }
             )
         now = self.clock()
         return {
             "coins": city.get("coins") or 0,
             "pendingCoins": round(pending_coins(city, now), 4) if city else 0,
+            "coinRate": coin_rate(city),
             "buildingTickets": city.get("buildingTickets") or 0,
             "decorationTickets": city.get("decorationTickets") or 0,
             "buildingPity": city.get("buildingPity") or 0,
             "decorationPity": city.get("decorationPity") or 0,
             "plots": plots,
+            "placements": placements,
             "inventory": inventory,
             "terrains": terrains,
-            "pools": [{"id": pool["id"], "kind": pool["kind"], "title": pool["titleEn"] if language == "en" else pool["title"]} for pool in POOLS],
+            "pools": [
+                {
+                    "id": pool["id"], "kind": pool["kind"], "preview": asset_record(pool["id"], 234),
+                    "title": pool["titleEn"] if language == "en" else pool["title"],
+                }
+                for pool in POOLS
+            ],
         }
 
     def reward_draw(self, pool_id: str, count: int = 1) -> list[dict]:
@@ -844,13 +926,29 @@ class ResearchStore:
         purchase_plot(self._data(), plot_id)
         self._commit()
 
-    def reward_place(self, catalog_id: str, plot_id: str) -> dict:
-        placement = place_asset(self._data(), catalog_id, plot_id, self.clock(), str(uuid.uuid4()))
+    def reward_place(
+        self, catalog_id: str, plot_id: str | None = None,
+        anchor_row: int | None = None, anchor_column: int | None = None, rotation: int = 0,
+    ) -> dict:
+        placement = place_asset(
+            self._data(), catalog_id, plot_id, self.clock(), str(uuid.uuid4()),
+            anchor_row=anchor_row, anchor_column=anchor_column, rotation=rotation,
+        )
+        self._commit()
+        return placement
+
+    def reward_move(self, placement_id: str, anchor_row: int, anchor_column: int) -> dict:
+        placement = move_placement(self._data(), placement_id, anchor_row, anchor_column, self.clock())
+        self._commit()
+        return placement
+
+    def reward_rotate(self, placement_id: str) -> dict:
+        placement = rotate_placement(self._data(), placement_id)
         self._commit()
         return placement
 
     def reward_remove(self, placement_id: str) -> None:
-        remove_placement(self._data(), placement_id)
+        remove_placement(self._data(), placement_id, self.clock())
         self._commit()
 
     def reward_draw_terrain(self) -> dict:
@@ -864,6 +962,10 @@ class ResearchStore:
 
     def reward_clear_terrain(self, plot_id: str) -> None:
         clear_terrain(self._data(), plot_id)
+        self._commit()
+
+    def reward_move_terrain(self, source_plot_id: str, destination_plot_id: str) -> None:
+        move_terrain(self._data(), source_plot_id, destination_plot_id)
         self._commit()
 
     def history(self) -> dict:
@@ -1018,7 +1120,7 @@ class ResearchStore:
         def mutate(data: dict) -> None:
             data["managedDocuments"] = [existing for existing in data["managedDocuments"] if existing.get("id") != document_id]
 
-        self._finish_trash(item, source, [document["storedName"]], mutate, exact=False)
+        self._finish_trash(item, source, _document_storage_names(document), mutate, exact=False)
         return item["id"]
 
     def trash_folder(self, folder_id: str) -> str:
@@ -1039,7 +1141,7 @@ class ResearchStore:
         self._finish_trash(
             item,
             self.library.root / "ManagedDocuments" / folder_id,
-            [document["storedName"] for document in documents],
+            [name for document in documents for name in _document_storage_names(document)],
             mutate,
         )
         return item["id"]
@@ -1082,7 +1184,7 @@ class ResearchStore:
             self._restore_files(
                 item["id"],
                 self.library.root / "ManagedDocuments" / document["folderID"],
-                [document["storedName"]],
+                _document_storage_names(document),
             )
             data["managedDocuments"].append(document)
         elif kind == "documentFolder":
@@ -1093,7 +1195,7 @@ class ResearchStore:
             self._restore_files(
                 item["id"],
                 self.library.root / "ManagedDocuments" / folder["id"],
-                [document["storedName"] for document in documents],
+                [name for document in documents for name in _document_storage_names(document)],
             )
             data["documentFolders"].append(folder)
             data["managedDocuments"].extend(documents)

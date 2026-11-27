@@ -146,6 +146,8 @@ class Library:
         if not isinstance(parsed, dict):
             self.status = "blocked"
             self.message_code = "unreadable"
+            self.data = None
+            self.writable = False
             return self
         try:
             data, version = _normalize(parsed)
@@ -153,6 +155,7 @@ class Library:
             self.status = "blocked"
             self.message_code = "unreadable"
             self.data = None
+            self.writable = False
             return self
         self.data = data
         self.version = version

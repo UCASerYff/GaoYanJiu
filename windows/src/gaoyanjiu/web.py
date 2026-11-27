@@ -1,23 +1,37 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import mimetypes
+import os
 import secrets
 import shutil
 import tempfile
 import threading
-import webbrowser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from gaoyanjiu import __build__, __version__
 from gaoyanjiu.errors import AppError
+from gaoyanjiu.exchange import ResearchExchange
 from gaoyanjiu.i18n import translate
 from gaoyanjiu.publishers import PUBLISHERS
 from gaoyanjiu.store import ResearchStore, inspect_summary
+from gaoyanjiu.workspace import documents_workspace, merge_portal_capture, original_ocr_pdf, tag_counts, workspace_overview
 
 UPLOAD_CAP = 256 * 1024 * 1024
+REUSED_ASSETS = {
+    "AcademicAchievementManagerIcon.png": "AcademicAchievementManagerIcon.png",
+    "extractor.js": "extractor.js",
+    "FloatingRockV354.png": "RewardCity/FloatingRockV354.png",
+    "FloatingSkyV354.png": "RewardCity/FloatingSkyV354.png",
+    "grass-3d-texture.png": "RewardCity/grass-3d-texture.png",
+}
+INLINE_TYPES = {
+    ".pdf": "application/pdf", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    ".gif": "image/gif", ".webp": "image/webp", ".bmp": "image/bmp", ".avif": "image/avif",
+}
 
 
 def asset_dir() -> Path:
@@ -37,22 +51,32 @@ def failure_message(store: ResearchStore, error: AppError) -> str:
 class Api:
     def __init__(self, store: ResearchStore):
         self.store = store
+        self.exchange = ResearchExchange(store)
+        self.lock = threading.RLock()
 
     def call(self, method: str, path: str, query: dict, body: dict | None) -> tuple[int, dict]:
         try:
-            return self._call(method, path, query, body or {})
+            if path in {"/api/metrics/suggest", "/api/metrics/lookup"}:
+                return self._call(method, path, query, body or {})
+            with self.lock:
+                return self._call(method, path, query, body or {})
         except AppError as error:
             return error.status, {"error": error.code, "message": failure_message(self.store, error)}
+        except (KeyError, TypeError, ValueError):
+            return 400, {"error": "invalid_field", "message": translate(self.store.language(), "invalid_field")}
         except Exception:
             return 500, {"error": "unreadable", "message": translate(self.store.language(), "unreadable")}
 
     def _call(self, method: str, path: str, query: dict, body: dict) -> tuple[int, dict]:
         store = self.store
+        if path.startswith("/api/exchange/"):
+            return 200, self._exchange_call(method, path.removeprefix("/api/exchange/"), query, body)
         if path == "/api/bootstrap" and method == "GET":
             return 200, self._bootstrap()
         if path == "/api/library/create" and method == "POST":
             store.library.create_empty()
             store.purge_expired()
+            _refresh_widget(store)
             return 200, self._bootstrap()
         if path == "/api/papers" and method == "GET":
             return 200, {"papers": store.list_papers(query.get("scope", "all"), query.get("q", ""))}
@@ -72,10 +96,17 @@ class Api:
         if path == "/api/papers/hidden" and method == "POST":
             store.set_hidden(body["key"], bool(body.get("hidden")))
             return 200, {"ok": True}
+        if path == "/api/papers/read" and method == "POST":
+            store.mark_paper_read(body["key"])
+            return 200, {"ok": True}
+        if path == "/api/reorder" and method == "POST":
+            store.reorder(body["kind"], body["sourceID"], body["targetID"])
+            return 200, {"ok": True}
         if path == "/api/papers/trash" and method == "POST":
             return 200, {"id": store.trash_paper(body["key"])}
         if path == "/api/works" and method == "GET":
-            return 200, {"works": store.list_works(query.get("q", "")), "analytics": store.work_analytics()}
+            term = query.get("q", "")
+            return 200, {"works": store.list_works(term), "analytics": store.work_analytics(term)}
         if path == "/api/works" and method == "POST":
             return 200, {"id": store.save_work(body)}
         if path == "/api/works/trash" and method == "POST":
@@ -84,13 +115,22 @@ class Api:
             attachment = store.add_attachment("work", body["ownerID"], Path(body["path"]))
             return 200, {"attachment": attachment}
         if path == "/api/documents" and method == "GET":
-            kind = query.get("kind", "experimentData")
-            folders = store.folders(kind)
-            folder_id = query.get("folder") or (folders[0]["id"] if folders else "")
-            documents = store.documents_in(folder_id, query.get("q", "")) if folder_id else []
-            return 200, {"folders": folders, "documents": documents, "folderID": folder_id}
+            return 200, documents_workspace(store, query.get("kind", "experimentData"), query.get("folder", ""),
+                                            query.get("q", ""), query.get("view") == "folders")
         if path == "/api/documents/folder" and method == "POST":
-            return 200, {"id": store.create_folder(body["kind"], body.get("name") or "")}
+            return 200, {"id": store.create_folder(body["kind"], body.get("name") or "", body.get("id"))}
+        if path == "/api/documents/text" and method == "GET":
+            from gaoyanjiu.store import _find
+
+            row = _find(store._view()["managedDocuments"], "id", query["id"])
+            return 200, {"text": row.get("contentText") or ""}
+        if path == "/api/documents/ocr-source" and method == "GET":
+            original, expected = original_ocr_pdf(store, query["id"])
+            source = store.file_for_download("document", original["folderID"], original["storedName"])
+            with source.open("rb") as stream:
+                _verify_ocr_source(stream, expected)
+            return 200, {"original": {key: original.get(key) for key in ("folderID", "storedName", "fileExtension", "originalName")}
+                                      | {"ocrSource": query["id"]}}
         if path == "/api/documents/import-path" and method == "POST":
             tags = body.get("tags") or []
             return 200, store.import_path(body["folderID"], Path(body["path"]), tags)
@@ -102,9 +142,11 @@ class Api:
         if path == "/api/documents/folder/trash" and method == "POST":
             return 200, {"id": store.trash_folder(body["id"])}
         if path == "/api/certificates" and method == "GET":
+            term = query.get("q", "")
+            rows = store.list_certificates(term)
             return 200, {
-                "certificates": store.list_certificates(query.get("q", "")),
-                "analytics": store.certificate_analytics(),
+                "certificates": rows,
+                "analytics": {**store.certificate_analytics(term), "tags": tag_counts(rows)},
             }
         if path == "/api/certificates" and method == "POST":
             return 200, {"id": store.save_certificate(body)}
@@ -136,7 +178,14 @@ class Api:
             store.reward_purchase(body["plotID"])
             return 200, {"ok": True}
         if path == "/api/reward/place" and method == "POST":
-            return 200, {"placement": store.reward_place(body["catalogID"], body["plotID"])}
+            return 200, {"placement": store.reward_place(
+                body["catalogID"], body.get("plotID"), body.get("anchorRow"), body.get("anchorColumn"),
+                body.get("rotationQuarterTurns", 0),
+            )}
+        if path == "/api/reward/move" and method == "POST":
+            return 200, {"placement": store.reward_move(body["placementID"], body["anchorRow"], body["anchorColumn"])}
+        if path == "/api/reward/rotate" and method == "POST":
+            return 200, {"placement": store.reward_rotate(body["placementID"])}
         if path == "/api/reward/remove" and method == "POST":
             store.reward_remove(body["placementID"])
             return 200, {"ok": True}
@@ -147,6 +196,9 @@ class Api:
             return 200, {"ok": True}
         if path == "/api/reward/terrain/clear" and method == "POST":
             store.reward_clear_terrain(body["plotID"])
+            return 200, {}
+        if path == "/api/reward/terrain/move" and method == "POST":
+            store.reward_move_terrain(body["sourcePlotID"], body["destinationPlotID"])
             return 200, {"ok": True}
         if path == "/api/publishers" and method == "GET":
             return 200, {"publishers": list(PUBLISHERS)}
@@ -162,6 +214,23 @@ class Api:
         if path == "/api/portals/delete" and method == "POST":
             store.delete_portal(body["id"])
             return 200, {"ok": True}
+        if path == "/api/portals/capture" and method == "POST":
+            return 200, merge_portal_capture(store, body["id"], body.get("capture"))
+        if path == "/api/library/reload" and method == "POST":
+            store.library.open()
+            _refresh_widget(store)
+            return 200, self._bootstrap()
+        if path == "/api/files/reveal" and method == "POST":
+            import subprocess
+
+            if os.name != "nt":
+                raise AppError("windows_only")
+            if body.get("kind") == "root":
+                os.startfile(store.library.root)
+            else:
+                target = store.file_for_download(body["kind"], body["ownerID"], body["name"])
+                subprocess.Popen(["explorer.exe", f"/select,{target}"], close_fds=True)
+            return 200, {"ok": True}
         if path == "/api/history" and method == "GET":
             return 200, store.history()
         if path == "/api/settings" and method == "GET":
@@ -173,6 +242,13 @@ class Api:
         if path == "/api/settings" and method == "POST":
             settings = store.update_settings(body.get("appearance"), body.get("language"), int(body.get("followUpDays")))
             return 200, {"settings": settings}
+        if path == "/api/widgets/publish" and method == "POST":
+            return 200, store.write_snapshot()
+        if path == "/api/widgets/open" and method == "POST":
+            from gaoyanjiu.widget import launch_widget
+
+            launch_widget(store.library.root, body.get("page"))
+            return 200, {"ok": True}
         if path == "/api/secrets/easyscholar" and method == "POST":
             store.set_easyscholar_key(body.get("secret") or "")
             return 200, {"ok": True}
@@ -192,6 +268,33 @@ class Api:
             return 200, {"ok": True}
         return 404, {"error": "not_found", "message": translate(store.language(), "not_found")}
 
+    def _exchange_call(self, method: str, action: str, query: dict, body: dict) -> dict:
+        exchange = self.exchange
+        if method == "GET":
+            if action == "overview":
+                return exchange.overview()
+            if action == "review":
+                return exchange.review(query["id"])
+        if method == "POST":
+            if action == "prepare":
+                return exchange.prepare(body["action"], body.get("documentIDs"), body.get("folderID") or "",
+                                        launch=body.get("launch") is not False)
+            if action == "receive":
+                return exchange.receive(Path(body["path"]))
+            if action == "apply":
+                return exchange.apply(body["id"], body.get("confirm"), body.get("folderID") or "",
+                                      body.get("references"), body.get("acceptPartial"))
+            if action == "reject":
+                return exchange.reject(body["id"], body.get("confirm"))
+            if action == "receipt":
+                return exchange.receipt(body["id"], Path(body["directory"]) if body.get("directory") else None,
+                                        launch=body.get("launch") is True)
+            if action == "reveal":
+                return exchange.reveal(body["id"])
+            if action == "edited-path":
+                return exchange.edited_from_path(body["id"], Path(body["path"]), body["mode"], body.get("confirm"))
+        raise AppError("not_found", 404)
+
     def _bootstrap(self) -> dict:
         library = self.store.library
         return {
@@ -205,6 +308,7 @@ class Api:
             "writable": library.writable,
             "settings": self.store.settings,
             "counts": self.store.counts(),
+            "overview": workspace_overview(self.store),
             "followUps": len(self.store.follow_ups()) if library.data else 0,
             "dataDir": str(library.root),
         }
@@ -301,7 +405,8 @@ class ResearchHandler(BaseHTTPRequestHandler):
             self._json(error.status, {"error": error.code, "message": failure_message(self.server.store, error)})
             return
         if uploaded is not None:
-            self._upload(parsed.path, uploaded)
+            with self.server.api.lock:
+                self._upload(parsed.path, uploaded)
             return
         status, payload = self.server.api.call(self.command, parsed.path, query, body)
         self._json(status, payload)
@@ -309,7 +414,10 @@ class ResearchHandler(BaseHTTPRequestHandler):
             threading.Thread(target=self.server.shutdown, daemon=True).start()
 
     def _read_request(self) -> tuple[dict | None, dict | None]:
-        length = int(self.headers.get("Content-Length") or "0")
+        try:
+            length = int(self.headers.get("Content-Length") or "0")
+        except ValueError as exc:
+            raise AppError("invalid_field") from exc
         if length < 0 or length > UPLOAD_CAP:
             raise AppError("payload_too_large")
         raw = self.rfile.read(length) if length else b""
@@ -343,10 +451,27 @@ class ResearchHandler(BaseHTTPRequestHandler):
         if len(blob) > UPLOAD_CAP:
             self._json(400, {"error": "payload_too_large", "message": failure_message(self.server.store, AppError("payload_too_large"))})
             return
-        temporary = Path(tempfile.mkstemp(prefix="gaoyanjiu-upload-")[1])
+        handle, name = tempfile.mkstemp(prefix="gaoyanjiu-upload-")
+        os.close(handle)
+        temporary = Path(name)
         try:
             temporary.write_bytes(blob)
             store = self.server.store
+            if path == "/api/exchange/edited":
+                with self.server.api.lock:
+                    result = self.server.api.exchange.edited_from_bytes(
+                        fields["id"], files["file"]["filename"], blob, fields["mode"], fields.get("confirm") == "true"
+                    )
+                self._json(200, result)
+                return
+            if path == "/api/exchange/receive":
+                package = temporary.with_suffix(".gaoaction.zip")
+                shutil.move(temporary, package)
+                temporary = package
+                with self.server.api.lock:
+                    result = self.server.api.exchange.receive(package)
+                self._json(200, result)
+                return
             if path == "/api/documents/import":
                 tags = [part.strip() for part in fields.get("tags", "").replace("，", ",").split(",") if part.strip()]
                 result = store.import_bytes(fields["folderID"], blob, files["file"]["filename"], tags)
@@ -367,25 +492,59 @@ class ResearchHandler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not_found", "message": "not found"})
         except AppError as error:
             self._json(error.status, {"error": error.code, "message": failure_message(self.server.store, error)})
+        except (KeyError, TypeError, ValueError):
+            self._json(400, {"error": "invalid_field", "message": failure_message(self.server.store, AppError("invalid_field"))})
         finally:
             if temporary.exists():
                 temporary.unlink()
 
     def _download(self, query: dict) -> None:
+        from gaoyanjiu.store import _find
+
         try:
-            path = self.server.store.file_for_download(query.get("kind", ""), query.get("owner", ""), query.get("name", ""))
+            store = self.server.store
+            kind, owner, name = (query.get(field, "") for field in ("kind", "owner", "name"))
+            with self.server.api.lock:
+                path = store.file_for_download(kind, owner, name)
+                data = store._view()
+                if kind == "document":
+                    documents = [item for item in data["managedDocuments"] if item.get("folderID") == owner]
+                    saved_versions = [version for item in documents for version in item.get("windowsVersions") or []]
+                    row = _find(documents + saved_versions, "storedName", name)
+                else:
+                    record = _find(data["existingWorks" if kind == "work" else "certificates"], "id", owner)
+                    row = _find(record.get("attachments") or [], "storedName", name)
+                inline_type = INLINE_TYPES.get(path.suffix.lower()) if query.get("preview") == "1" else None
+                if query.get("preview") == "1" and not inline_type:
+                    raise AppError("invalid_field", 415)
+                stream = path.open("rb")
+                if query.get("ocrSource"):
+                    try:
+                        original, expected = original_ocr_pdf(store, query["ocrSource"])
+                        if (kind, owner, name, inline_type) != ("document", original["folderID"], original["storedName"], "application/pdf"):
+                            raise AppError("ocr_source_missing", 404)
+                        _verify_ocr_source(stream, expected)
+                        stream.seek(0)
+                    except Exception:
+                        stream.close()
+                        raise
         except AppError as error:
             self._json(error.status, {"error": error.code, "message": failure_message(self.server.store, error)})
             return
-        payload = path.read_bytes()
-        mime = mimetypes.guess_type(path.name)[0] or "application/octet-stream"
-        self.send_response(200)
-        self.send_header("Content-Type", mime)
-        self.send_header("Content-Length", str(len(payload)))
-        self.send_header("Content-Disposition", f'attachment; filename="{path.name}"')
-        self.send_header("Cache-Control", "no-store")
-        self.end_headers()
-        self.wfile.write(payload)
+        except OSError:
+            self._json(404, {"error": "not_found", "message": failure_message(self.server.store, AppError("not_found"))})
+            return
+        with stream:
+            filename = quote(str(row.get("originalName") or path.name), safe="")
+            self.send_response(200)
+            self.send_header("Content-Type", inline_type or "application/octet-stream")
+            self.send_header("Content-Length", str(os.fstat(stream.fileno()).st_size))
+            self.send_header("Content-Disposition", f"{'inline' if inline_type else 'attachment'}; filename*=UTF-8''{filename}")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Cache-Control", "no-store")
+            self.end_headers()
+            shutil.copyfileobj(stream, self.wfile)
 
     def _static(self, path: str) -> None:
         root = asset_dir()
@@ -395,16 +554,24 @@ class ResearchHandler(BaseHTTPRequestHandler):
             mime = "text/html; charset=utf-8"
         else:
             name = path.removeprefix("/assets/")
-            if name not in {"app.js", "style.css"}:
+            if name not in {"app.js", "submissions.js", "records.js", "library-ui.js", "style.css",
+                            "exchange.js", "city.js", "city-scene.js", "city.css"} and name not in REUSED_ASSETS:
                 self._json(404, {"error": "not_found", "message": "not found"})
                 return
             target = root / name
+            if not target.is_file() and name in REUSED_ASSETS:
+                target = root.parents[3] / "Resources" / REUSED_ASSETS[name]
+            if not target.is_file():
+                self._json(404, {"error": "not_found", "message": "not found"})
+                return
             content = target.read_bytes()
-            mime = "text/javascript; charset=utf-8" if name.endswith(".js") else "text/css; charset=utf-8"
+            mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
         self.send_response(200)
         self.send_header("Content-Type", mime)
         self.send_header("Content-Length", str(len(content)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(content)
 
@@ -423,17 +590,32 @@ def make_server(store: ResearchStore, host: str = "127.0.0.1", port: int = 0) ->
     return ResearchHTTPServer((host, port), store, token)
 
 
-def serve(store: ResearchStore, port: int = 0, open_browser: bool = True, lock_path: Path | None = None) -> None:
-    import os
+def _refresh_widget(store: ResearchStore) -> None:
+    if store.library.writable:
+        try:
+            store.write_snapshot()
+        except OSError:
+            pass
 
+
+def _verify_ocr_source(stream, expected: str) -> None:
+    if os.fstat(stream.fileno()).st_size > 128 * 1024 * 1024 or hashlib.file_digest(stream, "sha256").hexdigest() != expected:
+        raise AppError("ocr_source_changed", 409)
+
+
+def serve(store: ResearchStore, port: int = 0, open_browser: bool = True, lock_path: Path | None = None,
+          destination: str = "") -> None:
     server = make_server(store, "127.0.0.1", port)
     url = f"http://127.0.0.1:{server.server_address[1]}/"
     if lock_path is not None:
         from gaoyanjiu.fsutil import atomic_write
 
-        atomic_write(lock_path, (json.dumps({"pid": os.getpid(), "url": url}) + "\n").encode("utf-8"))
+        state = {"pid": os.getpid(), "url": url, "token": server.token}
+        atomic_write(lock_path, (json.dumps(state) + "\n").encode("utf-8"))
     if open_browser:
-        threading.Timer(0.2, lambda: webbrowser.open(url)).start()
+        from gaoyanjiu.session import open_application, url_for
+
+        threading.Timer(0.2, lambda: open_application(url_for(url, destination))).start()
     try:
         server.serve_forever()
     finally:

@@ -1,0 +1,246 @@
+.reward-city {
+  min-width: 0;
+  margin-block: 2px 24px;
+  --city-gap: 12px;
+  --city-soft: color-mix(in srgb, var(--ink) 6%, transparent);
+}
+.city-toolbar, .city-toolbar-end, .city-resources, .city-control-group,
+.city-scene-actions, .city-inventory-head, .city-wishes-header, .city-dialog-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.city-toolbar, .city-inventory-head, .city-wishes-header { justify-content: space-between; }
+.city-toolbar { flex-wrap: wrap; margin-bottom: var(--city-gap); }
+.city-toolbar-end, .city-resources, .city-control-group, .city-scene-actions { flex-wrap: wrap; }
+.city-toolbar-end { justify-content: flex-end; }
+.city-resources { gap: 5px; }
+.city-control-group { gap: 3px; }
+.city-muted { color: var(--muted); }
+.city-status {
+  background: color-mix(in srgb, var(--accent) 9%, var(--card));
+  color: var(--accent);
+  padding: 8px 12px;
+  border-radius: 9px;
+  margin: 0 0 9px;
+  font-size: 13px;
+}
+.city-status[data-kind="error"] {
+  color: var(--clay);
+  background: color-mix(in srgb, var(--clay) 10%, var(--card));
+}
+.city-segment {
+  display: inline-flex;
+  width: max-content;
+  max-width: 100%;
+  gap: 2px;
+  padding: 3px;
+  border-radius: 9px;
+  background: var(--nav);
+}
+.city-toolbar > .city-segment { min-width: min(250px, 100%); }
+.city-segment .city-button {
+  flex: 1 1 auto;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  box-shadow: none;
+}
+.city-segment .city-button[aria-pressed="true"] {
+  color: var(--ink);
+  background: var(--card);
+  box-shadow: 0 1px 5px rgb(0 0 0 / 0.08);
+  font-weight: 600;
+}
+.city-button {
+  cursor: pointer;
+  max-width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 5px 8px;
+  line-height: 1.25;
+  font: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  background: var(--city-soft);
+}
+.city-button[title] { min-width: 27px; font-size: 15px; }
+.city-button:hover:enabled { background: color-mix(in srgb, var(--accent) 13%, var(--card)); }
+.city-primary, .city-primary:hover:enabled {
+  color: var(--accent-ink);
+  border-color: var(--accent);
+  background: var(--accent);
+}
+.city-primary:hover:enabled { filter: brightness(1.13); }
+.city-button:disabled { cursor: default; opacity: 0.5; }
+.city-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 5px 9px;
+  color: var(--accent);
+  border-radius: 100px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--card));
+  font-size: 11px;
+}
+.city-pill-clay { color: var(--clay); background: color-mix(in srgb, var(--clay) 11%, var(--card)); }
+.city-pill-teal { color: var(--teal); background: color-mix(in srgb, var(--teal) 11%, var(--card)); }
+.city-pill strong, .city-income small { font-variant-numeric: tabular-nums; }
+.city-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(210px, 250px);
+  gap: var(--city-gap);
+  align-items: start;
+}
+.city-body:has(> .city-inventory-panel[hidden]) { grid-template-columns: minmax(0, 1fr); }
+.city-scene-panel, .city-inventory-panel, .city-pool, .city-rules {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--card);
+}
+.city-scene-panel { overflow: clip; }
+.city-scene-tools {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-height: 58px;
+  padding: 9px 12px;
+  border-bottom: 1px solid var(--line);
+}
+.city-scene-heading { display: grid; flex: 1 1 170px; gap: 4px; }
+.city-scene-heading strong { font-size: 14px; }
+.city-scene-heading small { font-size: 11px; }
+.city-income { display: grid; gap: 5px; justify-items: end; white-space: nowrap; }
+.city-income small { font-size: 10px; }
+.city-scene-canvas {
+  display: block;
+  width: 100%;
+  height: clamp(420px, 56vh, 780px);
+  min-height: 520px;
+  background: #bddddd url("/assets/FloatingSkyV354.png") center 48% / cover no-repeat;
+  cursor: grab;
+  touch-action: none;
+}
+.city-scene-canvas:active { cursor: grabbing; }
+.city-scene-canvas:focus-visible { outline: 2px solid var(--accent); outline-offset: -4px; }
+.city-accessible {
+  color: var(--muted);
+  font-size: 12px;
+  padding: 7px 12px;
+  border-top: 1px solid var(--line);
+}
+.city-accessible summary { cursor: pointer; }
+.city-accessible[open] summary { margin-bottom: 6px; }
+.city-accessible select, .city-inventory-filter {
+  min-width: 0;
+  color: var(--ink);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  padding: 5px 7px;
+}
+.city-inventory-panel { padding: 12px; }
+.city-inventory-panel[hidden] { display: none; }
+.city-inventory-head h3, .city-wishes h3, .city-dialog h3 { margin: 0; font-size: 15px; }
+.city-inventory-panel > .city-segment { margin: 8px 0; width: 100%; }
+.city-inventory-filter { width: 100%; font-size: 12px; }
+.city-inventory-grid, .city-results {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-content: start;
+  gap: 7px;
+  margin-top: 8px;
+}
+.city-inventory-grid { max-height: 520px; overflow: auto; overscroll-behavior: contain; }
+.city-inventory-item, .city-result {
+  display: grid;
+  justify-items: center;
+  align-content: start;
+  min-width: 0;
+  gap: 3px;
+  background: var(--city-soft);
+  color: var(--ink);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 5px 3px;
+  font: inherit;
+  font-size: 11px;
+  text-align: center;
+}
+.city-inventory-item { cursor: pointer; }
+.city-inventory-item[aria-pressed="true"] {
+  border-color: var(--teal);
+  background: color-mix(in srgb, var(--teal) 15%, var(--card));
+}
+.city-inventory-item span, .city-result span {
+  width: 100%;
+  overflow-wrap: anywhere;
+}
+.city-inventory-empty { grid-column: 1 / -1; text-align: center; font-size: 13px; }
+.city-wishes { max-width: 1050px; margin: auto; }
+.city-wishes-header { gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+.city-pools { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; margin-bottom: 15px; }
+.city-pools.city-single-pool { grid-template-columns: minmax(0, 1fr); }
+.city-pool {
+  padding: 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.city-pool-body { display: grid; gap: 6px; }
+.city-pool-body p, .city-rules p { margin: 0; font-size: 12px; }
+.city-pool-preview, .city-terrain-samples {
+  display: grid;
+  place-items: center;
+  height: 134px;
+  flex: 0 1 auto;
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 9%, var(--card));
+}
+.city-terrain-samples { display: flex; justify-content: center; align-items: center; flex-wrap: wrap; min-height: 160px; flex: 1 1 390px; }
+.city-terrain-pool { flex-wrap: wrap; }
+.city-terrain-pool .city-pool-body { flex: 1 1 290px; }
+.city-thumbnail { display: block; max-width: 100%; object-fit: contain; }
+.city-rules { display: grid; gap: 7px; padding: 15px; color: var(--muted); }
+.city-rules h3 { color: var(--ink); }
+.city-dialog {
+  border: 1px solid var(--line);
+  border-radius: 13px;
+  color: var(--ink);
+  background: var(--card);
+  width: min(410px, calc(100% - 28px));
+  padding: 18px;
+}
+.city-dialog::backdrop { background: rgb(0 0 0 / 0.4); }
+.city-dialog-actions { justify-content: flex-end; margin-top: 13px; }
+.city-result-dialog { width: min(640px, calc(100% - 28px)); }
+.city-results { grid-template-columns: repeat(auto-fit, minmax(min(105px, 100%), 1fr)); }
+.city-result-rare strong { color: var(--accent); }
+.city-result-epic strong { color: light-dark(#714291, #d4a7ec); }
+.city-result-legendary strong { color: light-dark(#9e581c, #f6b771); }
+.city-result-mythic strong { color: light-dark(#a72d54, #f2a0bd); }
+.city-context {
+  position: fixed;
+  z-index: 15;
+  display: grid;
+  gap: 3px;
+  min-width: 105px;
+  padding: 4px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--card);
+  box-shadow: 0 5px 15px rgb(0 0 0 / 0.18);
+}
+.city-context button { text-align: start; }
+@media (max-width: 1000px) {
+  .city-body { grid-template-columns: minmax(0, 1fr); }
+  .city-inventory-grid { max-height: 265px; grid-template-columns: repeat(auto-fit, minmax(94px, 1fr)); }
+  .city-scene-canvas { min-height: clamp(300px, 50vh, 520px); }
+}
+@media (max-width: 700px) {
+  .city-pools { grid-template-columns: minmax(0, 1fr); }
+  .city-scene-actions:empty { display: none; }
+}
+

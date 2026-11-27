@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://schemas.microsoft.com/wix/2006/wi">
+  <Product Id="$(var.ProductCode)" Name="搞研究" Language="2052" Codepage="936"
+           Version="$(var.ProductVersion)" Manufacturer="搞系列"
+           UpgradeCode="DB54F6A5-A6F0-46D7-9BE3-BA4165C93C57">
+    <Package InstallerVersion="500" Platform="x64" InstallScope="perUser" SummaryCodepage="936" Compressed="yes" />
+    <MajorUpgrade Schedule="afterInstallInitialize" DowngradeErrorMessage="已安装较新的搞研究版本。" />
+    <MediaTemplate EmbedCab="yes" CompressionLevel="low" />
+    <Condition Message="搞研究需要 Windows 10 或 Windows 11 x64。">
+      <![CDATA[Installed OR (VersionNT64 AND GAOYANJIU_WINDOWS_MAJOR = "#10")]]>
+    </Condition>
+    <Property Id="GAOYANJIU_WINDOWS_MAJOR">
+      <RegistrySearch Id="WindowsMajorVersion" Root="HKLM" Key="SOFTWARE\Microsoft\Windows NT\CurrentVersion"
+                      Name="CurrentMajorVersionNumber" Type="raw" Win64="yes" />
+    </Property>
+    <Icon Id="GaoYanJiu.ico" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="GaoYanJiu.ico" />
+    <Property Id="ARPNOMODIFY" Value="1" />
+    <Property Id="INSTALLFOLDER" Secure="yes" />
+    <Property Id="GAOYANJIU_TEST_INSTALL" Secure="yes" />
+    <Property Id="GAOYANJIU_STATE_KEY" Secure="yes" Value="Software\GaoSeries\GaoYanJiu" />
+    <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
+
+    <Directory Id="TARGETDIR" Name="SourceDir">
+      <Directory Id="LocalAppDataFolder">
+            <Directory Id="INSTALLFOLDER" Name="GaoYanJiu">
+              <Component Id="GaoYanJiuFiles" Guid="3854FCD0-8356-4A41-BD04-F7FBA9E49C67" Win64="yes">
+                <File Id="GaoYanJiuApp" Source="$(var.PayloadDir)\GaoYanJiu.exe" />
+                <File Id="GaoYanJiuCli" Source="$(var.PayloadDir)\GaoYanJiu-cli.exe" />
+                <File Id="GaoYanJiuNotices" Source="$(var.NoticeFile)" />
+                <RemoveFolder Id="RemoveInstallFolder" On="uninstall" />
+                <RegistryValue Root="HKCU" Key="[GAOYANJIU_STATE_KEY]" Name="InstallPath" Type="string"
+                               Value="[INSTALLFOLDER]" KeyPath="yes" />
+              </Component>
+              <Component Id="GaoYanJiuProtocol" Guid="2356ABDB-5E5F-4895-9F8D-D2C67F038FA1" Win64="yes">
+                <Condition>NOT GAOYANJIU_TEST_INSTALL</Condition>
+                <RegistryKey Root="HKCU" Key="Software\Classes\gaoyanjiu">
+                  <RegistryValue Type="string" Value="URL:GaoYanJiu" />
+                  <RegistryValue Name="URL Protocol" Type="string" Value="" KeyPath="yes" />
+                  <RegistryValue Key="DefaultIcon" Type="string" Value="&quot;[INSTALLFOLDER]GaoYanJiu.exe&quot;,0" />
+                  <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[INSTALLFOLDER]GaoYanJiu.exe&quot; &quot;%1&quot;" />
+                </RegistryKey>
+              </Component>
+            </Directory>
+      </Directory>
+      <Directory Id="ProgramMenuFolder">
+        <Directory Id="GaoYanJiuMenuFolder" Name="搞研究">
+          <Component Id="GaoYanJiuShortcuts" Guid="AD4B155B-F7BF-44B3-A9B0-746ECDD43AEF" Win64="yes">
+            <Condition>NOT GAOYANJIU_TEST_INSTALL</Condition>
+            <Shortcut Id="MainShortcut" Name="搞研究" Target="[INSTALLFOLDER]GaoYanJiu.exe" WorkingDirectory="INSTALLFOLDER" />
+            <Shortcut Id="SubmissionShortcut" Name="搞研究 - 在投状态持续时间" Target="[INSTALLFOLDER]GaoYanJiu.exe"
+                      Arguments="--widget submissions" WorkingDirectory="INSTALLFOLDER" />
+            <Shortcut Id="AchievementsShortcut" Name="搞研究 - 成果与署名分布" Target="[INSTALLFOLDER]GaoYanJiu.exe"
+                      Arguments="--widget works" WorkingDirectory="INSTALLFOLDER" />
+            <RemoveFolder Id="RemoveMenuFolder" On="uninstall" />
+            <RegistryValue Root="HKCU" Key="[GAOYANJIU_STATE_KEY]" Name="Shortcuts" Type="integer" Value="1" KeyPath="yes" />
+          </Component>
+        </Directory>
+      </Directory>
+    </Directory>
+
+    <Feature Id="Application" Title="搞研究" Level="1" Absent="disallow">
+      <ComponentRef Id="GaoYanJiuFiles" />
+      <ComponentRef Id="GaoYanJiuProtocol" />
+      <ComponentRef Id="GaoYanJiuShortcuts" />
+    </Feature>
+
+    <UIRef Id="WixUI_Common" />
+    <UI>
+      <TextStyle Id="WixUI_Font_Normal" FaceName="Microsoft YaHei UI" Size="9" />
+      <TextStyle Id="WixUI_Font_Bigger" FaceName="Microsoft YaHei UI" Size="12" />
+      <TextStyle Id="WixUI_Font_Title" FaceName="Microsoft YaHei UI" Size="10" Bold="yes" />
+      <Property Id="DefaultUIFont" Value="WixUI_Font_Normal" />
+      <DialogRef Id="ErrorDlg" />
+      <DialogRef Id="FatalError" />
+      <DialogRef Id="FilesInUse" />
+      <DialogRef Id="PrepareDlg" />
+      <DialogRef Id="ProgressDlg" />
+      <DialogRef Id="ResumeDlg" />
+      <DialogRef Id="UserExit" />
+      <Dialog Id="GaoYanJiuWelcome" Width="370" Height="175" Title="[ProductName] 安装程序">
+        <Control Id="Title" Type="Text" X="20" Y="23" Width="330" Height="23"
+                 Transparent="yes" NoPrefix="yes" Text="{\WixUI_Font_Bigger}安装搞研究 $(var.DisplayVersion)" />
+        <Control Id="Description" Type="Text" X="20" Y="64" Width="330" Height="36"
+                 Transparent="yes" NoPrefix="yes" Text="安装仅适用于当前 Windows 用户。安装和卸载均保留资料。" />
+        <Control Id="Install" Type="PushButton" X="238" Y="142" Width="56" Height="18" Text="安装" Default="yes">
+          <Publish Event="EndDialog" Value="Return">1</Publish>
+        </Control>
+        <Control Id="Cancel" Type="PushButton" X="301" Y="142" Width="56" Height="18" Text="取消" Cancel="yes">
+          <Publish Event="SpawnDialog" Value="CancelDlg">1</Publish>
+        </Control>
+      </Dialog>
+      <Publish Dialog="ExitDialog" Control="Finish" Event="EndDialog" Value="Return">1</Publish>
+      <InstallUISequence>
+        <Show Dialog="GaoYanJiuWelcome" Before="ProgressDlg">NOT Installed</Show>
+      </InstallUISequence>
+    </UI>
+  </Product>
+</Wix>

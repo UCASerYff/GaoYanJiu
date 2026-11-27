@@ -181,4 +181,4 @@ python3 Tests/InstallSafetyRegression.py
 
 ## Windows 版
 
-Windows 10/11 x64 的独立版本在 [`windows/`](windows/README.md)。它使用 Python 标准库和本机浏览器界面，资料格式仍是 schema 32 的 `library.json`，构建由 GitHub Actions 的 `windows-latest` 完成。功能对齐、运行方式和已知差异见 [windows/README.md](windows/README.md)。Windows 版使用 `%APPDATA%\GaoSeries\Research\`，不读取 macOS 钥匙串，也不修改 Mac 版源码。
+Windows 10/11 x64 提供 V4.14 MSI 和 SHA-256。界面通过本机 Edge 应用窗口打开，附带两个独立桌面小组件。资料沿用 `%APPDATA%\GaoSeries\Research\AcademicAchievementManager\` 和 schema 32。安装、跨应用交接和验收范围见 [Windows 版说明](windows/README.md)。
