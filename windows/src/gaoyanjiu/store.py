@@ -135,6 +135,7 @@ class ResearchStore:
         self.clock = clock or utcnow
         self.rng = rng or random.Random()
         self.settings = self._read_settings()
+        self.reminders = None
 
     def _data(self) -> dict:
         return self.library.require_writable()
@@ -157,10 +158,12 @@ class ResearchStore:
             # The library is already committed. A widget write failure must not
             # trigger deletion of files referenced by that committed library.
             pass
+        if self.reminders is not None:
+            self.reminders.submit(self)
 
     def _read_settings(self) -> dict:
         path = self.library.root / "settings.json"
-        defaults = {"appearance": "system", "language": "zh-Hans", "followUpDays": 14}
+        defaults = {"appearance": "system", "language": "zh-Hans", "followUpDays": 14, "notificationsEnabled": False}
         self.settings_blocked = False
         if not path.exists():
             return defaults
@@ -176,30 +179,39 @@ class ResearchStore:
         language = parsed.get("language") if parsed.get("language") in {"zh-Hans", "en"} else "zh-Hans"
         days = parsed.get("followUpDays") if isinstance(parsed.get("followUpDays"), int) else 14
         days = min(365, max(1, days))
-        return {**parsed, "appearance": appearance, "language": language, "followUpDays": days}
+        return {**parsed, "appearance": appearance, "language": language, "followUpDays": days,
+                "notificationsEnabled": parsed.get("notificationsEnabled") is True}
 
-    def update_settings(self, appearance: str, language: str, follow_up_days: int) -> dict:
+    def update_settings(self, appearance: str, language: str, follow_up_days: int,
+                        notifications_enabled: bool | None = None) -> dict:
         if self.settings_blocked:
             raise AppError("unreadable", 409)
         if appearance not in {"light", "dark", "system"} or language not in {"zh-Hans", "en"}:
             raise AppError("invalid_field")
         if not isinstance(follow_up_days, int) or not 1 <= follow_up_days <= 365:
             raise AppError("invalid_field")
-        self.settings = {
+        if notifications_enabled is not None and not isinstance(notifications_enabled, bool):
+            raise AppError("invalid_field")
+        settings = {
             **self.settings,
             "appearance": appearance,
             "language": language,
             "followUpDays": follow_up_days,
         }
+        if notifications_enabled is not None:
+            settings["notificationsEnabled"] = notifications_enabled
         atomic_write(
             self.library.root / "settings.json",
-            (json.dumps(self.settings, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"),
+            (json.dumps(settings, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8"),
         )
+        self.settings = settings
         if self.library.writable:
             try:
                 self.write_snapshot()
             except OSError:
                 pass
+        if self.reminders is not None:
+            self.reminders.submit(self)
         return self.settings
 
     def language(self) -> str:

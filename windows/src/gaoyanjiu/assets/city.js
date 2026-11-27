@@ -561,4 +561,3 @@ function renderRewardCity({data, request, language, onUpdate}) {
 
 window.renderRewardCity = renderRewardCity;
 }());
-

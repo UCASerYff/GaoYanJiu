@@ -23,12 +23,15 @@ from gaoyanjiu.gaoaction import (
 )
 from gaoyanjiu.textutil import extract_text
 from gaoyanjiu.timeutil import format_iso, parse_iso
+from gaoyanjiu.winidentity import version_strings
 
 OCR = "ocr.files"
 CHOOSE = "files.choose"
 EDIT = "documents.open"
 IMPORT = "research.importDocuments"
 PROVIDERS = {OCR: "GaoCaoZuo", CHOOSE: "GaoWenJian", EDIT: "GaoWenJian"}
+FILE_INSTALLER_APP_ID = "{B06256C0-5B37-44AB-941B-7B8E00C7ED63}"
+LEGACY_FILE_IDENTITY = {"CompanyName": "GaoSeries", "ProductName": "搞文件", "FileVersion": "1.11.2.0", "ProductVersion": "1.11"}
 FORMAT_UTIS = {
     "pdf": ("com.adobe.pdf", "application/pdf"),
     "txt": ("public.utf8-plain-text", "public.plain-text", "text/plain"),
@@ -115,14 +118,20 @@ def _target_dirs(product: str):
         return
     import winreg
 
-    registry = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\GaoSeries.{product}.Windows_is1"
+    installer_ids = [f"GaoSeries.{product}.Windows"]
+    if product == "GaoWenJian":
+        installer_ids.insert(0, FILE_INSTALLER_APP_ID)
+    install_keys = [(rf"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\{app_id}_is1", "InstallLocation")
+                    for app_id in installer_ids]
     alias = rf"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{product}.exe"
     for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
-        for key, value in ((registry, "InstallLocation"), (alias, "")):
+        for key, value in (*install_keys, (alias, "")):
             try:
                 with winreg.OpenKey(hive, key, 0, winreg.KEY_READ | winreg.KEY_WOW64_64KEY) as handle:
-                    path = Path(os.path.expandvars(winreg.QueryValueEx(handle, value)[0].strip('"')))
-                    yield path if value else path.parent
+                    raw = winreg.QueryValueEx(handle, value)[0]
+                    path = Path(os.path.expandvars(raw.strip().strip('"')))
+                    if path.is_absolute():
+                        yield path if value else path.parent
             except (OSError, TypeError, AttributeError):
                 continue
     for name in ("LOCALAPPDATA", "ProgramFiles"):
@@ -140,14 +149,18 @@ def _provider_exe(product: str) -> Path | None:
     return None
 
 
-def _valid_capabilities(data, product: str, manifest: dict) -> bool:
+def _capability_identity(data, product: str) -> bool:
     if not isinstance(data, dict) or type(data.get("schemaVersion")) is not int or data["schemaVersion"] != 1:
         return False
     if data.get("bundleID") != f"com.gaoseries.{product}" or not re.fullmatch(r"\d+(?:\.\d+){1,3}", str(data.get("appVersion"))):
         return False
-    actions = data.get("actions")
-    if not isinstance(actions, list):
+    return isinstance(data.get("actions"), list)
+
+
+def _valid_capabilities(data, product: str, manifest: dict) -> bool:
+    if not _capability_identity(data, product):
         return False
+    actions = data.get("actions")
     matching = [action for action in actions if isinstance(action, dict) and action.get("action") == manifest["action"]]
     if len(matching) != 1:
         return False
@@ -184,20 +197,46 @@ def _valid_capabilities(data, product: str, manifest: dict) -> bool:
     return True
 
 
-def _launch_provider(product: str, path: Path, manifest: dict, *, check_capability=True) -> str:
+def _provider_probe(cli: Path, option: str) -> bytes:
+    result = subprocess.run([str(cli), option], check=True, timeout=8, capture_output=True,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0), stdin=subprocess.DEVNULL)
+    if len(result.stdout) > MAX_MANIFEST_BYTES:
+        raise AppError("invalid_manifest")
+    return result.stdout
+
+
+def _research_receipt_flag(executable: Path, cli: Path, manifest: dict) -> str:
+    if manifest["kind"] != "result" or manifest["action"] != IMPORT or manifest["targetBundleID"] != "com.gaoseries.GaoWenJian":
+        return ""
+    try:
+        capabilities = decode_json(_provider_probe(cli, "--capabilities"))
+        if _capability_identity(capabilities, "GaoWenJian"):
+            return "--gaoaction"
+    except (AppError, subprocess.CalledProcessError):
+        # Version 1.11+2 recognizes `--open` for receipts but lacks a capability query.
+        pass
+    if any(version_strings(program) != LEGACY_FILE_IDENTITY for program in (executable, cli)):
+        return ""
+    return "--open" if _provider_probe(cli, "--version").strip() == b"1.11+2" else ""
+
+
+def _launch_provider(product: str, path: Path, manifest: dict) -> str:
     executable = _provider_exe(product)
     if executable is None:
         return "提供方未安装。交接包已保留，可在提供方手动选择。"
     try:
-        if check_capability:
-            capability = subprocess.run(
-                [str(executable.with_name(product + "-cli.exe")), "--capabilities"],
-                check=True, timeout=8, capture_output=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-                stdin=subprocess.DEVNULL,
-            )
-            if len(capability.stdout) > MAX_MANIFEST_BYTES or not _valid_capabilities(decode_json(capability.stdout), product, manifest):
-                return "提供方版本或能力不兼容。交接包已保留。"
-        subprocess.Popen([str(executable), "--gaoaction", str(path)], stdin=subprocess.DEVNULL,
+        cli = executable.with_name(product + "-cli.exe")
+        if product == "GaoWenJian" and manifest["kind"] == "result":
+            flag = _research_receipt_flag(executable, cli, manifest)
+        else:
+            try:
+                capabilities = decode_json(_provider_probe(cli, "--capabilities"))
+            except (subprocess.CalledProcessError, AppError):
+                capabilities = None
+            flag = "--gaoaction" if _valid_capabilities(capabilities, product, manifest) else ""
+        if not flag:
+            return "提供方版本或能力不兼容。交接包已保留。"
+        subprocess.Popen([str(executable), flag, str(path)], stdin=subprocess.DEVNULL,
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, ValueError, TypeError, AppError, subprocess.SubprocessError):
         return "未能启动兼容的提供方。交接包已保留。"
@@ -1013,7 +1052,7 @@ class ResearchExchange:
             _package_write(target, manifest, [])
         message = "已导出交接回执。"
         if launch and original["sourceBundleID"] == "com.gaoseries.GaoWenJian":
-            message = _launch_provider("GaoWenJian", target, manifest, check_capability=False)
+            message = _launch_provider("GaoWenJian", target, manifest)
         return {"path": str(target), "status": status, "message": message}
 
     def edited_from_path(self, document_id: str, path: Path, mode: str, confirm) -> dict:

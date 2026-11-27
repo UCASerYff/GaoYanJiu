@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import {spawn} from "node:child_process";
+import {createHash} from "node:crypto";
 import {mkdtemp, mkdir, readFile, rm, writeFile} from "node:fs/promises";
 import {createServer} from "node:http";
 import {setTimeout as delay} from "node:timers/promises";
@@ -184,6 +185,8 @@ try {
   await addText("#editor [name=name]", "隔离投稿门户");
   await addText("#editor [name=url]", portalURL);
   await press("#editor button[type=submit]");
+  await has("#editor button[data-portal-manual]");
+  await press("#editor button[data-portal-manual]");
   await has("#editor [name=capture]");
   const bookmark = await evaluate("document.querySelector('#editor a[href^=javascript]').href");
   await cdp("Page.navigate", {url: portalURL});
@@ -195,6 +198,8 @@ try {
   await cdp("Page.navigate", {url: session.url});
   await has(".portal-wide .portal-line");
   await press(".portal-wide .portal-name");
+  await has("#editor button[data-portal-manual]");
+  await press("#editor button[data-portal-manual]");
   await has("#editor [name=capture]");
   await addText("#editor [name=capture]", captured);
   await press("#editor button[type=submit]");
@@ -315,8 +320,15 @@ try {
   await has('.tabs [data-scope="all"][aria-pressed="true"]');
   await cdp("Page.navigate", {url: session.url + "#works"});
   await current("works");
+  const reminderPaper = (await request("/api/papers?q=MS-101")).papers[0];
+  const reference = createHash("sha256").update(JSON.stringify([reminderPaper.key])).digest("hex").slice(0, 40);
+  await cdp("Page.navigate", {url: session.url + "#follow-up/" + reference});
+  await current("submissions");
+  await has("#editor[open] #dialog-heading");
+  assert.match(await evaluate(css("#dialog-heading") + ".textContent"), /隔离稿件 Alpha/);
+  await byText("#editor .dialog-foot button", "完成");
   assert.deepEqual(errors, []);
-  console.log("Browser passed: seven pages, first-run gate, submission editor and archive, reviewed portal extraction, work editor, three searchable libraries, attachment/Trash, city orbit/draw/place, light/dark at 1440 and 1040 at simulated 175%, and deep links.");
+  console.log("Browser passed: seven pages, first-run gate, submission editor and archive, reviewed external portal fallback, work editor, three searchable libraries, attachment/Trash, city orbit/draw/place, light/dark at 1440 and 1040 at simulated 175%, and direct notification activation.");
 } catch (error) {
   console.error(logs.slice(-12).join("").slice(-6000));
   if (errors.length) console.error(errors);

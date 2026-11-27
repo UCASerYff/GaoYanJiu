@@ -790,4 +790,3 @@ function previewTerrain(canvas, kind, variant) {
 window.RewardCityScene = RewardCityScene;
 window.rewardCityPreview = {asset: previewAsset, terrain: previewTerrain, plotForCell, dimensions};
 }());
-

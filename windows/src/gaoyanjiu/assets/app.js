@@ -276,7 +276,7 @@ function setPage(page) {
   if (page === "submissions") state.scope = "all";
   $("search").value = "";
   $("main").scrollTop = 0;
-  render().catch(report);
+  return render();
 }
 function navGroups() {
   const groups = [
@@ -354,18 +354,37 @@ async function openTrash() {
     items.length ? rows : emptyState("trash", tr("回收站为空", "Trash is empty"))]);
 }
 async function openSettings() {
-  const data = await api("/api/settings");
+  const [data, reminders] = await Promise.all([api("/api/settings"), api("/api/notifications/status")]);
+  const systemReminders = el("input");
+  systemReminders.type = "checkbox";
+  systemReminders.name = "notificationsEnabled";
+  systemReminders.checked = data.settings.notificationsEnabled === true;
+  systemReminders.disabled = reminders.state === "unavailable";
+  const remindersMessage = {
+    active: tr(`已安排 ${reminders.count} 条 Windows 通知。`, `${reminders.count} Windows notifications scheduled.`),
+    blocked: tr("Windows 已阻止通知，可在系统通知设置中允许“搞研究”。", "Windows has blocked notifications. Allow GaoYanJiu in Windows notification settings."),
+    pending: tr("正在更新 Windows 通知。", "Updating Windows notifications."),
+    off: tr("系统提醒已关闭。", "System reminders are off."),
+    error: tr("Windows 通知暂未安排成功。", "Windows could not schedule the reminders."),
+    unavailable: tr("系统提醒适用于已安装应用的默认资料库。", "System reminders are available for the installed app’s default library."),
+  };
   const links = el("div", "row", button(tr("在文件资源管理器中显示", "Show in File Explorer"),
     () => post("/api/files/reveal", {kind: "root"}), {symbol: "folder"}));
   links.append(button(tr("打开桌面小组件", "Open desktop widgets"),
     () => post("/api/widgets/open", {page: state.page === "works" ? "works" : "submissions"}), {symbol: "city"}));
   modal(tr("设置", "Settings"), [formGroup(tr("通用", "General"),
     selectField(tr("外观", "Appearance"), "appearance", data.settings.appearance, [["system", tr("跟随系统", "System")], ["light", tr("浅色", "Light")], ["dark", tr("深色", "Dark")]]),
-    selectField(tr("语言", "Language"), "language", data.settings.language, [["zh-Hans", "简体中文"], ["en", "English"]]),
-    field(tr("待跟进天数", "Follow-up days"), "followUpDays", data.settings.followUpDays, "number")),
+    selectField(tr("语言", "Language"), "language", data.settings.language, [["zh-Hans", "简体中文"], ["en", "English"]])),
+  formGroup(tr("投稿提醒", "Follow-up reminders"),
+    field(tr("待跟进天数", "Follow-up days"), "followUpDays", data.settings.followUpDays, "number"),
+    el("label", "row", systemReminders, tr("启用 Windows 系统通知", "Enable Windows system notifications")),
+    el("small", "muted", tr("系统通知会显示稿件标题和当前状态。", "Notifications show the manuscript title and current status.")),
+    el("small", "muted", remindersMessage[reminders.state])),
   formGroup(tr("本地资料", "Local data"), el("p", "path-text", data.dataDir), links,
     el("small", "muted", `Windows ${state.version} · build ${state.build}`))], {submit: async (values) => {
-    await post("/api/settings", {...values, followUpDays: Number(values.followUpDays)});
+    const {notificationsEnabled, ...settings} = values;
+    if (!systemReminders.disabled) settings.notificationsEnabled = Boolean(notificationsEnabled);
+    await post("/api/settings", {...settings, followUpDays: Number(settings.followUpDays)});
     closeDialog(); await refresh();
   }, actions: [button(tr("退出搞研究", "Quit GaoYanJiu"), quit, {symbol: "exit"})]});
 }
@@ -436,9 +455,15 @@ async function applyRoute() {
   const route = decodeURIComponent(location.hash.slice(1));
   if (!route || $("shell").hidden) return;
   if (route === "exchange") await window.researchExchange?.open({api, folderID: state.folder, refresh, language: state.language});
-  else if (Object.hasOwn(PAGE_LABELS, route)) setPage(route);
+  else if (route.match(/^follow-up\/[0-9a-f]{40}$/)) {
+    const {paper} = await api(`/api/notifications/paper?ref=${route.split("/")[1]}`);
+    await setPage("submissions");
+    if (paper) await openPaperDetail(paper);
+    else toast(tr("这条提醒对应的稿件已找不到。", "The submission for this reminder is no longer available."));
+  }
+  else if (Object.hasOwn(PAGE_LABELS, route)) await setPage(route);
   else if (["changed", "hidden", "projects"].includes(route)) {
-    setPage("submissions");
+    await setPage("submissions");
     if (route !== "projects") { state.scope = route; await render(); }
   }
   history.replaceState(null, "", location.pathname);

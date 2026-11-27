@@ -22,6 +22,9 @@ URL_DESTINATIONS = {
 
 
 def link_destination(text: str) -> tuple[str, str]:
+    reminder = re.fullmatch(r"gaoyanjiu://follow-up/([a-f0-9]{40})/?", text, re.ASCII | re.IGNORECASE)
+    if reminder is not None:
+        return "follow-up/" + reminder[1].lower(), ""
     matched = re.fullmatch(r"gaoyanjiu://([a-z-]+)/?", text, re.ASCII | re.IGNORECASE)
     if matched is None or matched[1].lower() not in URL_DESTINATIONS:
         raise AppError("invalid_field", 400, "无效的搞研究链接 / Invalid GaoYanJiu link")

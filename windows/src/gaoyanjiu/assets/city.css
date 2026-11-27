@@ -243,4 +243,3 @@
   .city-pools { grid-template-columns: minmax(0, 1fr); }
   .city-scene-actions:empty { display: none; }
 }
-

@@ -16,6 +16,8 @@ from gaoyanjiu import __build__, __version__
 from gaoyanjiu.errors import AppError
 from gaoyanjiu.exchange import ResearchExchange
 from gaoyanjiu.i18n import translate
+from gaoyanjiu.notifications import reminder_paper
+from gaoyanjiu.portal import PortalBrowser
 from gaoyanjiu.publishers import PUBLISHERS
 from gaoyanjiu.store import ResearchStore, inspect_summary
 from gaoyanjiu.workspace import documents_workspace, merge_portal_capture, original_ocr_pdf, tag_counts, workspace_overview
@@ -52,6 +54,7 @@ class Api:
     def __init__(self, store: ResearchStore):
         self.store = store
         self.exchange = ResearchExchange(store)
+        self.portal_browser = PortalBrowser(store, asset_dir())
         self.lock = threading.RLock()
 
     def call(self, method: str, path: str, query: dict, body: dict | None) -> tuple[int, dict]:
@@ -77,6 +80,8 @@ class Api:
             store.library.create_empty()
             store.purge_expired()
             _refresh_widget(store)
+            if store.reminders:
+                store.reminders.submit(store)
             return 200, self._bootstrap()
         if path == "/api/papers" and method == "GET":
             return 200, {"papers": store.list_papers(query.get("scope", "all"), query.get("q", ""))}
@@ -213,12 +218,21 @@ class Api:
             return 200, {"id": store.save_portal(body)}
         if path == "/api/portals/delete" and method == "POST":
             store.delete_portal(body["id"])
+            self.portal_browser.stop_portal(body["id"])
             return 200, {"ok": True}
+        if path == "/api/portals/browser" and method == "GET":
+            return 200, self.portal_browser.status(query.get("sessionId"))
+        if path == "/api/portals/browser/open" and method == "POST":
+            return 200, self.portal_browser.open(body.get("id"))
+        if path == "/api/portals/browser/close" and method == "POST":
+            return 200, self.portal_browser.close(body.get("sessionId"))
         if path == "/api/portals/capture" and method == "POST":
             return 200, merge_portal_capture(store, body["id"], body.get("capture"))
         if path == "/api/library/reload" and method == "POST":
             store.library.open()
             _refresh_widget(store)
+            if store.reminders:
+                store.reminders.submit(store)
             return 200, self._bootstrap()
         if path == "/api/files/reveal" and method == "POST":
             import subprocess
@@ -240,8 +254,14 @@ class Api:
                 "dataDir": str(store.library.root),
             }
         if path == "/api/settings" and method == "POST":
-            settings = store.update_settings(body.get("appearance"), body.get("language"), int(body.get("followUpDays")))
+            settings = store.update_settings(body.get("appearance"), body.get("language"), int(body.get("followUpDays")),
+                                             body.get("notificationsEnabled"))
             return 200, {"settings": settings}
+        if path == "/api/notifications/status" and method == "GET":
+            worker = store.reminders
+            return 200, worker.status() if worker else {"state": "unavailable", "count": 0}
+        if path == "/api/notifications/paper" and method == "GET":
+            return 200, {"paper": reminder_paper(store, query.get("ref", ""))}
         if path == "/api/widgets/publish" and method == "POST":
             return 200, store.write_snapshot()
         if path == "/api/widgets/open" and method == "POST":
@@ -621,4 +641,7 @@ def serve(store: ResearchStore, port: int = 0, open_browser: bool = True, lock_p
     finally:
         if lock_path is not None and lock_path.exists():
             lock_path.unlink()
+        server.api.portal_browser.stop()
+        if store.reminders:
+            store.reminders.close()
         server.server_close()

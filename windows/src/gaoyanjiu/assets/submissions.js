@@ -204,7 +204,7 @@ function portalPanel(portals, wide = true) {
 async function openPortalPicker() {
   const {publishers} = await api("/api/publishers");
   modal(tr("从投稿系统导入", "Import from a submission portal"), [
-    card(tr("选择投稿系统", "Choose a submission system"), tr("在浏览器登录，再捕获当前稿件页面。", "Sign in in the browser, then capture the submission page."),
+    card(tr("选择投稿系统", "Choose a submission system"), tr("在内嵌投稿窗口登录并提取，再审核稿件后导入。", "Sign in in the embedded portal, extract submissions and review them before importing."),
       el("div", "publisher-grid", publishers.map((publisher) => button(publisher.name, () => editPortal(null, publisher), {symbol: "globe"})),
         button(tr("自定义投稿网站", "Custom submission website"), () => editPortal(), {symbol: "link"}))),
   ], {size: "wide"});
@@ -217,21 +217,82 @@ function editPortal(portal = null, publisher = null) {
   address.querySelector("input").required = true;
   modal(portal ? tr("编辑投稿门户", "Edit submission portal") : tr("连接投稿门户", "Connect a submission portal"), [
     formGroup(tr("门户信息", "Portal details"), name, address),
-    formGroup(tr("本地凭据", "Local credentials"),
-      field(tr("账号（可选）", "Account (optional)"), "identity", portal?.identity),
-      field(tr("密码（可选）", "Password (optional)"), "password", "", "password"),
-      el("small", "muted", tr("应用使用 Windows 加密保存凭据。投稿网站由浏览器负责登录。", "Saved credentials use Windows encryption. Sign in to publisher sites in your browser."))),
+    el("small", "muted", tr("请直接在投稿窗口登录。每个门户都有自己的浏览资料。", "Sign in directly in the submission portal. Each portal has its own browsing profile.")),
   ], {submit: async (values) => {
-    const response = await post("/api/portals", {...values, id: portal?.id, publisherID: portal?.publisherID || publisher?.id || "custom"});
+    const response = await post("/api/portals", {...values, id: portal?.id, identity: portal?.identity,
+      publisherID: portal?.publisherID || publisher?.id || "custom"});
     const {portals} = await api("/api/portals");
     await refresh();
     await openPortalCapture(portals.find((row) => row.id === response.id));
   }});
 }
 
-let extractorScript;
 async function openPortalCapture(portal, next = []) {
   if (!portal) return;
+  const {available} = await api("/api/portals/browser");
+  const native = button(tr("打开内嵌投稿门户", "Open embedded submission portal"), async () => {
+    native.disabled = true;
+    try { await watchEmbeddedPortal(portal, next); } finally { native.disabled = false; }
+  }, {style: "primary", symbol: "globe", disabled: !available});
+  native.dataset.portalNative = "";
+  const manual = button(tr("从外部浏览器提取", "Capture from external browser"), () => openManualPortalCapture(portal, next), {symbol: "download"});
+  manual.dataset.portalManual = "";
+  modal(tr("导入投稿状态", "Import submission status"), [
+    el("p", "", tr("在投稿窗口登录，打开稿件列表或详情，点击「提取稿件并审核」。选中的稿件需在此确认后导入。",
+      "Sign in in the portal window, open the submission list or details, and click Extract for review. Confirm the selected submissions here to import them.")),
+    !available && el("p", "muted", tr("当前程序没有内嵌投稿组件，可从外部浏览器提取。", "This build does not include the embedded portal. You can capture from an external browser.")),
+    el("div", "row", native, manual),
+    next.length ? el("small", "muted", tr("此后还有 " + next.length + " 个门户待刷新。", next.length + " more portals to refresh.")) : null,
+  ], {subtitle: portal.name});
+}
+
+async function watchEmbeddedPortal(portal, next) {
+  const {sessionId} = await post("/api/portals/browser/open", {id: portal.id});
+  const waiting = el("p", "", tr("正在启动内嵌投稿门户…", "Starting the embedded submission portal…"));
+  waiting.setAttribute("role", "status");
+  modal(tr("内嵌投稿门户", "Embedded submission portal"), [
+    waiting, el("small", "muted", tr("提取完成后将回到这里审核。", "Return here to review submissions after extraction.")),
+  ], {subtitle: portal.name});
+  const labels = {
+    loading: ["投稿页面正在加载…", "The portal page is loading…"],
+    "no-papers": ["尚未识别到稿件，请在投稿窗口打开稿件列表或详情。", "No submissions were detected. Open a submission list or details page in the portal window."],
+    "different-origin": ["在登录后回到所选投稿门户，再提取稿件。", "After signing in, return to the selected portal to extract submissions."],
+    "extract-failed": ["当前页面提取失败，请在投稿窗口重试。", "Extraction failed on this page. Try again in the portal window."],
+    "navigation-failed": ["投稿页面加载失败，请在投稿窗口检查地址并重新载入。", "The portal page could not load. Check the address and reload in the portal window."],
+    "missing-runtime": ["需要安装 Microsoft Edge WebView2 Runtime。", "Microsoft Edge WebView2 Runtime is required."],
+    "unsupported-profile": ["Windows 策略改变了投稿资料位置，内嵌窗口已关闭。", "Windows policy redirected the isolated portal profile and the embedded window closed."],
+    "cannot-initialize": ["内嵌投稿门户启动失败。", "The embedded submission portal could not start."],
+  };
+  const active = () => waiting.isConnected && $("editor").open;
+  try {
+    while (active()) {
+      const result = await api("/api/portals/browser?" + new URLSearchParams({sessionId}));
+      if (!active()) return;
+      const label = labels[result.notice];
+      if (result.state === "captured") {
+        reviewPortalCapture(portal, result.capture, next);
+        return;
+      }
+      if (["closed", "error"].includes(result.state)) {
+        const message = label ? tr(...label) : tr("投稿窗口已关闭。", "The submission portal window closed.");
+        const actions = [button(tr("重试", "Retry"), () => openPortalCapture(portal, next), {symbol: "globe"})];
+        if (result.notice === "missing-runtime") actions.unshift(external(
+          tr("获取 WebView2 Runtime", "Get WebView2 Runtime"), "https://developer.microsoft.com/microsoft-edge/webview2/#download"));
+        modal(tr("内嵌投稿门户", "Embedded submission portal"), [el("p", "", message)], {subtitle: portal.name, actions});
+        return;
+      }
+      waiting.textContent = label ? tr(...label) : result.state === "ready"
+        ? tr("请在内嵌窗口打开稿件，再点击「提取稿件并审核」。", "Open your submissions in the embedded window, then click Extract for review.")
+        : tr("正在启动内嵌投稿门户…", "Starting the embedded submission portal…");
+      await new Promise((resolve) => setTimeout(resolve, 400));
+    }
+  } finally {
+    await post("/api/portals/browser/close", {sessionId}).catch(() => {});
+  }
+}
+
+let extractorScript;
+async function openManualPortalCapture(portal, next) {
   const source = {name: portal.publisherName || portal.name, kind: portal.kind};
   const host = new URL(portal.url).hostname.toLowerCase().replace(/^www\./, "");
   const instructions = tr("将“提取投稿状态”拖到浏览器收藏夹栏，在已登录的稿件页面点击该收藏项。复制出现的结果，再粘贴到下面审核。",
@@ -259,25 +320,29 @@ async function openPortalCapture(portal, next = []) {
   ], {subtitle: portal.name, submitLabel: tr("审核稿件", "Review submissions"), submit: async ({capture}) => {
     let payload;
     try { payload = JSON.parse(capture); } catch { throw new Error(tr("无法读取结果。请复制提取框里的完整内容。", "Copy the entire result from the capture box.")); }
-    if (!Array.isArray(payload?.papers) || !payload.papers.length || payload.papers.length > 500)
-      throw new Error(tr("没有提取到可用稿件。请登录并打开真实稿件列表。", "No usable submissions were captured. Sign in and open the actual submissions list."));
-    const rows = payload.papers.map((paper) => {
-      if (!paper || typeof paper.title !== "string" || typeof paper.status !== "string")
-        throw new Error(tr("结果含无法读取的稿件。", "The capture contains an unreadable submission."));
-      const choice = el("input");
-      choice.type = "checkbox";
-      choice.checked = true;
-      return {paper, choice, row: el("label", "line-item", choice, el("div", "grow", el("strong", "", paper.title),
-        el("small", "muted block", [paper.journal, paper.id, paper.status].filter(Boolean).join(" · "))))};
-    });
-    modal(tr("审核投稿状态", "Review submission status"), [
-      el("p", "muted", tr("勾选要导入或更新的稿件。已有稿件会保留状态历史。", "Select the submissions to import or update. Existing submission histories are kept.")),
-      el("div", "list", rows.map(({row}) => row)),
-    ], {subtitle: portal.name, submitLabel: tr("确认导入", "Confirm import"), submit: async () => {
-      const result = await post("/api/portals/capture", {id: portal.id, capture: {...payload, papers: rows.filter(({choice}) => choice.checked).map(({paper}) => paper)}});
-      closeDialog(); await refresh();
-      toast(tr("新增 " + result.imported + " 篇，状态更新 " + result.changed + " 篇。", result.imported + " added, " + result.changed + " statuses updated."));
-      if (next.length) await openPortalCapture(next[0], next.slice(1));
-    }});
+    reviewPortalCapture(portal, payload, next);
+  }});
+}
+
+function reviewPortalCapture(portal, payload, next) {
+  if (!Array.isArray(payload?.papers) || !payload.papers.length || payload.papers.length > 500)
+    throw new Error(tr("没有提取到可用稿件。请登录并打开稿件列表。", "No usable submissions were captured. Sign in and open the submission list."));
+  const rows = payload.papers.map((paper) => {
+    if (!paper || typeof paper.title !== "string" || typeof paper.status !== "string")
+      throw new Error(tr("结果含无法读取的稿件。", "The capture contains an unreadable submission."));
+    const choice = el("input");
+    choice.type = "checkbox";
+    choice.checked = true;
+    return {paper, choice, row: el("label", "line-item", choice, el("div", "grow", el("strong", "", paper.title),
+      el("small", "muted block", [paper.journal, paper.id, paper.status].filter(Boolean).join(" · "))))};
+  });
+  modal(tr("审核投稿状态", "Review submission status"), [
+    el("p", "muted", tr("勾选要导入或更新的稿件。已有稿件会保留状态历史。", "Select the submissions to import or update. Existing submission histories are kept.")),
+    el("div", "list", rows.map(({row}) => row)),
+  ], {subtitle: portal.name, submitLabel: tr("确认导入", "Confirm import"), submit: async () => {
+    const result = await post("/api/portals/capture", {id: portal.id, capture: {...payload, papers: rows.filter(({choice}) => choice.checked).map(({paper}) => paper)}});
+    closeDialog(); await refresh();
+    toast(tr("新增 " + result.imported + " 篇，状态更新 " + result.changed + " 篇。", result.imported + " added, " + result.changed + " statuses updated."));
+    if (next.length) await openPortalCapture(next[0], next.slice(1));
   }});
 }

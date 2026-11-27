@@ -42,6 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--widget", choices=("submissions", "works"))
     parser.add_argument("--gaoaction", metavar="PATH")
     parser.add_argument("--capabilities", action="store_true")
+    parser.add_argument("--clear-reminders", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--serve", action="store_true")
     parser.add_argument("--no-browser", action="store_true")
     parser.add_argument("--port", type=int, default=0)
@@ -61,6 +62,11 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def run(args) -> int:
+    if args.clear_reminders:
+        from gaoyanjiu.notifications import clear_system_reminders
+
+        clear_system_reminders()
+        return 0
     if args.capabilities:
         from gaoyanjiu.exchange import research_capabilities
 
@@ -122,6 +128,12 @@ def run(args) -> int:
             ResearchExchange(store).receive(incoming)
         from gaoyanjiu.web import serve
 
+        if not args.no_browser:
+            from gaoyanjiu.notifications import ReminderWorker
+
+            store.reminders = ReminderWorker.for_store(store)
+            if store.reminders:
+                store.reminders.submit(store)
         serve(store, port=args.port, open_browser=not args.no_browser, lock_path=root / "server.json",
               destination=destination)
         return 0

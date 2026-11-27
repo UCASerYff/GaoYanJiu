@@ -20,6 +20,8 @@ from urllib.parse import urlencode
 from urllib.request import ProxyHandler, Request, build_opener
 
 NO_WINDOW = subprocess.CREATE_NO_WINDOW
+NOTIFICATION_KEY = r"Software\Classes\AppUserModelId\GaoSeries.GaoYanJiu"
+NOTIFICATION_ACTIVATOR = "{F35C7BDD-954B-41DD-A863-F60CC0C192D7}"
 
 
 def msi_property(database, name: str) -> str:
@@ -28,8 +30,8 @@ def msi_property(database, name: str) -> str:
     return view.Fetch().GetString(1)
 
 
-def msi_run(root: Path, action: str, target: str, properties: list[str]) -> None:
-    log = root / f"{action[1:]}.log"
+def msi_run(root: Path, action: str, target: str, properties: list[str], stage: str = "") -> None:
+    log = root / f"{action[1:]}{stage}.log"
     command = subprocess.list2cmdline(["msiexec.exe", action, target, "/qn", "/norestart", "/l*v", str(log)])
     for item in properties:
         name, value = item.split("=", 1)
@@ -51,6 +53,14 @@ def read_registry(key: str, value: str = ""):
             return winreg.QueryValueEx(handle, value)[0]
     except FileNotFoundError:
         return None
+
+
+def registry_key_exists(key: str) -> bool:
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, key):
+            return True
+    except FileNotFoundError:
+        return False
 
 
 def check_x64(executable: Path) -> None:
@@ -80,7 +90,7 @@ def legacy_fixture(profile: Path) -> dict:
     return fixture
 
 
-def exercise(install: Path, profile: Path, fixture: dict, env: dict, version: str) -> None:
+def exercise(install: Path, profile: Path, fixture: dict, env: dict, release: str) -> None:
     app = install / "GaoYanJiu.exe"
     cli = install / "GaoYanJiu-cli.exe"
     client = build_opener(ProxyHandler({}))
@@ -115,7 +125,10 @@ def exercise(install: Path, profile: Path, fixture: dict, env: dict, version: st
         assert token is not None
         headers.update({"X-Gao-Token": token[1].decode("ascii"), "Content-Type": "application/json"})
         first = request("/api/bootstrap")
-        assert first["status"] == "ready" and first["writable"] and first["version"] == version
+        assert first["status"] == "ready" and first["writable"]
+        assert f'{first["version"]}+{first["build"]}' == release
+        assert request("/api/portals/browser")["available"] is True
+        assert request("/api/notifications/status")["state"] == "unavailable"
         for resource in ("AcademicAchievementManagerIcon.png", "FloatingSkyV354.png", "FloatingRockV354.png",
                          "grass-3d-texture.png"):
             assert call(f"/assets/{resource}").startswith(b"\x89PNG\r\n\x1a\n"), resource
@@ -134,6 +147,11 @@ def exercise(install: Path, profile: Path, fixture: dict, env: dict, version: st
         papers = request("/api/papers?scope=all")["papers"]
         assert len(papers) == 1 and papers[0]["title"] == "隔离安装论文"
         assert [row["status"] for row in papers[0]["history"]] == ["Under Review", "Accepted"]
+        reference = hashlib.sha256(json.dumps([paper], separators=(",", ":")).encode("ascii")).hexdigest()[:40]
+        activation = subprocess.run([str(cli), f"gaoyanjiu://follow-up/{reference}", "--no-browser"],
+                                    env=env, creationflags=NO_WINDOW, capture_output=True, timeout=35, check=True)
+        assert activation.stdout == b"" and process.poll() is None
+        assert request("/api/notifications/paper?ref=" + reference)["paper"]["key"] == paper
         work = request("/api/works", {"title": "MSI achievement", "type": "journalArticle", "authorPosition": "first"})["id"]
         request("/api/certificates", {"name": "MSI certificate", "tags": ["Synthetic"]})
         doc = profile.parent / "测试附件.txt"
@@ -176,7 +194,7 @@ def exercise(install: Path, profile: Path, fixture: dict, env: dict, version: st
             process.wait(timeout=15)
 
 
-def smoke(package: Path, legacy: Path | None, register_shell: bool) -> None:
+def installer_identity(package: Path) -> tuple[str, str, str]:
     with package.open("rb") as handle:
         actual = hashlib.file_digest(handle, "sha256").hexdigest()
     assert package.with_suffix(".msi.sha256").read_text(encoding="ascii").strip() == f"{actual}  {package.name}"
@@ -187,15 +205,29 @@ def smoke(package: Path, legacy: Path | None, register_shell: bool) -> None:
     assert template.split(";")[0] == "x64"
     product_code = msi_property(database, "ProductCode")
     upgrade_code = msi_property(database, "UpgradeCode")
-    expected_version = "+".join(msi_property(database, "ProductVersion").rsplit(".", 1))
-    del database
+    version = msi_property(database, "ProductVersion")
+    return product_code, upgrade_code, version
+
+
+def smoke(package: Path, legacy: Path | None, register_shell: bool, previous: Path | None = None) -> None:
+    product_code, upgrade_code, version = installer_identity(package)
+    expected_version = "+".join(version.rsplit(".", 1))
+    previous_code = None
+    if previous:
+        previous_code, previous_upgrade, previous_version = installer_identity(previous)
+        assert previous_upgrade == upgrade_code and previous_code != product_code
+        assert tuple(map(int, previous_version.split("."))) < tuple(map(int, version.split(".")))
     unrelated = ctypes.create_unicode_buffer(39)
     if ctypes.windll.msi.MsiEnumRelatedProductsW(upgrade_code, 0, 0, unrelated) != 259:
         raise RuntimeError("An existing MSI installation prevents isolated installation testing")
     protocol = r"Software\Classes\gaoyanjiu"
     menu = Path(os.environ["APPDATA"]) / "Microsoft/Windows/Start Menu/Programs/搞研究"
-    if register_shell and (read_registry(protocol, "URL Protocol") is not None or menu.exists()):
+    if (register_shell or previous) and (registry_key_exists(protocol) or registry_key_exists(NOTIFICATION_KEY) or menu.exists()):
         raise RuntimeError("Existing GaoYanJiu shell resources prevent isolated registration testing")
+    if previous:
+        installed_dir = Path(os.environ["LOCALAPPDATA"]) / "GaoYanJiu"
+        if installed_dir.exists() or registry_key_exists(r"Software\GaoSeries\GaoYanJiu"):
+            raise RuntimeError("Existing default install resources prevent isolated MSI upgrade testing")
 
     with tempfile.TemporaryDirectory(prefix="GaoYanJiu-install-") as directory:
         root = Path(directory)
@@ -213,32 +245,39 @@ def smoke(package: Path, legacy: Path | None, register_shell: bool) -> None:
         library = profile / "library.json"
         attachment = profile / "Attachments" / "legacy-work" / "old.txt"
         try:
-            if legacy:
-                subprocess.run([str(legacy), "--create-empty"], env=env, creationflags=NO_WINDOW, timeout=45, check=True)
+            if previous:
+                msi_run(root, "/i", str(previous), properties, "-previous")
+                assert ctypes.windll.msi.MsiQueryProductStateW(previous_code) == 5
+            if legacy or previous:
+                subprocess.run([str(legacy or cli), "--create-empty"], env=env, creationflags=NO_WINDOW, timeout=45, check=True)
                 fixture = legacy_fixture(profile)
                 original = library.read_bytes()
-            msi_run(root, "/i", str(package), properties)
+            msi_run(root, "/i", str(package), properties, "-candidate")
+            if previous_code:
+                assert ctypes.windll.msi.MsiQueryProductStateW(previous_code) == -1
             for file in (app, cli):
                 check_x64(file)
             assert Path(read_registry(key, "InstallPath")) == install
             if register_shell:
                 assert read_registry(protocol + r"\shell\open\command") == f'"{app}" "%1"'
+                assert read_registry(NOTIFICATION_KEY, "CustomActivator") == NOTIFICATION_ACTIVATOR
                 assert len(list(menu.glob("*.lnk"))) == 3
             assert (install / "ThirdPartyNotices.txt").is_file()
             version = subprocess.check_output([str(cli), "--version"], env=env, creationflags=NO_WINDOW, timeout=30)
             assert version.decode("ascii").strip() == expected_version
-            if legacy:
+            if legacy or previous:
                 assert library.read_bytes() == original
                 assert attachment.read_bytes() == b"Trusted synthetic legacy attachment"
             else:
                 assert not profile.exists()
                 subprocess.run([str(cli), "--create-empty"], env=env, creationflags=NO_WINDOW, timeout=45, check=True)
                 fixture = legacy_fixture(profile)
-            exercise(install, profile, fixture, env, expected_version.split("+")[0])
+            exercise(install, profile, fixture, env, expected_version)
             data_hash = hashlib.sha256(library.read_bytes()).hexdigest()
         finally:
-            if ctypes.windll.msi.MsiQueryProductStateW(product_code) == 5:
-                msi_run(root, "/x", product_code, properties)
+            for code in (product_code, previous_code):
+                if code and ctypes.windll.msi.MsiQueryProductStateW(code) == 5:
+                    msi_run(root, "/x", code, properties, "-candidate" if code == product_code else "-previous")
             assert read_registry(key, "InstallPath") is None
             try:
                 winreg.DeleteKey(winreg.HKEY_CURRENT_USER, key)
@@ -248,19 +287,24 @@ def smoke(package: Path, legacy: Path | None, register_shell: bool) -> None:
         assert hashlib.sha256(library.read_bytes()).hexdigest() == data_hash
         assert attachment.read_bytes() == b"Trusted synthetic legacy attachment"
         if register_shell:
-            assert read_registry(protocol, "URL Protocol") is None and not menu.exists()
+            assert not registry_key_exists(protocol) and not menu.exists()
+            assert read_registry(NOTIFICATION_KEY, "CustomActivator") is None
     print("MSI smoke passed: SHA-256, x64, install, app and CLI, local assets, records, attachments, city, layouts, uninstall")
     if legacy:
         print("Legacy Windows data passed: install preserves bytes; current app retains project, funding, unknown fields and city")
+    if previous:
+        print("MSI upgrade passed: earlier build was removed and legacy data and attachment bytes were preserved")
     if register_shell:
-        print("Shell registration passed: deep-link command and three Start menu shortcuts installed and removed")
+        print("Shell registration passed: deep link, three Start menu shortcuts, and notification identity installed and removed")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("package", type=Path)
-    parser.add_argument("--legacy-cli", type=Path)
+    sources = parser.add_mutually_exclusive_group()
+    sources.add_argument("--legacy-cli", type=Path)
+    sources.add_argument("--upgrade-from", type=Path)
     parser.add_argument("--register-shell", action="store_true", help="Use only on a disposable Windows account.")
     args = parser.parse_args()
     smoke(args.package.resolve(strict=True), args.legacy_cli.resolve(strict=True) if args.legacy_cli else None,
-          args.register_shell)
+          args.register_shell, args.upgrade_from.resolve(strict=True) if args.upgrade_from else None)

@@ -20,6 +20,13 @@
     <Property Id="GAOYANJIU_TEST_INSTALL" Secure="yes" />
     <Property Id="GAOYANJIU_STATE_KEY" Secure="yes" Value="Software\GaoSeries\GaoYanJiu" />
     <Property Id="MSIRESTARTMANAGERCONTROL" Value="DisableShutdown" />
+    <CustomAction Id="ClearGaoYanJiuReminders" FileKey="GaoYanJiuCli" ExeCommand="--clear-reminders"
+                  Execute="deferred" Impersonate="yes" Return="ignore" />
+    <InstallExecuteSequence>
+      <Custom Action="ClearGaoYanJiuReminders" Before="RemoveRegistryValues">
+        <![CDATA[REMOVE~="ALL" AND NOT UPGRADINGPRODUCTCODE AND NOT GAOYANJIU_TEST_INSTALL]]>
+      </Custom>
+    </InstallExecuteSequence>
 
     <Directory Id="TARGETDIR" Name="SourceDir">
       <Directory Id="LocalAppDataFolder">
@@ -41,13 +48,23 @@
                   <RegistryValue Key="shell\open\command" Type="string" Value="&quot;[INSTALLFOLDER]GaoYanJiu.exe&quot; &quot;%1&quot;" />
                 </RegistryKey>
               </Component>
+              <Component Id="GaoYanJiuNotificationIdentity" Guid="981455C6-A9FF-4A83-B571-45B25883C969" Win64="yes">
+                <Condition>NOT GAOYANJIU_TEST_INSTALL</Condition>
+                <RegistryKey Root="HKCU" Key="Software\Classes\AppUserModelId\GaoSeries.GaoYanJiu">
+                  <RegistryValue Name="DisplayName" Value="搞研究" Type="string" />
+                  <RegistryValue Name="CustomActivator" Value="{F35C7BDD-954B-41DD-A863-F60CC0C192D7}" Type="string" KeyPath="yes" />
+                </RegistryKey>
+              </Component>
             </Directory>
       </Directory>
       <Directory Id="ProgramMenuFolder">
         <Directory Id="GaoYanJiuMenuFolder" Name="搞研究">
           <Component Id="GaoYanJiuShortcuts" Guid="AD4B155B-F7BF-44B3-A9B0-746ECDD43AEF" Win64="yes">
             <Condition>NOT GAOYANJIU_TEST_INSTALL</Condition>
-            <Shortcut Id="MainShortcut" Name="搞研究" Target="[INSTALLFOLDER]GaoYanJiu.exe" WorkingDirectory="INSTALLFOLDER" />
+            <Shortcut Id="MainShortcut" Name="搞研究" Target="[INSTALLFOLDER]GaoYanJiu.exe" WorkingDirectory="INSTALLFOLDER">
+              <ShortcutProperty Key="System.AppUserModel.ID" Value="GaoSeries.GaoYanJiu" />
+              <ShortcutProperty Key="System.AppUserModel.ToastActivatorCLSID" Value="{F35C7BDD-954B-41DD-A863-F60CC0C192D7}" />
+            </Shortcut>
             <Shortcut Id="SubmissionShortcut" Name="搞研究 - 在投状态持续时间" Target="[INSTALLFOLDER]GaoYanJiu.exe"
                       Arguments="--widget submissions" WorkingDirectory="INSTALLFOLDER" />
             <Shortcut Id="AchievementsShortcut" Name="搞研究 - 成果与署名分布" Target="[INSTALLFOLDER]GaoYanJiu.exe"
@@ -62,6 +79,7 @@
     <Feature Id="Application" Title="搞研究" Level="1" Absent="disallow">
       <ComponentRef Id="GaoYanJiuFiles" />
       <ComponentRef Id="GaoYanJiuProtocol" />
+      <ComponentRef Id="GaoYanJiuNotificationIdentity" />
       <ComponentRef Id="GaoYanJiuShortcuts" />
     </Feature>
 
