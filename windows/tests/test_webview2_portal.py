@@ -177,3 +177,54 @@ def test_native_webview2_extract_review_and_store(tmp_path, appearance):
             publisher.shutdown()
             app_thread.join(timeout=5)
             publisher_thread.join(timeout=5)
+
+
+@pytest.mark.skipif(os.name != "nt" or os.environ.get("GAO_WEBVIEW2_SMOKE") != "1",
+                    reason="opt-in Windows WebView2 integration with a built native helper")
+def test_native_webview2_stop_reaps_active_and_replaced_helpers(tmp_path):
+    library = Library(tmp_path / "synthetic").open()
+    library.create_empty()
+    store = ResearchStore(library)
+    probe_helper = os.environ.get("GAO_WEBVIEW2_SMOKE_HELPER")
+    browser = PortalBrowser(store, asset_dir(), helper_path=Path(probe_helper) if probe_helper else None,
+                            probe_loopback=True)
+
+    def open_ready(portal_id):
+        session_id = browser.open(portal_id)["sessionId"]
+        for _ in range(80):
+            status = browser.status(session_id)
+            if status["state"] == "ready" and not status.get("notice"):
+                return browser._identified(session_id)
+            assert status["state"] not in {"error", "closed"}, status
+            time.sleep(0.25)
+        pytest.fail("The synthetic portal helper did not become ready")
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), _Publisher) as publisher:
+        publisher_thread = _run(publisher)
+        url = f"http://127.0.0.1:{publisher.server_port}/"
+        first = store.save_portal({"name": "合成投稿站 A", "url": url})
+        second = store.save_portal({"name": "合成投稿站 B", "url": url})
+        try:
+            replaced = open_ready(first)
+            # Hold the real native host open to reproduce the interval
+            # between terminal result delivery and its form being disposed.
+            with browser._lock:
+                replaced.state = "captured"
+            active = open_ready(second)
+            assert replaced.process.pid != active.process.pid
+            assert replaced.process.poll() is None and active.process.poll() is None
+            profiles = library.root / "PortalProfiles"
+            assert len(list(profiles.glob("*/EBWebView"))) == 2
+
+            browser.stop()
+            assert replaced.process.poll() == 0
+            assert active.process.poll() == 0
+            assert not browser._owned
+            assert browser.status() == {"available": False}
+            with pytest.raises(AppError, match="portal_browser_unavailable"):
+                browser.open(second)
+            assert len(list(profiles.glob("*/EBWebView"))) == 2
+        finally:
+            browser.stop()
+            publisher.shutdown()
+            publisher_thread.join(timeout=5)

@@ -19,6 +19,7 @@ from gaoyanjiu.workspace import clean_web_url
 
 MAX_PACKET_BYTES = 8 * 1024 * 1024
 SESSION_LIFETIME = 1800
+EXIT_GRACE = 2
 RESULT_FIELDS = {
     "id": 160,
     "title": 1200,
@@ -115,6 +116,8 @@ class PortalBrowser:
             self.extractor = asset_root.parents[3] / "Resources" / "extractor.js"
         self._lock = threading.RLock()
         self._session = None
+        self._owned: dict[subprocess.Popen, str] = {}
+        self._stopping = False
         self._probe_loopback = probe_loopback
 
     def _available(self) -> bool:
@@ -128,6 +131,8 @@ class PortalBrowser:
         portal = _find(self.store._data()["portals"], "id", portal_id)
         origin = _origin(portal["url"])
         with self._lock:
+            if self._stopping:
+                raise AppError("portal_browser_unavailable", 503)
             existing = self._session
             if existing and existing.state in {"starting", "ready"}:
                 if existing.portal_id == portal_id and existing.origin == origin:
@@ -149,21 +154,23 @@ class PortalBrowser:
                                            stderr=subprocess.DEVNULL, cwd=self.helper.parent, env=environment)
             except OSError as exc:
                 raise AppError("portal_browser_unavailable", 503) from exc
+            self._owned[process] = portal_id
             session = _Session(secrets.token_urlsafe(24), portal_id, origin, process, time.monotonic())
             try:
                 process.stdin.write((json.dumps(config, ensure_ascii=True) + "\n").encode("ascii"))
                 process.stdin.flush()
             except OSError as exc:
-                self._finish_process(process)
+                process.stdout.close()
+                self._finish_processes((process,))
                 raise AppError("portal_browser_unavailable", 503) from exc
             self._session = session
             threading.Thread(target=self._receive, args=(session,), daemon=True).start()
             return self._present(session)
 
     def status(self, session_id=None) -> dict:
-        if session_id is None:
-            return {"available": self._available()}
         with self._lock:
+            if session_id is None:
+                return {"available": not self._stopping and self._available()}
             session = self._identified(session_id)
             expired = time.monotonic() - session.opened_at > SESSION_LIFETIME
             if not expired:
@@ -200,37 +207,54 @@ class PortalBrowser:
             session.capture = None
             session.state = "closed"
             self._session = None
-        self._finish_process(session.process)
+        self._finish_processes((session.process,))
         return {"sessionId": session_id, "state": "closed"}
 
     def stop_portal(self, portal_id) -> None:
         with self._lock:
             session = self._session
-            if session is None or session.portal_id != portal_id:
-                return
-            self._session = None
-        self._finish_process(session.process)
+            if session is not None and session.portal_id == portal_id:
+                self._session = None
+            processes = tuple(process for process, owner in self._owned.items() if owner == portal_id)
+        self._finish_processes(processes)
 
     def stop(self) -> None:
         with self._lock:
-            session, self._session = self._session, None
-        if session is not None:
-            self._finish_process(session.process)
+            self._stopping = True
+            self._session = None
+            processes = tuple(self._owned)
+        self._finish_processes(processes)
 
     @staticmethod
-    def _finish_process(process) -> None:
-        try:
-            process.stdin.close()
-        except OSError:
-            pass
-        try:
-            process.wait(timeout=2)
-        except subprocess.TimeoutExpired:
+    def _wait_processes(processes) -> list[subprocess.Popen]:
+        deadline = time.monotonic() + EXIT_GRACE
+        alive = []
+        for process in processes:
+            try:
+                process.wait(timeout=max(0, deadline - time.monotonic()))
+            except (OSError, subprocess.TimeoutExpired):
+                alive.append(process)
+        return alive
+
+    def _finish_processes(self, processes) -> None:
+        # Send EOF to every owned helper before awaiting any one of them. In
+        # the native host this closes the form and disposes its owned WebViews.
+        for process in processes:
+            try:
+                process.stdin.close()
+            except (OSError, ValueError):
+                pass
+        remaining = self._wait_processes(processes)
+        for process in remaining:
             try:
                 process.terminate()
-                process.wait(timeout=2)
-            except (OSError, subprocess.TimeoutExpired):
-                return
+            except OSError:
+                pass
+        self._wait_processes(remaining)
+        with self._lock:
+            for process in processes:
+                if process.returncode is not None:
+                    self._owned.pop(process, None)
 
     def _receive(self, session) -> None:
         process = session.process
@@ -259,7 +283,7 @@ class PortalBrowser:
                     session.state, session.notice = "error", "extract-failed"
         finally:
             process.stdout.close()
-            self._finish_process(process)
+            self._finish_processes((process,))
             with self._lock:
                 if self._session is session and session.state in {"starting", "ready"}:
                     session.state = "closed" if process.returncode == 0 else "error"

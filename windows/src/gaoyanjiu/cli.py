@@ -11,7 +11,9 @@ from gaoyanjiu import __build__, __version__
 from gaoyanjiu.errors import AppError
 from gaoyanjiu.i18n import translate
 from gaoyanjiu.library import Library, default_data_dir
-from gaoyanjiu.session import app_session, link_destination, open_application, publish_in_session, receive_in_session, url_for
+from gaoyanjiu.session import (
+    app_session, link_destination, open_application, open_in_session, publish_in_session, receive_in_session, url_for,
+)
 from gaoyanjiu.store import ResearchStore, inspect_summary
 
 
@@ -33,7 +35,7 @@ def fail(message: str) -> int:
     return 1
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: list[str] | None = None, *, desktop_entry: bool = False) -> int:
     parser = argparse.ArgumentParser(prog="gaoyanjiu", description="搞研究 Windows 版")
     parser.add_argument("--data-dir", default="")
     parser.add_argument("--create-empty", action="store_true")
@@ -53,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
         emit(f"{__version__}+{__build__}")
         return 0
     try:
-        return run(args)
+        return run(args, desktop_entry=desktop_entry)
     except AppError as error:
         language = "zh-Hans"
         return fail(error.detail or translate(language, error.code))
@@ -61,7 +63,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
 
-def run(args) -> int:
+def run(args, *, desktop_entry: bool = False) -> int:
     if args.clear_reminders:
         from gaoyanjiu.notifications import clear_system_reminders
 
@@ -89,6 +91,7 @@ def run(args) -> int:
     incoming = Path(args.gaoaction).expanduser().resolve() if args.gaoaction else None
     if incoming:
         destination = "exchange"
+    desktop = desktop_entry and not (args.no_browser or args.serve or args.create_empty)
     with app_session(root) as existing:
         if existing:
             origin, port, token = existing
@@ -104,7 +107,8 @@ def run(args) -> int:
                     raise AppError("not_ready", 409)
                 emit_snapshot(snapshot)
             elif not args.no_browser:
-                open_application(url_for(origin, destination))
+                if not open_in_session(port, token, destination, desktop=desktop):
+                    open_application(url_for(origin, destination))
             return 0
         library = Library(root).open()
         store = ResearchStore(library)
@@ -135,7 +139,7 @@ def run(args) -> int:
             if store.reminders:
                 store.reminders.submit(store)
         serve(store, port=args.port, open_browser=not args.no_browser, lock_path=root / "server.json",
-              destination=destination)
+              destination=destination, desktop_entry=desktop)
         return 0
 
 

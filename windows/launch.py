@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -7,4 +8,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from gaoyanjiu.cli import main
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    desktop_entry = os.name == "nt" and (
+        not getattr(sys, "frozen", False) or Path(sys.executable).stem.casefold() == "gaoyanjiu"
+    )
+    raise SystemExit(main(desktop_entry=desktop_entry))

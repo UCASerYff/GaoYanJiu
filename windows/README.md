@@ -1,21 +1,27 @@
 # 搞研究 Windows V4.14
 
-适用于 Windows 10 和 11 x64。Windows 构建号为 3，命令行报告 4.14+3。安装包由 Windows Installer 管理，包含界面和命令行程序。已有 4.14+2 MSI 会按当前用户升级。
+适用于 Windows 10 和 11 x64。Windows 构建号为 4，命令行报告 4.14+4。安装包由 Windows Installer 管理，包含界面和命令行程序。已有 4.14+3 MSI 会按当前用户升级。
 
 ## 安装与资料
 
-1. 下载发行附件 `GaoYanJiu-Windows-4.14-build3-x64.msi` 及同名 `.sha256` 文件。
+1. 下载发行附件 `GaoYanJiu-Windows-4.14-build4-x64.msi` 及同名 `.sha256` 文件。
 2. 在 PowerShell 中计算 SHA-256，与校验文件中的值比较。安装包没有 Authenticode 签名。
 3. 退出旧版搞研究，在当前 Windows 用户下双击 MSI，完成后从开始菜单打开「搞研究」。默认安装目录为 `%LOCALAPPDATA%\GaoYanJiu\`。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\GaoYanJiu-Windows-4.14-build3-x64.msi
-Get-Content .\GaoYanJiu-Windows-4.14-build3-x64.msi.sha256
+Get-FileHash -Algorithm SHA256 .\GaoYanJiu-Windows-4.14-build4-x64.msi
+Get-Content .\GaoYanJiu-Windows-4.14-build4-x64.msi.sha256
 ```
 
 旧版 Windows 资料继续使用 `%APPDATA%\GaoSeries\Research\AcademicAchievementManager\`。首次使用时需确认创建资料库。若资料确实存在但缺失、损坏或版本不受支持，界面会报告原因并保护原文件。卸载 MSI 保留资料。旧便携版的程序文件可以在验证新版本后自行移除。
 
 `library.json` 沿用 schema 32，保留扩展字段、历史项目、历史资金、回收站、附件与研究城状态。V4.14 工作区已移除项目管理和资金栏目。Windows 凭据由本机 DPAPI 加密，保存在资料目录的 `secrets\`。应用通过本机回环访问界面及资料，常规入口使用 Edge 应用窗口，Edge 不可用时用系统浏览器打开。
+
+## 通知区域
+
+正常启动后，任务栏通知区域显示搞研究图标。Windows 也可能把图标放在隐藏图标菜单里。关闭工作台会保留后台与提醒，点图标或选择「打开 搞研究」可恢复。设置里的「退出搞研究」和托盘里的「退出」都会先确认，再关闭工作台、投稿门户和同一资料目录的小组件。选择取消可以返回并保存未提交的改动。
+
+工作台使用独立的临时 Edge 资料目录。成果和投稿等外部链接交给系统浏览器。搞研究退出后，系统浏览器继续运行。若工作台本身使用系统浏览器作为备用入口，对应标签页会显示退出状态。
 
 ## 工作流
 
@@ -47,7 +53,8 @@ Get-Content .\GaoYanJiu-Windows-4.14-build3-x64.msi.sha256
 ## 验收边界
 
 - 在 Windows 11 x64 用隔离资料验收。七页覆盖浅色和深色，高缩放覆盖 175% 及 150% 窄窗。还检查了长稿名、真实状态变化、设置、加载、错误恢复和通知深链。Windows 10 实机留待复核。
-- Windows Installer 已用隔离的 MSI 标识执行 4.14+2 到 4.14+3 原位升级和卸载。旧资料与附件逐字节保留，正式安装的程序和注册信息通过前后核对。
+- Windows Installer 用隔离的 MSI 标识验证 4.14+3 到 4.14+4 原位升级和卸载，并前后核对资料、附件和正式安装。
+- 用真实 Windows 通知区域接口验证图标添加、更新和移除。向隔离窗口发送任务栏创建消息验证恢复。最终打包程序在独立 Windows 桌面上验证关窗留驻、普通入口立即重开和退出后的端口清理。另以独立 Edge 进程核对退出范围，并验证取消退出、保存和深链转发。
 - 内嵌投稿门户使用 150% Windows 显示缩放下的合成站点验收，覆盖登录子窗口、主动提取和逐项审核。真实出版商登录和 EasyScholar 密钥尚未验收。
 - 使用独立 Windows 通知标识和合成稿件验证投递、重启去重和归档后撤回。测试关闭了通知横幅，通知深链通过无头工作台验证。
 - 研究城复用原始天空、草地、岩石贴图和原目录标识。建筑与地形用 Canvas 三维几何重建，SceneKit 材质、阴影和部分模型细节有差异。
@@ -60,8 +67,10 @@ Get-Content .\GaoYanJiu-Windows-4.14-build3-x64.msi.sha256
 
 ```powershell
 pwsh -File .\windows\build.ps1 -Python C:\path\to\venv\Scripts\python.exe
-python .\windows\tests\smoke_install.py .\windows\dist\GaoYanJiu-Windows-4.14-build3-x64.msi
+python .\windows\tests\smoke_install.py .\windows\dist\GaoYanJiu-Windows-4.14-build4-x64.msi
 node .\windows\tests\smoke_browser.mjs "C:\Program Files\Google\Chrome\Application\chrome.exe" C:\path\to\venv\Scripts\python.exe
 ```
+
+在有 Explorer 通知区域的 Windows 会话中，将 `GAO_RESEARCH_NATIVE_TRAY_TEST` 设为 `1`，可用 `python -m pytest windows/tests/test_windows_tray.py` 复现原生托盘回归。
 
 `GaoYanJiu-cli.exe` 支持 `--version`、`--inspect`、`--create-empty`、`--widget-snapshot`、`--widget submissions|works` 和 `--capabilities`。可用 `--data-dir` 或 `GAO_RESEARCH_DATA_DIR` 指定隔离资料。`--gaoaction PATH` 打开待审交接。`gaoyanjiu://submissions` 和 `gaoyanjiu://works` 定位页面，`gaoyanjiu://widget` 打开桌面组件。

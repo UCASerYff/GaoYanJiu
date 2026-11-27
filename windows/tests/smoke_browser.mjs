@@ -72,10 +72,12 @@ try {
     socket.addEventListener("error", reject, {once: true});
   });
   let counter = 0;
+  let pageDialog = null;
   const pending = new Map();
   socket.addEventListener("message", (event) => {
     const message = JSON.parse(event.data);
     if (message.method === "Runtime.exceptionThrown") errors.push(message.params.exceptionDetails.exception?.description || message.params.exceptionDetails.text);
+    if (message.method === "Page.javascriptDialogOpening") pageDialog = message.params;
     if (!pending.has(message.id)) return;
     const {resolve, reject} = pending.get(message.id);
     pending.delete(message.id);
@@ -471,8 +473,39 @@ try {
   await screenshot("workbench-error-dark-150");
   await byText("#main [role=alert] button", "重新加载");
   await current("works");
+
+  async function quitFromSettings(confirmed) {
+    const selected = byText("#editor .dialog-foot button", "退出搞研究");
+    await poll(() => pageDialog?.type === "confirm", "quit confirmation");
+    pageDialog = null;
+    await cdp("Page.handleJavaScriptDialog", {accept: confirmed});
+    await selected;
+  }
+  const priorFollowUp = (await request("/api/bootstrap")).settings.followUpDays;
+  await press('#utilities [aria-label="设置"]');
+  await has("#editor [name=followUpDays]");
+  await addText("#editor [name=followUpDays]", "17");
+  await quitFromSettings(false);
+  assert.equal(await evaluate(css("#editor[open] [name=followUpDays]") + ".value"), "17");
+  assert.equal((await request("/api/bootstrap")).settings.followUpDays, priorFollowUp);
+  await screenshot("quit-canceled-unsaved-setting-dark");
+  await submit();
+  assert.equal((await request("/api/bootstrap")).settings.followUpDays, 17);
+  await press('#utilities [aria-label="设置"]');
+  await has("#editor [name=followUpDays]");
+  await quitFromSettings(true);
+  await poll(async () => {
+    if (app.exitCode !== 0) return false;
+    try {
+      await readFile(path.join(dataDir, "server.json"));
+      return false;
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      return true;
+    }
+  }, "confirmed quit removes the running isolated service");
   assert.deepEqual(errors, []);
-  console.log("Browser passed: seven pages, first-run gate, long manuscript and work titles, submission editor and follow-up, status filter and archive, reviewed portal fallback, work filter and analytics, three searchable libraries, cross-folder search, reviewed partial OCR, attachment/Trash, city orbit/draw/place, dark 175%, narrow 150%, settings and direct notification activation.");
+  console.log("Browser passed: seven pages, first-run gate, long manuscript and work titles, submission editor and follow-up, status filter and archive, reviewed portal fallback, work filter and analytics, three searchable libraries, cross-folder search, reviewed partial OCR, attachment/Trash, city orbit/draw/place, dark 175%, narrow 150%, settings and direct notification activation, canceled and confirmed quit.");
 } catch (error) {
   console.error(logs.slice(-12).join("").slice(-6000));
   if (errors.length) console.error(errors);

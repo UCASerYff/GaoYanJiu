@@ -85,6 +85,11 @@ function external(label, url, symbol = "open") {
   link.href = safe.href;
   link.target = "_blank";
   link.rel = "noopener noreferrer";
+  link.addEventListener("click", (event) => {
+    if (!state.desktop || event.defaultPrevented) return;
+    event.preventDefault();
+    post("/api/session/external", {url: safe.href}).catch(report);
+  });
   return link;
 }
 function popover(label, symbol, children, iconOnly = false) {
@@ -118,6 +123,7 @@ function selectField(label, name, value, options) {
 }
 function formGroup(title, ...children) { return el("fieldset", "form-group stack", el("legend", "", title), children); }
 function closeDialog() { if ($("editor").open) $("editor").close(); }
+function hasDraft() { return Boolean($("editor")?.querySelector("form[data-dirty]") && $("editor").open); }
 function modal(title, nodes, options = {}) {
   const dialog = $("editor");
   const {subtitle, submit, submitLabel, dismissLabel, actions = [], size = "", unclosable = false} = options;
@@ -138,14 +144,21 @@ function modal(title, nodes, options = {}) {
   const titleBar = el("header", "dialog-header", el("div", "dialog-heading-text", heading, subtitle && el("p", "muted", subtitle)),
     !unclosable && button(tr("关闭窗口", "Close dialog"), closeDialog, {symbol: "close", iconOnly: true}));
   const form = el(submit ? "form" : "div", "dialog-layout", titleBar, el("div", "dialog-scroll", body, error), footer);
-  if (submit) form.addEventListener("submit", async (event) => {
-    event.preventDefault();
-    const submitter = event.submitter;
-    if (submitter) submitter.disabled = true;
-    error.hidden = true;
-    try { await submit(Object.fromEntries(new FormData(form)), form); } catch (failure) { report(failure); }
-    finally { if (submitter) submitter.disabled = false; }
-  });
+  if (submit) {
+    form.addEventListener("input", () => { form.dataset.dirty = ""; });
+    form.addEventListener("change", () => { form.dataset.dirty = ""; });
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const submitter = event.submitter;
+      if (submitter) submitter.disabled = true;
+      error.hidden = true;
+      try {
+        await submit(Object.fromEntries(new FormData(form)), form);
+        delete form.dataset.dirty;
+      } catch (failure) { report(failure); }
+      finally { if (submitter) submitter.disabled = false; }
+    });
+  }
   dialog.replaceChildren(form);
   if (!dialog.open) dialog.showModal();
   if (submit) {
@@ -411,14 +424,58 @@ async function openSettings() {
     closeDialog(); await refresh();
   }, actions: [button(tr("退出搞研究", "Quit GaoYanJiu"), quit, {symbol: "exit"})]});
 }
-async function quit() {
-  await post("/api/shutdown");
+let leavingWorkbench = false;
+let desktopPolling = false;
+let checkingDesktop = false;
+let routeAfterEditing = "";
+let missedDesktopChecks = 0;
+function showStopped() {
+  leavingWorkbench = true;
+  desktopPolling = false;
   closeDialog();
   $("shell").hidden = true;
   $("gate").hidden = false;
   $("gate-text").textContent = tr("搞研究已退出。", "GaoYanJiu has quit.");
   $("gate-create").hidden = $("gate-retry").hidden = $("gate-quit").hidden = true;
+}
+async function quit() {
+  if (leavingWorkbench || !window.confirm(tr(
+    "退出搞研究？工作台、投稿门户和小组件将关闭。请选择取消以返回并保存未保存的内容。",
+    "Quit GaoYanJiu? The workbench, portal and widgets will close. Choose Cancel to return to any unsaved edits.",
+  ))) return;
+  leavingWorkbench = true;
+  try {
+    await post("/api/shutdown");
+  } catch (failure) {
+    leavingWorkbench = false;
+    throw failure;
+  }
+  showStopped();
   window.close();
+}
+async function checkDesktop() {
+  if (!desktopPolling || checkingDesktop || leavingWorkbench) return;
+  checkingDesktop = true;
+  try {
+    const result = await api("/api/session/route");
+    missedDesktopChecks = 0;
+    if (result.stopping) { showStopped(); return; }
+    if (result.destination) routeAfterEditing = result.destination;
+    if (routeAfterEditing && !hasDraft()) {
+      location.hash = routeAfterEditing;
+      routeAfterEditing = "";
+    }
+  } catch {
+    if (++missedDesktopChecks >= 3) {
+      if (!hasDraft()) showStopped();
+      else if (missedDesktopChecks === 3) report(new Error(tr(
+        "已断开和搞研究后台的连接。未保存内容仍在表单中。",
+        "The connection to GaoYanJiu has closed. Unsaved changes are still in this form.",
+      )));
+    }
+  } finally {
+    checkingDesktop = false;
+  }
 }
 async function pageCity() {
   const data = await api("/api/reward");
@@ -462,7 +519,7 @@ async function render() {
 async function refresh(info = null) {
   const data = info || await api("/api/bootstrap");
   Object.assign(state, {settings: data.settings, language: data.settings.language || "zh-Hans", overview: data.overview,
-    build: data.build, version: data.version, writable: data.writable, libraryMessage: data.message});
+    build: data.build, version: data.version, writable: data.writable, libraryMessage: data.message, desktop: data.desktop === true});
   applyChrome();
   if (data.status !== "ready") {
     $("gate").hidden = false;
@@ -502,6 +559,12 @@ function applySearch() {
   searchTimer = setTimeout(() => render().catch(report), 150);
 }
 document.addEventListener("DOMContentLoaded", async () => {
+  window.addEventListener("beforeunload", (event) => {
+    if (hasDraft() && !leavingWorkbench) {
+      event.preventDefault();
+      event.returnValue = true;
+    }
+  });
   compactRail.addEventListener("change", () => {
     $("nav-toggle").querySelector("button")?.setAttribute("aria-expanded", String(navigationExpanded()));
   });
@@ -529,6 +592,16 @@ document.addEventListener("DOMContentLoaded", async () => {
   try {
     const info = await api("/api/bootstrap");
     await refresh(info); await applyRoute();
+    if (info.desktop) {
+      desktopPolling = true;
+      const interval = setInterval(() => {
+        if (desktopPolling) checkDesktop();
+        else clearInterval(interval);
+      }, 750);
+      window.addEventListener("focus", checkDesktop);
+      document.addEventListener("visibilitychange", () => { if (!document.hidden) checkDesktop(); });
+      checkDesktop();
+    }
   } catch (error) {
     $("gate").hidden = false;
     $("gate-text").textContent = error.message;

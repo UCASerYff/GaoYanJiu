@@ -35,19 +35,33 @@ def url_for(origin: str, destination: str) -> str:
     return f"{origin}#{destination}" if destination else origin
 
 
-def open_application(url: str) -> None:
-    if os.name == "nt":
-        for variable in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
-            root = os.environ.get(variable)
-            if not root:
-                continue
+def valid_destination(destination) -> bool:
+    return isinstance(destination, str) and (
+        destination in {"", "exchange"}
+        or any(destination == target and target for target, _ in URL_DESTINATIONS.values())
+        or re.fullmatch(r"follow-up/[a-f0-9]{40}", destination, re.ASCII) is not None
+    )
+
+
+def edge_executable() -> Path | None:
+    for variable in ("ProgramFiles(x86)", "ProgramFiles", "LOCALAPPDATA"):
+        root = os.environ.get(variable)
+        if root:
             edge = Path(root) / "Microsoft" / "Edge" / "Application" / "msedge.exe"
             if edge.is_file():
-                try:
-                    os.startfile(edge, arguments=f'--app="{url}"')
-                    return
-                except OSError:
-                    continue
+                return edge
+    return None
+
+
+def open_application(url: str) -> None:
+    if os.name == "nt":
+        edge = edge_executable()
+        if edge is not None:
+            try:
+                os.startfile(edge, arguments=f'--app="{url}"')
+                return
+            except OSError:
+                pass
     webbrowser.open(url)
 
 
@@ -95,6 +109,14 @@ def receive_in_session(port: int, token: str, path: Path) -> None:
     except (OSError, http.client.HTTPException) as exc:
         raise AppError("invalid_field", 400,
                        "无法将交接包发送到运行中的搞研究 / Could not send the package to the running app") from exc
+
+
+def open_in_session(port: int, token: str, destination: str, *, desktop: bool) -> bool:
+    try:
+        return json.loads(_request(port, "POST", "/api/session/open", token,
+                                   {"destination": destination, "desktop": desktop})).get("handled") is True
+    except (OSError, ValueError, http.client.HTTPException, AttributeError):
+        return False
 
 
 def publish_in_session(port: int, token: str) -> dict:

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
+import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -16,6 +19,10 @@ from gaoyanjiu.timeutil import format_iso, parse_date, utcnow
 SNAPSHOT_NAME = "widget-snapshot.json"
 PAGES = ("submissions", "works")
 SNAPSHOT_LIMIT = 128 * 1024 * 1024
+_WIDGET_QUIT_NAME = "widget-quit"
+_WIDGET_QUIT_ENV = "GAO_RESEARCH_WIDGET_QUIT_BASELINE"
+_WIDGET_QUIT_POLL_MS = 200
+_GENERATION = re.compile(r"[0-9a-f]{64}")
 
 
 def read_snapshot(path: Path) -> dict:
@@ -104,22 +111,94 @@ def _dark_mode(appearance: str) -> bool:
     return False
 
 
-def _launch(data_dir: Path, *arguments: str) -> None:
+def _quit_marker(data_dir: Path) -> Path:
+    return data_dir.resolve() / _WIDGET_QUIT_NAME
+
+
+def _profile_key(marker: Path) -> str:
+    return sha256_bytes(os.fsencode(os.path.normcase(marker.parent)))
+
+
+def _quit_generation(marker: Path) -> str | None:
+    try:
+        value = read_regular_bytes(marker, 64).decode("ascii")
+    except (AppError, OSError, UnicodeError):
+        return None
+    return value if _GENERATION.fullmatch(value) else None
+
+
+def signal_widget_shutdown(data_dir: Path, session_token: str) -> None:
+    """Publish the authenticated workbench session's quit to its widget windows."""
+    marker = _quit_marker(data_dir)
+    generation = sha256_bytes(f"gaoyanjiu-widget-quit:{_profile_key(marker)}:{session_token}".encode("utf-8"))
+    if marker.is_symlink() or (marker.exists() and not marker.is_file()):
+        raise OSError("Invalid widget quit marker")
+    if _quit_generation(marker) == generation:
+        return
+    descriptor, name = tempfile.mkstemp(dir=marker.parent, prefix=".widget-quit-")
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "wb") as file:
+            file.write(generation.encode("ascii"))
+        for attempt in range(4):
+            try:
+                os.replace(temporary, marker)
+                break
+            except PermissionError:
+                if attempt == 3:
+                    raise
+                time.sleep(0.025)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _quit_registration(data_dir: Path) -> tuple[Path, str | None]:
+    marker = _quit_marker(data_dir)
+    key, _, passed = os.environ.pop(_WIDGET_QUIT_ENV, "").partition(":")
+    if key == _profile_key(marker) and (passed == "-" or _GENERATION.fullmatch(passed)):
+        return marker, None if passed == "-" else passed
+    return marker, _quit_generation(marker)
+
+
+def _quit_changed(marker: Path, baseline: str | None) -> bool:
+    generation = _quit_generation(marker)
+    return generation is not None and generation != baseline
+
+
+def _watch_quit(window, marker: Path, baseline: str | None) -> None:
+    def poll() -> None:
+        if _quit_changed(marker, baseline):
+            window.destroy()
+        else:
+            window.after(_WIDGET_QUIT_POLL_MS, poll)
+
+    window.after(0, poll)
+
+
+def _launch(data_dir: Path, *arguments: str, quit_baseline: str | None = None) -> None:
     command = [sys.executable]
     if not getattr(sys, "frozen", False):
         command.append(str(Path(__file__).resolve().parents[2] / "launch.py"))
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-    subprocess.Popen(command + ["--data-dir", str(data_dir), *arguments], creationflags=flags,
-                     env={**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"})
+    environment = {**os.environ, "PYINSTALLER_RESET_ENVIRONMENT": "1"}
+    if quit_baseline is not None:
+        environment[_WIDGET_QUIT_ENV] = quit_baseline
+    subprocess.Popen(command + ["--data-dir", str(data_dir), *arguments], creationflags=flags, env=environment)
 
 
 def launch_widget(data_dir: Path, page: str) -> None:
     if page not in PAGES:
         raise AppError("invalid_field")
-    _launch(data_dir, "--widget", page)
+    marker = _quit_marker(data_dir)
+    baseline = _quit_generation(marker) or "-"
+    _launch(marker.parent, "--widget", page, quit_baseline=f"{_profile_key(marker)}:{baseline}")
 
 
 def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> dict | None:
+    registration = _quit_registration(data_dir) if not inspect else None
+    if registration and _quit_changed(*registration):
+        return None
+
     import tkinter as tk
     from tkinter import font, ttk
 
@@ -332,6 +411,8 @@ def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> 
             return {"tk": tk.TkVersion, "scaling": scaling, "layouts": layouts}
         finally:
             window.destroy()
+    if registration is not None:
+        _watch_quit(window, *registration)
     window.after_idle(refresh)
     window.mainloop()
     return None

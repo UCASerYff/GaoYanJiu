@@ -8,11 +8,12 @@ import secrets
 import shutil
 import tempfile
 import threading
+from contextlib import ExitStack, suppress
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, quote, urlparse
 
-from gaoyanjiu import __build__, __version__
+from gaoyanjiu import APP_NAME, __build__, __version__
 from gaoyanjiu.errors import AppError
 from gaoyanjiu.exchange import ResearchExchange
 from gaoyanjiu.i18n import translate
@@ -56,12 +57,16 @@ class Api:
         self.exchange = ResearchExchange(store)
         self.portal_browser = PortalBrowser(store, asset_dir())
         self.lock = threading.RLock()
+        self.stopping = threading.Event()
+        self.desktop = False
 
     def call(self, method: str, path: str, query: dict, body: dict | None) -> tuple[int, dict]:
         try:
             if path in {"/api/metrics/suggest", "/api/metrics/lookup"}:
                 return self._call(method, path, query, body or {})
             with self.lock:
+                if self.stopping.is_set() and method == "POST":
+                    raise AppError("not_ready", 503)
                 return self._call(method, path, query, body or {})
         except AppError as error:
             return error.status, {"error": error.code, "message": failure_message(self.store, error)}
@@ -283,12 +288,21 @@ class Api:
             return 200, store.import_gaoaction(Path(body["path"]), body["folderID"])
         if path == "/api/search" and method == "GET":
             return 200, store.search(query.get("q", ""))
+        if path == "/api/session/external" and method == "POST":
+            from webbrowser import open as open_external
+
+            url = body.get("url")
+            parsed = urlparse(url) if isinstance(url, str) else None
+            if (not parsed or parsed.scheme not in {"http", "https"} or not parsed.hostname
+                    or parsed.username is not None or parsed.password is not None or any(ord(char) < 32 for char in url)):
+                raise AppError("invalid_field")
+            if not open_external(url):
+                raise AppError("not_ready", 503)
+            return 200, {"ok": True}
         if path == "/api/inspect" and method == "GET":
             if store.library.data is None:
                 raise AppError(store.library.message_code or "not_ready", 409)
             return 200, inspect_summary(store.library.data)
-        if path == "/api/shutdown" and method == "POST":
-            return 200, {"ok": True}
         return 404, {"error": "not_found", "message": translate(store.language(), "not_found")}
 
     def _exchange_call(self, method: str, action: str, query: dict, body: dict) -> dict:
@@ -324,6 +338,7 @@ class Api:
             "name": "搞研究",
             "version": __version__,
             "build": __build__,
+            "desktop": self.desktop,
             "status": library.status,
             "message": translate("zh-Hans" if not self.store.settings else self.store.language(), library.message_code)
             if library.message_code
@@ -387,7 +402,51 @@ class ResearchHTTPServer(ThreadingHTTPServer):
         self.store = store
         self.api = Api(store)
         self.token = token
-        self.shutdown_requested = False
+        self.origin = f"http://127.0.0.1:{self.server_address[1]}/"
+        self._desktop_lock = threading.RLock()
+        self._route = ""
+        self.browser = None
+        self.tray = None
+
+    def enable_desktop(self) -> None:
+        if os.name != "nt" or self.api.stopping.is_set():
+            return
+        with self._desktop_lock:
+            if self.browser is not None or self.api.stopping.is_set():
+                return
+            from gaoyanjiu.tray import TrayIcon
+            from gaoyanjiu.workbench import WorkbenchBrowser
+
+            self.browser = WorkbenchBrowser()
+            self.tray = TrayIcon(APP_NAME, self.open_workbench, self.request_shutdown, language=self.store.language())
+            self.tray.start()
+            self.api.desktop = True
+
+    def open_workbench(self, destination: str = "") -> bool:
+        from gaoyanjiu.session import url_for
+
+        with self._desktop_lock:
+            if self.api.stopping.is_set():
+                return True
+            if self.browser is None:
+                return False
+            url = url_for(self.origin, destination)
+            if self.browser.open(url) and destination:
+                self._route = destination
+            return True
+
+    def take_route(self) -> str:
+        with self._desktop_lock:
+            route, self._route = self._route, ""
+            return route
+
+    def request_shutdown(self) -> None:
+        # The same lock serializes library mutations and normal shutdown admission.
+        with self.api.lock:
+            if self.api.stopping.is_set():
+                return
+            self.api.stopping.set()
+        threading.Thread(target=self.shutdown, name="GaoYanJiuShutdown", daemon=True).start()
 
 
 class ResearchHandler(BaseHTTPRequestHandler):
@@ -429,12 +488,35 @@ class ResearchHandler(BaseHTTPRequestHandler):
             return
         if uploaded is not None:
             with self.server.api.lock:
-                self._upload(parsed.path, uploaded)
+                if self.server.api.stopping.is_set():
+                    self._json(503, {"error": "not_ready", "message": translate(self.server.store.language(), "not_ready")})
+                else:
+                    self._upload(parsed.path, uploaded)
+            return
+        if self.command == "POST" and parsed.path == "/api/shutdown":
+            try:
+                self._json(200, {"ok": True})
+            finally:
+                self.server.request_shutdown()
+            return
+        if self.command == "POST" and parsed.path == "/api/session/open":
+            from gaoyanjiu.session import valid_destination
+
+            destination = body.get("destination", "")
+            if not valid_destination(destination):
+                self._json(400, {"error": "invalid_field", "message": translate(self.server.store.language(), "invalid_field")})
+                return
+            if body.get("desktop") is True:
+                self.server.enable_desktop()
+            self._json(200, {"handled": self.server.open_workbench(destination)})
+            return
+        if self.command == "GET" and parsed.path == "/api/session/route":
+            self._json(200, {"destination": self.server.take_route(), "stopping": self.server.api.stopping.is_set()})
             return
         status, payload = self.server.api.call(self.command, parsed.path, query, body)
         self._json(status, payload)
-        if status == 200 and parsed.path == "/api/shutdown":
-            threading.Thread(target=self.server.shutdown, daemon=True).start()
+        if status == 200 and self.command == "POST" and parsed.path == "/api/settings" and self.server.tray:
+            self.server.tray.set_language(self.server.store.language())
 
     def _read_request(self) -> tuple[dict | None, dict | None]:
         try:
@@ -627,24 +709,53 @@ def _verify_ocr_source(stream, expected: str) -> None:
 
 
 def serve(store: ResearchStore, port: int = 0, open_browser: bool = True, lock_path: Path | None = None,
-          destination: str = "") -> None:
+          destination: str = "", *, desktop_entry: bool = False) -> None:
     server = make_server(store, "127.0.0.1", port)
-    url = f"http://127.0.0.1:{server.server_address[1]}/"
-    if lock_path is not None:
-        from gaoyanjiu.fsutil import atomic_write
 
-        state = {"pid": os.getpid(), "url": url, "token": server.token}
-        atomic_write(lock_path, (json.dumps(state) + "\n").encode("utf-8"))
-    if open_browser:
-        from gaoyanjiu.session import open_application, url_for
+    def close_desktop():
+        with server._desktop_lock:
+            tray, browser = server.tray, server.browser
+        try:
+            if tray:
+                tray.close()
+        finally:
+            if browser:
+                browser.close()
 
-        threading.Timer(0.2, lambda: open_application(url_for(url, destination))).start()
-    try:
-        server.serve_forever()
-    finally:
-        if lock_path is not None and lock_path.exists():
-            lock_path.unlink()
-        server.api.portal_browser.stop()
-        if store.reminders:
-            store.reminders.close()
-        server.server_close()
+    def close_workers():
+        try:
+            server.api.portal_browser.stop()
+        finally:
+            if store.reminders:
+                store.reminders.close()
+
+    with ExitStack() as cleanup:
+        if lock_path is not None:
+            cleanup.callback(lock_path.unlink, missing_ok=True)
+        cleanup.callback(close_workers)
+        cleanup.callback(close_desktop)
+        cleanup.callback(server.server_close)
+        if lock_path is not None:
+            from gaoyanjiu.fsutil import atomic_write
+
+            state = {"pid": os.getpid(), "url": server.origin, "token": server.token}
+            atomic_write(lock_path, (json.dumps(state) + "\n").encode("utf-8"))
+        if open_browser:
+            if desktop_entry:
+                server.enable_desktop()
+            if not server.open_workbench(destination):
+                from gaoyanjiu.session import open_application, url_for
+
+                timer = threading.Timer(.2, lambda: open_application(url_for(server.origin, destination)))
+                cleanup.callback(timer.cancel)
+                timer.start()
+        try:
+            server.serve_forever()
+        finally:
+            normal_quit = server.api.stopping.is_set()
+            server.api.stopping.set()
+            if normal_quit:
+                from gaoyanjiu.widget import signal_widget_shutdown
+
+                with suppress(OSError):
+                    signal_widget_shutdown(store.library.root, server.token)
