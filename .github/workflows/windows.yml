@@ -2,6 +2,7 @@ name: Windows
 
 on:
   push:
+    branches-ignore: ['codex/macos-full-regression-415-17']
   pull_request:
 
 jobs:

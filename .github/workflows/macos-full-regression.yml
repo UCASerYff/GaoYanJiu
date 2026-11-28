@@ -1,0 +1,102 @@
+name: macOS 4.15 full isolated regression
+
+on:
+  push:
+    branches: ['codex/macos-full-regression-415-17']
+
+permissions:
+  contents: read
+
+env:
+  DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+  PRODUCTION_SHA: 7db8c2bfba894be763b2be864808bf4c11ce4761
+
+jobs:
+  regression:
+    name: ${{ matrix.suite }}
+    runs-on: macos-15
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [Production, Product, Library, Widgets, Contracts]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Verify source and toolchain
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD^)" = "$PRODUCTION_SHA"
+          git diff --exit-code "$PRODUCTION_SHA" HEAD -- . ':!.github/workflows'
+          test "$(uname -m)" = arm64
+          test -x "$DEVELOPER_DIR/usr/bin/xcodebuild"
+          version="$(xcrun xcodebuild -version)"
+          printf '%s\nmacOS SDK %s\n' "$version" "$(xcrun --sdk macosx --show-sdk-version)"
+          grep -qx 'Xcode 26.3' <<<"$version"
+          sw_vers
+      - name: Run production build or isolated fixtures
+        shell: bash
+        env:
+          SUITE: ${{ matrix.suite }}
+        run: |
+          failures=0
+          check() {
+            local label=$1
+            shift
+            echo "::group::$label"
+            if "$@"; then
+              echo "PASS $label"
+            else
+              echo "::error title=$label::Exit status $?"
+              failures=$((failures + 1))
+            fi
+            echo '::endgroup::'
+          }
+          contract() (
+            set -e
+            work=$(mktemp -d /private/tmp/research-contracts.XXXXXXXX)
+            trap 'rm -rf "$work"' EXIT
+            xcrun --sdk macosx swiftc -swift-version 5 -parse-as-library -O \
+              -sdk "$(xcrun --sdk macosx --show-sdk-path)" -target arm64-apple-macosx14.0 \
+              -module-cache-path "$work/cache" Sources/GaoActionV1.swift Tests/GaoActionFixtures.swift \
+              -o "$work/gaoaction-fixtures" || exit $?
+            "$work/gaoaction-fixtures"
+          )
+          case "$SUITE" in
+            Production)
+              check 'Unsigned framework, host, WidgetKit extension and focused fixtures' bash scripts/verify_macos_arm64.sh
+              ;;
+            Product)
+              check 'Achievements, dashboard, follow-up, portals, attachments and GaoAction' /bin/zsh scripts/test_product.sh \
+                existing-work-analytics workspace-navigation submission-actions portal-presentation fresh-import new-attachment \
+                new-version repeated-request incoming-handoff incoming-receipt-recovery incoming-index-recovery ocr-review-metadata \
+                target-gone version-cas attachment-recovery database-recovery index-recovery selection-result selection-target-gone \
+                selection-unbound-reference ocr-managed-result ocr-json-managed-result ocr-legacy-envelope-retry
+              ;;
+            Library)
+              check 'Library load safety' /bin/zsh scripts/test_library_load.sh
+              check 'Documents, staged writes and recovery' /bin/zsh scripts/test_import.sh
+              check 'OCR revision ordering' /bin/zsh scripts/test_library_load.sh --case ocr-revision-ordering
+              check 'OCR completed ordering' /bin/zsh scripts/test_library_load.sh --case completed-ocr-ordering
+              check 'OCR fixed return and review' /bin/zsh scripts/test_library_load.sh --case ocr-auto-return
+              check 'OCR repack and recovery' /bin/zsh scripts/test_library_load.sh --case ocr-result-repack
+              ;;
+            Widgets)
+              check 'Widget layout and publication' /bin/zsh scripts/test_widgets.sh
+              check 'Widget store and achievement totals' /bin/zsh scripts/test_widget_store.sh
+              check 'Trash persistence' /bin/zsh scripts/test_trash_persistence.sh
+              ;;
+            Contracts)
+              check 'GaoAction v1 model and transport' contract
+              check 'Exchange clients and fixed OCR return' /bin/zsh scripts/test_exchange_clients.sh
+              check 'Exchange OCR semantic fingerprint' /bin/zsh scripts/test_exchange_clients.sh --case ocr-result-repack
+              check 'Exchange UTI normalization' /bin/zsh scripts/test_exchange_clients.sh --case file-selection-uti-normalization
+              check 'Startup diagnostics' /bin/zsh scripts/test_startup_diagnostics.sh
+              check 'Startup and funding consolidation' /bin/zsh scripts/test_consolidation.sh
+              check 'Funding export' python3 -m unittest discover -s Tests -p 'test_*.py'
+              ;;
+            *) exit 2 ;;
+          esac
+          test "$failures" -eq 0
