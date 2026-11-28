@@ -260,34 +260,7 @@ private struct ExistingWorksAnalytics: View {
         VStack(spacing: 14) {
             AdaptiveAnalyticsCardStack {
                 AnalyticsCard(title: "成果类别分布", subtitle: "按当前列表中的成果类型统计") {
-                    Chart(typeData) { item in
-                        BarMark(
-                            x: .value(AppLocalization.text("数量"), item.count),
-                            y: .value(AppLocalization.text("类别"), item.label)
-                        )
-                        .foregroundStyle(AppTheme.accent.gradient)
-                        .cornerRadius(3)
-                        .annotation(position: .trailing) {
-                            Text("\(item.count)")
-                                .font(.caption2.monospacedDigit())
-                                .foregroundStyle(.secondary)
-                        }
-                    }
-                    .chartXAxis {
-                        AxisMarks(position: .bottom) {
-                            AxisGridLine().foregroundStyle(Color.primary.opacity(0.08))
-                            AxisValueLabel()
-                        }
-                    }
-                    .chartYAxis {
-                        AxisMarks(position: .leading) {
-                            AxisValueLabel().font(.caption)
-                        }
-                    }
-                    .chartPlotStyle { plot in
-                        plot.padding(.trailing, 28)
-                    }
-                    .frame(height: ExistingWorkAnalyticsLayout.chartHeight(categoryCount: typeData.count))
+                    ExistingWorkCategoryBars(categories: typeData)
                     .accessibilityChartDescriptor(ChartAccessibility.descriptor(
                         title: AppLocalization.text("成果类别分布"),
                         summary: AppLocalization.format(
@@ -396,6 +369,89 @@ private struct ExistingWorksAnalytics: View {
                 ))
             }
         }
+    }
+}
+
+private struct ExistingWorkCategoryBars: View {
+    let categories: [ExistingWorkCategoryDatum]
+    @ScaledMetric(relativeTo: .caption) private var labelWidth: CGFloat = 144
+    @ScaledMetric(relativeTo: .caption) private var minimumPlotWidth: CGFloat = 104
+    @ScaledMetric(relativeTo: .caption) private var barHeight: CGFloat = 12
+
+    private var maximumCount: Int { max(1, categories.map(\.count).max() ?? 0) }
+
+    var body: some View {
+        if !categories.isEmpty {
+            ViewThatFits(in: .horizontal) {
+                Grid(alignment: .leading, horizontalSpacing: 9, verticalSpacing: 8) {
+                    ForEach(categories) { item in
+                        GridRow {
+                            categoryLabel(item)
+                                .frame(maxWidth: labelWidth, alignment: .leading)
+                            bar(item)
+                                .frame(minWidth: minimumPlotWidth)
+                            countLabel(item)
+                                .gridColumnAlignment(.trailing)
+                        }
+                    }
+                    GridRow {
+                        Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                        scale
+                        Color.clear.gridCellUnsizedAxes([.horizontal, .vertical])
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 9) {
+                    ForEach(categories) { item in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(alignment: .firstTextBaseline, spacing: 9) {
+                                categoryLabel(item)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                                countLabel(item)
+                            }
+                            bar(item)
+                        }
+                    }
+                    scale
+                }
+            }
+        }
+    }
+
+    private func categoryLabel(_ item: ExistingWorkCategoryDatum) -> some View {
+        Text(verbatim: item.label)
+            .font(.caption)
+            .fixedSize(horizontal: false, vertical: true)
+    }
+
+    private func countLabel(_ item: ExistingWorkCategoryDatum) -> some View {
+        Text(item.count, format: .number)
+            .font(.caption2.monospacedDigit())
+            .foregroundStyle(.secondary)
+            .fixedSize()
+    }
+
+    private func bar(_ item: ExistingWorkCategoryDatum) -> some View {
+        GeometryReader { geometry in
+            Capsule().fill(Color.primary.opacity(0.06))
+                .overlay(alignment: .leading) {
+                    Capsule().fill(AppTheme.accent.gradient)
+                        .frame(width: geometry.size.width * CGFloat(item.count) / CGFloat(maximumCount))
+                }
+        }
+        .frame(height: barHeight)
+        .accessibilityHidden(true)
+    }
+
+    private var scale: some View {
+        HStack {
+            Text(0, format: .number)
+            Spacer(minLength: 4)
+            Text(maximumCount, format: .number)
+        }
+        .font(.caption2.monospacedDigit())
+        .foregroundStyle(.secondary)
+        .accessibilityHidden(true)
     }
 }
 

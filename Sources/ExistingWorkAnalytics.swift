@@ -32,10 +32,6 @@ enum ExistingWorkAnalytics {
 }
 
 enum ExistingWorkAnalyticsLayout {
-    static func chartHeight(categoryCount: Int) -> CGFloat {
-        max(215, CGFloat(max(0, categoryCount)) * 30 + 35)
-    }
-
     static func stackCards(width: CGFloat) -> Bool {
         width < 860
     }

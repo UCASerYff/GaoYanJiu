@@ -116,8 +116,8 @@
   padding: 14px;
 }
 .catalog-analysis .card { padding: 13px; box-shadow: none; background: var(--surface-raised); border-radius: 8px; }
-.catalog-analysis .chart-bars { margin-top: 8px; }
-.catalog-analysis .bar { grid-template-columns: minmax(0, .72fr) minmax(12px, 1fr) max-content; gap: 6px; min-height: 22px; }
+.catalog-analysis .chart-bars { column-gap: 6px; margin-top: 8px; }
+.catalog-analysis .bar { min-height: 22px; }
 .catalog-analysis .chart-fill { height: 8px; }
 .catalog-certificate-list { margin: 0; overflow: visible; }
 .catalog-certificate-table { table-layout: fixed; width: 100%; }

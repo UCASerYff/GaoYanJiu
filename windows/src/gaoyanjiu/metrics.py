@@ -5,12 +5,13 @@ from datetime import datetime
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from gaoyanjiu import __version__
 from gaoyanjiu.errors import AppError
 from gaoyanjiu.timeutil import format_iso
 
 CROSSREF_URL = "https://api.crossref.org/journals"
 EASYSCHOLAR_URL = "https://www.easyscholar.cc/open/getPublicationRank"
-USER_AGENT = "GaoYanJiu/4.14 (Windows)"
+USER_AGENT = f"GaoYanJiu/{__version__} (Windows)"
 IGNORED = {"", "-", "null", "undefined", "none", "false", "否", "无"}
 SUMMARY_PRIORITY = (
     "sci",

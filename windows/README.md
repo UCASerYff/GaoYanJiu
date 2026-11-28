@@ -1,16 +1,16 @@
-# 搞研究 Windows V4.14
+# 搞研究 Windows V4.15
 
-适用于 Windows 10 和 11 x64。Windows 构建号为 5，命令行报告 4.14+5。安装包由 Windows Installer 管理，包含界面和命令行程序。已有 4.14+4 MSI 会按当前用户升级。
+适用于 Windows 10 和 11 x64。Windows 构建号为 6，命令行报告 4.15+6。安装包由 Windows Installer 管理，包含界面和命令行程序。
 
 ## 安装与资料
 
-1. 下载发行附件 `GaoYanJiu-Windows-4.14-build5-x64.msi` 及同名 `.sha256` 文件。
+1. 从发布页下载 `GaoYanJiu-Windows-4.15-build6-x64.msi` 及同名 `.sha256` 文件。
 2. 在 PowerShell 中计算 SHA-256，与校验文件中的值比较。安装包没有 Authenticode 签名。
 3. 退出旧版搞研究，在当前 Windows 用户下双击 MSI，完成后从开始菜单打开「搞研究」。默认安装目录为 `%LOCALAPPDATA%\GaoYanJiu\`。
 
 ```powershell
-Get-FileHash -Algorithm SHA256 .\GaoYanJiu-Windows-4.14-build5-x64.msi
-Get-Content .\GaoYanJiu-Windows-4.14-build5-x64.msi.sha256
+Get-FileHash -Algorithm SHA256 .\GaoYanJiu-Windows-4.15-build6-x64.msi
+Get-Content .\GaoYanJiu-Windows-4.15-build6-x64.msi.sha256
 ```
 
 旧版 Windows 资料继续使用 `%APPDATA%\GaoSeries\Research\AcademicAchievementManager\`。首次使用时需确认创建资料库。若资料确实存在但缺失、损坏或版本不受支持，界面会报告原因并保护原文件。卸载 MSI 保留资料。旧便携版的程序文件可以在验证新版本后自行移除。
@@ -52,7 +52,11 @@ Get-Content .\GaoYanJiu-Windows-4.14-build5-x64.msi.sha256
 - 已安装的同伴应用可通过能力查询及交接启动参数接入。若同伴不可用或其版本不提供相应启动入口，应用会保留端到端交接包供手动打开。Windows 版同时识别旧 Windows 搞文件的历史收件方标识；新交接使用 `com.academic-achievement.manager`。
 - 搞文件 V1.11+2 安装版支持自动打开搞研究签发的回执。来自搞研究的选件和编辑请求需要搞文件提供带审核的 GaoAction 启动入口。
 
-## 验收边界
+## V4.15 更新
+
+成果分类图的各行共用类别、绘图区和数量列。长名称可以换行。窄窗中，名称和数量仍在同一个行组内，柱占用行组的完整宽度。
+
+## V4.14 验收记录
 
 - 在 Windows 11 x64 用隔离资料验收。七页覆盖浅色和深色，高缩放覆盖 175% 及 150% 窄窗。还检查了长稿名、真实状态变化、设置、加载、错误恢复和通知深链。Windows 10 实机留待复核。
 - Windows Installer 用隔离的 MSI 标识验证 4.14+4 到 4.14+5 原位升级和卸载，并前后核对资料、附件和正式安装。
@@ -69,7 +73,7 @@ Get-Content .\GaoYanJiu-Windows-4.14-build5-x64.msi.sha256
 
 ```powershell
 pwsh -File .\windows\build.ps1 -Python C:\path\to\venv\Scripts\python.exe
-python .\windows\tests\smoke_install.py .\windows\dist\GaoYanJiu-Windows-4.14-build5-x64.msi
+python .\windows\tests\smoke_install.py .\windows\dist\GaoYanJiu-Windows-4.15-build6-x64.msi
 node .\windows\tests\smoke_browser.mjs "C:\Program Files\Google\Chrome\Application\chrome.exe" C:\path\to\venv\Scripts\python.exe
 ```
 

@@ -1,17 +1,17 @@
-# 搞研究 V4.14
+# 搞研究 V4.15
 
 独立 macOS 应用，包含本模块完整业务、游戏场景和 WidgetKit 小组件。运行不依赖搞七廿三或其他六个应用；联动功能需要同时安装相关应用。
 
 ## 下载与安装
 
-从 [Releases](https://github.com/UCASerYff/GaoYanJiu/releases/latest) 下载 `GaoYanJiu-4.14.zip` 和同名 `.sha256` 文件。仓库保存源码，安装包作为 Release 附件单独发布。
+从发布页下载对应版本的 ZIP 和同名 `.sha256` 文件。V4.15 的 macOS 构建号为 17，包名为 `GaoYanJiu-4.15.zip`。仓库保存源码，安装包作为 Release 附件单独发布。 [发布页](https://github.com/UCASerYff/GaoYanJiu/releases/latest)
 
 1. 支持 macOS 14 或更高版本、Apple Silicon；暂未提供 Intel 版本。
 2. 解压 ZIP，将 `搞研究.app` 拖入“应用程序”文件夹。
 3. 如果 macOS 拦截打开，请先确认软件来源，再进入“系统设置 → 隐私与安全性”，允许该应用打开。发行包使用 Apple Development 签名，未做 Apple 公证。
 4. 安装后运行一次，再从系统小组件列表添加本应用的小组件。整合版的小组件需要重新添加。
 
-下载后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.14.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
+下载 V4.15 后可在文件所在目录运行 `shasum -a 256 -c GaoYanJiu-4.15.zip.sha256` 核验安装包。发行文件使用英文名称，便于命令行校验和下载。
 
 ## 功能
 
@@ -83,6 +83,11 @@ bash scripts/verify_macos_arm64.sh
 版本以 `Info.plist` 为准。后续更新仅更新受影响的应用，每次版本 +0.01、构建号 +1。先以只读清单核验用户资料，再安装新程序并检查记录、附件和游戏进度，成功后清理旧程序、安装包与中间构建。程序资源与用户资料须分别处理，不能用清理构建目录的方式删除用户数据；不得创建旧程序回滚副本或任何资料备份。
 
 第三方组件和资源保留各自许可，详情见 `Resources/` 中的许可、来源说明与补丁记录。
+
+## V4.15 更新
+
+- 成果类别分布将类别名称、数量和柱保留在同一行组中。长名称可换行，窄窗按行组排列，柱长始终共用同一比例。
+- Windows 的统计柱使用共享的起点和绘图区。不同位数的数量共用同一列，窄窗仍保留类别和对应的柱。
 
 ## V4.14 更新
 
@@ -192,4 +197,4 @@ bash scripts/verify_macos_arm64.sh
 
 ## Windows 版
 
-Windows 10/11 x64 提供 V4.14 MSI 和 SHA-256。界面通过本机 Edge 应用窗口打开，附带两个独立桌面小组件。资料沿用 `%APPDATA%\GaoSeries\Research\AcademicAchievementManager\` 和 schema 32。安装、跨应用交接和验收范围见 [Windows 版说明](windows/README.md)。
+Windows 10/11 x64 提供 MSI 和 SHA-256。界面通过本机 Edge 应用窗口打开，附带两个独立桌面小组件。资料沿用 `%APPDATA%\GaoSeries\Research\AcademicAchievementManager\` 和 schema 32。 [Windows 安装与验收说明](windows/README.md)

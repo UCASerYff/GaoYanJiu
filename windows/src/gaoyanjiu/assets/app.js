@@ -205,13 +205,17 @@ function chart(title, subtitle, values, options = {}) {
   for (const row of values) {
     const fill = el("i", "chart-fill");
     fill.style.width = `${row.count * 100 / largest}%`;
-    const line = el("div", `bar ${row.tone || mark}`, el("span", "bar-label", row.label),
-      el("span", "bar-track", fill), el("span", "bar-count", `${row.count}${unit}${row.note ? ` · ${row.note}` : ""}`));
+    const track = el("span", "bar-track", fill);
+    track.setAttribute("aria-hidden", "true");
+    const line = el("div", `bar ${row.tone || mark}`, el("span", "bar-label", row.label), track,
+      el("span", "bar-count", `${row.count}${unit}${row.note ? ` · ${row.note}` : ""}`));
     box.append(line);
   }
   if (!values.length) box.append(el("p", "muted chart-empty", empty));
   if (height) box.style.minHeight = `${height}px`;
-  return card(title, subtitle, box);
+  const chartCard = card(title, subtitle, box);
+  chartCard.classList.add("bar-chart-card");
+  return chartCard;
 }
 function reorderItem(node, kind, id, enabled = true) {
   if (!enabled || !state.writable) return node;

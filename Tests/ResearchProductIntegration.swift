@@ -816,10 +816,12 @@ struct ResearchProductIntegration {
         ], "类别顺序或专利拆分改变")
         try require(Set(data.map(\.id)).count == data.count && data.allSatisfy { $0.count > 0 },
                     "类别 ID 重复或包含空类别")
-        try require(ExistingWorkAnalyticsLayout.chartHeight(categoryCount: 0) == 215,
-                    "空图最小高度改变")
-        try require(ExistingWorkAnalyticsLayout.chartHeight(categoryCount: 12) == 395,
-                    "多类别高度未增长")
+        let grown = ExistingWorkAnalytics.categories(for: works + [work("journal-2", .journalArticle), work("book", .book)])
+        try require(grown.first?.count == 2 && grown.contains { $0.id == ExistingWorkType.book.rawValue },
+                    "增加计数和类别后图表资料未更新")
+        try require(ExistingWorkAnalytics.categories(for: Array(works.dropFirst())).map(\.id) == Array(data.dropFirst()).map(\.id),
+                    "删除最后一条成果后类别未移除")
+        try require(ExistingWorkAnalytics.categories(for: []).isEmpty, "空资料产生了类别")
         try require(ExistingWorkAnalyticsLayout.stackCards(width: 800) &&
                     !ExistingWorkAnalyticsLayout.stackCards(width: 1000), "宽窄布局阈值错误")
     }
