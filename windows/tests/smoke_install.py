@@ -150,9 +150,14 @@ def exercise(install: Path, profile: Path, fixture: dict, env: dict, release: st
         assert f'{first["version"]}+{first["build"]}' == release
         assert request("/api/portals/browser")["available"] is True
         assert request("/api/notifications/status")["state"] == "unavailable"
-        for resource in ("GaoYanJiu.ico", "AcademicAchievementManagerIcon.png", "FloatingSkyV354.png", "FloatingRockV354.png",
+        for resource in ("AcademicAchievementManagerIcon.png", "FloatingSkyV354.png", "FloatingRockV354.png",
                          "grass-3d-texture.png"):
             assert call(f"/assets/{resource}").startswith(b"\x89PNG\r\n\x1a\n"), resource
+        icon = call("/assets/GaoYanJiu.ico")
+        reserved, kind, count = struct.unpack_from("<HHH", icon)
+        assert (reserved, kind) == (0, 1) and len(icon) >= 6 + 16 * count
+        frame_sizes = {struct.unpack_from("<BB", icon, 6 + 16 * index) for index in range(count)}
+        assert {(size, size) for size in (16, 20, 24, 28, 32, 40, 48, 56, 64)} <= frame_sizes
         assert call("/assets/extractor.js")
         assert call("/assets/city.js")
         assert json.loads((profile / "library.json").read_text(encoding="utf-8")) == fixture
