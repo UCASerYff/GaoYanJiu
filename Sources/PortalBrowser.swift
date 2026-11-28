@@ -144,8 +144,7 @@ final class PortalBrowserModel: NSObject, ObservableObject, WKNavigationDelegate
         scanTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] timer in
             guard self != nil else { timer.invalidate(); return }
             Task { @MainActor [weak self] in
-                guard let self, self.webView.window != nil, !self.isLoading else { return }
-                self.importCurrentPage(userInitiated: false)
+                self?.importCurrentPage(userInitiated: false)
             }
         }
         loadAddress()
@@ -228,8 +227,14 @@ final class PortalBrowserModel: NSObject, ObservableObject, WKNavigationDelegate
         performCredentialLogin(credential)
     }
 
+    private var canAutomaticallyImport: Bool {
+        guard !isLoading, !webView.isHiddenOrHasHiddenAncestor,
+              NSApp?.isHidden != true, let window = webView.window else { return false }
+        return window.isVisible && !window.isMiniaturized && window.occlusionState.contains(.visible)
+    }
+
     func importCurrentPage(userInitiated: Bool = true) {
-        guard !isExtracting else { return }
+        guard !isExtracting, userInitiated || canAutomaticallyImport else { return }
         isExtracting = true
         if userInitiated { statusMessage = AppLocalization.text("正在读取当前页面…") }
 
@@ -237,7 +242,8 @@ final class PortalBrowserModel: NSObject, ObservableObject, WKNavigationDelegate
         ExtractorRuntime.extract(from: webView, publisher: publisher) { [weak self] result in
             guard let self else { return }
             self.isExtracting = false
-            guard self.navigationGeneration == generation else { return }
+            guard self.navigationGeneration == generation,
+                  userInitiated || self.canAutomaticallyImport else { return }
             switch result {
             case .success(let extraction) where !extraction.papers.isEmpty:
                 let encoder = JSONEncoder()
