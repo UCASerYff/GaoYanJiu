@@ -303,6 +303,28 @@ try {
   await press('[data-catalog-view="analysis"]');
   await has(".catalog-analysis .chart-bars");
   assert.equal(await evaluate("document.querySelectorAll('.catalog-analysis section').length"), 3);
+  const categoryLayout = () => evaluate(`(() => {
+    const row = document.querySelector('.catalog-analysis .bar-chart-card .bar');
+    const measure = selector => row.querySelector(selector).getBoundingClientRect().toJSON();
+    const label = row.querySelector('.bar-label');
+    return {row: row.getBoundingClientRect().toJSON(), label: measure('.bar-label'),
+      track: measure('.bar-track'), count: measure('.bar-count'), text: label.textContent,
+      overflow: label.scrollWidth > label.clientWidth + 1};
+  })()`);
+  const wideCategory = await categoryLayout();
+  assert.match(wideCategory.text, /实用新型/);
+  assert.ok(wideCategory.label.right < wideCategory.track.left && wideCategory.track.right < wideCategory.count.left);
+  await screenshot("works-chart-wide-light");
+  await cdp("Emulation.setDeviceMetricsOverride", {width: 330, height: 720, deviceScaleFactor: 1.5, mobile: false});
+  const narrowCategory = await categoryLayout();
+  assert.ok(narrowCategory.track.top >= Math.max(narrowCategory.label.bottom, narrowCategory.count.bottom));
+  assert.ok(Math.abs(narrowCategory.track.width - narrowCategory.row.width) <= 1);
+  await screenshot("works-chart-narrow-light-150");
+  await evaluate("document.querySelector('.catalog-analysis .bar-chart-card .bar-label').textContent = '合成超长类别名称'.repeat(5)");
+  const wrappedCategory = await categoryLayout();
+  assert.ok(wrappedCategory.label.height > narrowCategory.label.height && !wrappedCategory.overflow);
+  assert.ok(wrappedCategory.track.top >= wrappedCategory.label.bottom);
+  await cdp("Emulation.setDeviceMetricsOverride", {width: 1440, height: 940, deviceScaleFactor: 1, mobile: false});
   await press('[data-catalog-view="records"]');
   await has(".work-row");
 

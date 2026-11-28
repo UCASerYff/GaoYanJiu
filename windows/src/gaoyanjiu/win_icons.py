@@ -10,6 +10,8 @@ from pathlib import Path
 APP_ICON_FILE = "GaoYanJiu.ico"
 SM_CXICON, SM_CYICON = 11, 12
 SM_CXSMICON, SM_CYSMICON = 49, 50
+WM_GETICON, WM_SETICON = 0x007F, 0x0080
+ICON_SMALL, ICON_BIG = 0, 1
 
 
 def bind(library, name, result, *arguments):
@@ -51,3 +53,38 @@ def load_application_icon(user, dimensions: tuple[int, int], *, source: Path | N
         return None
     load = bind(user, "LoadImageW", w.HANDLE, w.HINSTANCE, w.LPCWSTR, w.UINT, c.c_int, c.c_int, w.UINT)
     return load(None, str(icon), 1, *dimensions, 0x10)  # IMAGE_ICON, LR_LOADFROMFILE
+
+
+class NativeWindowIcons:
+    """Own the DPI-dependent icons set on an application's Windows windows."""
+
+    def __init__(self, user):
+        self.user = user
+        self.icons: dict[tuple[int, int], int] = {}
+        self._send = bind(user, "SendMessageTimeoutW", w.LPARAM, w.HWND, w.UINT, w.WPARAM, w.LPARAM,
+                          w.UINT, w.UINT, c.POINTER(c.c_size_t))
+        self._destroy_icon = bind(user, "DestroyIcon", w.BOOL, w.HICON)
+
+    def apply(self, hwnd, dpi: int) -> bool:
+        applied = True
+        for kind, small in ((ICON_SMALL, True), (ICON_BIG, False)):
+            dimensions = icon_dimensions(self.user, dpi, small=small)
+            icon = self.icons.get(dimensions)
+            if not icon:
+                icon = load_application_icon(self.user, dimensions)
+                if not icon:
+                    applied = False
+                    continue
+                self.icons[dimensions] = icon
+            result = c.c_size_t()
+            if not self._send(hwnd, WM_GETICON, kind, dpi, 0x0003, 150, c.byref(result)):
+                applied = False
+            elif result.value != icon and not self._send(hwnd, WM_SETICON, kind, icon, 0x0003, 150, c.byref(result)):
+                applied = False
+        return applied
+
+    def close(self) -> None:
+        """Release the cache after destroying the windows using these handles."""
+        for icon in self.icons.values():
+            self._destroy_icon(icon)
+        self.icons.clear()

@@ -128,9 +128,15 @@ def test_workbench_applies_matching_shortcut_identity_and_window_icons(branded_i
         for dpi in (96, 120, 144, 168, 192):
             monkeypatch.setattr(workbench_shell, "window_dpi", lambda u, h: dpi)
             shell.update((hwnd,))
-            assert shell.windows[hwnd] == (dpi, True)
+            assert hwnd in shell.identified
             for role, small in ((0, True), (1, False)):
-                assert send(hwnd, 0x007F, role, dpi) == shell.icons[win_icons.icon_dimensions(user, dpi, small=small)]
+                assert send(hwnd, 0x007F, role, dpi) == shell.native_icons.icons[win_icons.icon_dimensions(user, dpi, small=small)]
+
+        # A late favicon can replace the workbench icon without changing the window's DPI.
+        send(hwnd, 0x0080, 0, shell.native_icons.icons[(16, 16)])
+        assert send(hwnd, 0x007F, 0, 192) == shell.native_icons.icons[(16, 16)]
+        shell.update((hwnd,))
+        assert send(hwnd, 0x007F, 0, 192) == shell.native_icons.icons[(32, 32)]
 
         store = c.c_void_p()
         assert shell.get_store(hwnd, c.byref(workbench_shell._PROPERTY_STORE), c.byref(store)) == 0

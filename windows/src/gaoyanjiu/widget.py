@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from contextlib import suppress
 from datetime import datetime
 from pathlib import Path
 
@@ -202,13 +203,14 @@ def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> 
     import tkinter as tk
     from tkinter import font, ttk
 
+    user = None
     if sys.platform == "win32":
         import ctypes
+        from ctypes import wintypes
 
-        try:
-            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
-        except AttributeError:
-            pass
+        user = ctypes.WinDLL("user32", use_last_error=True)
+        with suppress(AttributeError):
+            user.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
     window = tk.Tk()
     if inspect:
         window.withdraw()
@@ -225,18 +227,6 @@ def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> 
         icon = Path(sys._MEIPASS) / "gaoyanjiu_assets" / "AcademicAchievementManagerIcon.png"
     else:
         icon = Path(__file__).resolve().parents[3] / "Resources" / "AcademicAchievementManagerIcon.png"
-    from gaoyanjiu.win_icons import application_icon_path
-
-    ico = application_icon_path()
-    native_icon = False
-    if sys.platform == "win32" and ico.is_file():
-        try:
-            window.iconbitmap(default=str(ico))
-            native_icon = True
-        except tk.TclError:
-            pass  # Some Tk builds do not decode PNG-compressed ICO frames.
-    if not native_icon and icon.is_file():
-        window.iconphoto(True, tk.PhotoImage(file=icon))
     available_families = {family.casefold() for family in font.families(window)}
     family = next((name for name in ("Microsoft YaHei UI", "Microsoft YaHei", "DengXian", "SimHei")
                    if name.casefold() in available_families), "TkDefaultFont")
@@ -421,8 +411,53 @@ def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> 
             return {"tk": tk.TkVersion, "scaling": scaling, "layouts": layouts}
         finally:
             window.destroy()
+
+    from gaoyanjiu.win_icons import NativeWindowIcons, application_icon_path, bind, window_dpi
+
+    fallback_used = False
+    def use_fallback_icon():
+        nonlocal fallback_used
+        if not fallback_used and icon.is_file():
+            window.iconphoto(True, tk.PhotoImage(file=icon))
+            fallback_used = True
+
+    native_icons = None
+    icon_timer = None
+    if user is not None and application_icon_path().is_file():
+        native_icons = NativeWindowIcons(user)
+        get_root = bind(user, "GetAncestor", wintypes.HWND, wintypes.HWND, wintypes.UINT)
+
+        def refresh_icon(event=None):
+            if (event is not None and event.widget is not window) or not window.winfo_ismapped():
+                return
+            # Tk's client HWND is a child of the native top-level wrapper.
+            hwnd = get_root(window.winfo_id(), 2)  # GA_ROOT
+            if not hwnd or not native_icons.apply(hwnd, window_dpi(user, hwnd)):
+                use_fallback_icon()
+
+        def poll_icon():
+            nonlocal icon_timer
+            refresh_icon()
+            icon_timer = window.after(1500, poll_icon)
+
+        window.bind("<Map>", refresh_icon, add="+")
+        window.bind("<Configure>", refresh_icon, add="+")
+        icon_timer = window.after_idle(poll_icon)
+    else:
+        use_fallback_icon()
     if registration is not None:
         _watch_quit(window, *registration)
     window.after_idle(refresh)
-    window.mainloop()
+    try:
+        window.mainloop()
+    finally:
+        if native_icons is not None:
+            try:
+                with suppress(tk.TclError):
+                    if icon_timer is not None:
+                        window.after_cancel(icon_timer)
+                    if window.winfo_exists():
+                        window.destroy()
+            finally:
+                native_icons.close()
     return None
