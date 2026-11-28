@@ -1,0 +1,75 @@
+name: macOS synthetic OCR mailbox
+run-name: Mac OCR c5bf74e / 1132183 / 7db8c2b
+
+on:
+  push:
+    branches: ['codex/macos-ocr-spool-20261128-final']
+
+permissions:
+  contents: read
+
+jobs:
+  synthetic-ocr:
+    runs-on: macos-15
+    timeout-minutes: 25
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.3.app/Contents/Developer
+      OPERATIONS_SHA: c5bf74ea8b66f72c12c2d92e2a4105ccf7db1546
+      FILES_SHA: 1132183392ef7b00a934f022d3bdcd88b4e8d9e8
+      RESEARCH_SHA: 7db8c2bfba894be763b2be864808bf4c11ce4761
+    steps:
+      - name: Check out validation only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Check out approved GaoCaoZuo source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: UCASerYff/GaoCaoZuo
+          ref: ${{ env.OPERATIONS_SHA }}
+          path: inputs/operations
+          persist-credentials: false
+      - name: Check out approved GaoWenJian source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: UCASerYff/GaoWenJian
+          ref: ${{ env.FILES_SHA }}
+          path: inputs/files
+          persist-credentials: false
+      - name: Check out approved GaoYanJiu source
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          repository: UCASerYff/GaoYanJiu
+          ref: ${{ env.RESEARCH_SHA }}
+          path: inputs/research
+          persist-credentials: false
+      - name: Verify exact clean commits and native toolchain
+        shell: bash
+        run: |
+          check_commit() {
+            local repository=$1 checkout=$2 expected=$3 actual
+            actual=$(git -C "$checkout" rev-parse HEAD)
+            printf '%s %s\n' "$repository" "$actual"
+            test "$actual" = "$expected"
+            test -z "$(git -C "$checkout" status --porcelain)"
+          }
+          check_commit GaoCaoZuo inputs/operations "$OPERATIONS_SHA"
+          check_commit GaoWenJian inputs/files "$FILES_SHA"
+          check_commit GaoYanJiu inputs/research "$RESEARCH_SHA"
+          test "$(uname -m)" = arm64
+          sw_vers
+          xcode_version=$(xcrun xcodebuild -version)
+          printf '%s\nmacOS SDK %s\n' "$xcode_version" "$(xcrun --sdk macosx --show-sdk-version)"
+          grep -qx 'Xcode 26.3' <<<"$xcode_version"
+      - name: Publish and receive synthetic results via the native mailbox
+        shell: bash
+        run: |
+          bash .github/validation/ocr-spool/run.sh \
+            "$GITHUB_WORKSPACE/inputs/operations" \
+            "$GITHUB_WORKSPACE/inputs/files" \
+            "$GITHUB_WORKSPACE/inputs/research"
+          {
+            printf '%s\n\n' 'Passed the synthetic three-app native OCR mailbox contract.'
+            printf -- '- GaoCaoZuo %s\n- GaoWenJian %s\n- GaoYanJiu %s\n' \
+              "$OPERATIONS_SHA" "$FILES_SHA" "$RESEARCH_SHA"
+          } >> "$GITHUB_STEP_SUMMARY"
