@@ -49,7 +49,7 @@ $portalThirdParty = Get-Content -LiteralPath (Join-Path $portalDir 'WebView2-NOT
 Add-Content -LiteralPath $licenseFile -Value "`n`nMicrosoft Edge WebView2 SDK`n===========================`n`n$portalNotice`n`n$portalThirdParty" -Encoding utf8
 
 $resourcePaths = @(
-    $assets, $iconPng, (Join-Path $macResources 'extractor.js'),
+    $assets, $icon, $iconPng, (Join-Path $macResources 'extractor.js'),
     (Join-Path $macResources 'RewardCity\FloatingRockV354.png'),
     (Join-Path $macResources 'RewardCity\FloatingSkyV354.png'),
     (Join-Path $macResources 'RewardCity\grass-3d-texture.png'),

@@ -225,7 +225,17 @@ def show_widget(data_dir: Path, initial_page: str, *, inspect: bool = False) -> 
         icon = Path(sys._MEIPASS) / "gaoyanjiu_assets" / "AcademicAchievementManagerIcon.png"
     else:
         icon = Path(__file__).resolve().parents[3] / "Resources" / "AcademicAchievementManagerIcon.png"
-    if icon.is_file():
+    from gaoyanjiu.win_icons import application_icon_path
+
+    ico = application_icon_path()
+    native_icon = False
+    if sys.platform == "win32" and ico.is_file():
+        try:
+            window.iconbitmap(default=str(ico))
+            native_icon = True
+        except tk.TclError:
+            pass  # Some Tk builds do not decode PNG-compressed ICO frames.
+    if not native_icon and icon.is_file():
         window.iconphoto(True, tk.PhotoImage(file=icon))
     available_families = {family.casefold() for family in font.families(window)}
     family = next((name for name in ("Microsoft YaHei UI", "Microsoft YaHei", "DengXian", "SimHei")

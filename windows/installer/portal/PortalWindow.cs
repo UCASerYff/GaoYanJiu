@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Imaging;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading.Tasks;
 using System.Web.Script.Serialization;
@@ -32,6 +33,9 @@ namespace GaoYanJiu.Portal
             MaxJsonLength = CaptureLimit, RecursionLimit = 30
         };
 
+        [DllImport("shell32.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
+        private static extern int SetCurrentProcessExplicitAppUserModelID(string appId);
+
         [STAThread]
         private static int Main(string[] args)
         {
@@ -47,6 +51,7 @@ namespace GaoYanJiu.Portal
                     output.WriteLine("{\"state\":\"error\",\"notice\":\"cannot-initialize\"}");
                     return 2;
                 }
+                if (!smoke) SetCurrentProcessExplicitAppUserModelID("GaoSeries.GaoYanJiu");
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 using (var window = new PortalWindow(config, input, output, smoke))
@@ -62,7 +67,141 @@ namespace GaoYanJiu.Portal
         }
     }
 
-    internal sealed class PortalWindow : Form
+    internal abstract class PortalIconForm : Form
+    {
+        private const int WmSetIcon = 0x0080;
+        private const int WmDpiChanged = 0x02e0;
+        private const int IconSmall = 0;
+        private const int IconBig = 1;
+        private const uint ImageIcon = 1;
+        private const int SmallWidth = 49;  // SM_CXSMICON
+        private const int SmallHeight = 50; // SM_CYSMICON
+        private const int LargeWidth = 11;  // SM_CXICON
+        private const int LargeHeight = 12; // SM_CYICON
+        // The .NET Framework compiler stores /win32icon in this RT_GROUP_ICON.
+        private static readonly IntPtr EmbeddedIcon = new IntPtr(32512);
+
+        private IntPtr smallIcon;
+        private IntPtr largeIcon;
+        private Icon fallbackIcon;
+
+        [DllImport("kernel32.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr GetModuleHandleW(string moduleName);
+        [DllImport("user32.dll", ExactSpelling = true)]
+        private static extern uint GetDpiForWindow(IntPtr window);
+        [DllImport("user32.dll", ExactSpelling = true)]
+        private static extern int GetSystemMetricsForDpi(int index, uint dpi);
+        [DllImport("comctl32.dll", ExactSpelling = true)]
+        private static extern int LoadIconWithScaleDown(IntPtr module, IntPtr resource, int width, int height, out IntPtr icon);
+        [DllImport("user32.dll", ExactSpelling = true)]
+        private static extern IntPtr LoadImageW(IntPtr module, IntPtr resource, uint type, int width, int height, uint flags);
+        [DllImport("user32.dll", ExactSpelling = true)]
+        private static extern IntPtr SendMessageW(IntPtr window, int message, IntPtr parameter, IntPtr value);
+        [DllImport("user32.dll", ExactSpelling = true)]
+        private static extern bool DestroyIcon(IntPtr icon);
+
+        protected override void CreateHandle()
+        {
+            // Form assigns its own icon after raising HandleCreated.
+            base.CreateHandle();
+            if (IsHandleCreated) ApplyIcons(Handle, CurrentDpi(Handle));
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            base.WndProc(ref message);
+            if (message.Msg == WmDpiChanged && IsHandleCreated && message.HWnd == Handle)
+                ApplyIcons(message.HWnd, (uint)(message.WParam.ToInt64() & 0xffff));
+        }
+
+        protected override void OnHandleDestroyed(EventArgs args)
+        {
+            base.OnHandleDestroyed(args);
+            ReleaseIcons();
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing && fallbackIcon != null)
+            {
+                fallbackIcon.Dispose();
+                fallbackIcon = null;
+            }
+        }
+
+        private static uint CurrentDpi(IntPtr window)
+        {
+            try
+            {
+                uint dpi = GetDpiForWindow(window);
+                if (dpi != 0) return dpi;
+            }
+            catch (EntryPointNotFoundException) { }
+            using (Graphics graphics = Graphics.FromHwnd(window))
+                return (uint)Math.Round(graphics.DpiX);
+        }
+
+        private static int IconMetric(int index, uint dpi, int at96Dpi)
+        {
+            try
+            {
+                int size = GetSystemMetricsForDpi(index, dpi);
+                if (size > 0) return size;
+            }
+            catch (EntryPointNotFoundException) { }
+            return (int)((at96Dpi * dpi + 48) / 96);
+        }
+
+        private static IntPtr LoadEmbeddedIcon(IntPtr module, int width, int height)
+        {
+            if (module == IntPtr.Zero) return IntPtr.Zero;
+            try
+            {
+                IntPtr icon;
+                if (LoadIconWithScaleDown(module, EmbeddedIcon, width, height, out icon) == 0)
+                    return icon;
+            }
+            catch (EntryPointNotFoundException) { }
+            // Early common-control versions can still load exact resource frames via User32.
+            return LoadImageW(module, EmbeddedIcon, ImageIcon, width, height, 0);
+        }
+
+        private void ApplyIcons(IntPtr window, uint dpi)
+        {
+            if (dpi == 0) dpi = 96;
+
+            IntPtr module = GetModuleHandleW(null);
+            IntPtr small = LoadEmbeddedIcon(module, IconMetric(SmallWidth, dpi, 16), IconMetric(SmallHeight, dpi, 16));
+            IntPtr large = LoadEmbeddedIcon(module, IconMetric(LargeWidth, dpi, 32), IconMetric(LargeHeight, dpi, 32));
+            if (small == IntPtr.Zero || large == IntPtr.Zero)
+            {
+                if (small != IntPtr.Zero) DestroyIcon(small);
+                if (large != IntPtr.Zero) DestroyIcon(large);
+                if (smallIcon == IntPtr.Zero && fallbackIcon == null)
+                {
+                    fallbackIcon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+                    if (fallbackIcon != null) Icon = fallbackIcon;
+                }
+                return;
+            }
+
+            SendMessageW(window, WmSetIcon, new IntPtr(IconSmall), small);
+            SendMessageW(window, WmSetIcon, new IntPtr(IconBig), large);
+            ReleaseIcons();
+            smallIcon = small;
+            largeIcon = large;
+        }
+
+        private void ReleaseIcons()
+        {
+            if (smallIcon != IntPtr.Zero) DestroyIcon(smallIcon);
+            if (largeIcon != IntPtr.Zero) DestroyIcon(largeIcon);
+            smallIcon = largeIcon = IntPtr.Zero;
+        }
+    }
+
+    internal sealed class PortalWindow : PortalIconForm
     {
         private readonly PortalInput config;
         private readonly StreamReader input;
@@ -99,7 +238,6 @@ namespace GaoYanJiu.Portal
             MinimumSize = new Size(590, 450);
             ClientSize = new Size(1080, 702);
             StartPosition = FormStartPosition.CenterScreen;
-            Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             theme.ApplyCaption(this);
             if (smoke)
             {
@@ -345,7 +483,7 @@ namespace GaoYanJiu.Portal
                     AutoScaleDimensions = new SizeF(96, 96), AutoScaleMode = AutoScaleMode.Dpi,
                     ClientSize = new Size(870, 640), MinimumSize = new Size(530, 420),
                     StartPosition = smoke ? FormStartPosition.Manual : FormStartPosition.CenterParent, BackColor = theme.Canvas,
-                    Font = new Font(english ? "Segoe UI" : "Microsoft YaHei UI", 9.5f), Icon = Icon
+                    Font = new Font(english ? "Segoe UI" : "Microsoft YaHei UI", 9.5f)
                 };
                 if (smoke) popup.Location = new Point(-32000, -32000);
                 else popup.Shown += delegate { FitToWorkingArea(popup); };
@@ -627,7 +765,7 @@ namespace GaoYanJiu.Portal
         }
     }
 
-    internal sealed class PortalPopup : Form
+    internal sealed class PortalPopup : PortalIconForm
     {
         private readonly bool offscreen;
 

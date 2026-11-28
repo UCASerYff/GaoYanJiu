@@ -150,7 +150,7 @@ def exercise(install: Path, profile: Path, fixture: dict, env: dict, release: st
         assert f'{first["version"]}+{first["build"]}' == release
         assert request("/api/portals/browser")["available"] is True
         assert request("/api/notifications/status")["state"] == "unavailable"
-        for resource in ("AcademicAchievementManagerIcon.png", "FloatingSkyV354.png", "FloatingRockV354.png",
+        for resource in ("GaoYanJiu.ico", "AcademicAchievementManagerIcon.png", "FloatingSkyV354.png", "FloatingRockV354.png",
                          "grass-3d-texture.png"):
             assert call(f"/assets/{resource}").startswith(b"\x89PNG\r\n\x1a\n"), resource
         assert call("/assets/extractor.js")

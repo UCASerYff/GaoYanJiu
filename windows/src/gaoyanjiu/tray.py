@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import ctypes as c
 import logging
-import sys
 import threading
 from ctypes import wintypes as w
-from pathlib import Path
+
+from gaoyanjiu.win_icons import bind, icon_dimensions, load_application_icon, window_dpi
 
 TRAY_ICON_ID = 1
 TRAY_CALLBACK = 0x8001
@@ -20,10 +20,12 @@ WM_CLOSE = 0x10
 WM_DESTROY = 0x02
 WM_ENDSESSION = 0x16
 WM_CONTEXTMENU = 0x7B
+WM_DISPLAYCHANGE = 0x7E
 WM_COMMAND = 0x111
 WM_TIMER = 0x113
 WM_LBUTTONUP = 0x202
 WM_RBUTTONUP = 0x205
+WM_DPICHANGED = 0x02E0
 NIN_SELECT, NIN_KEYSELECT = 0x400, 0x401
 
 WNDPROC = c.WINFUNCTYPE(w.LPARAM, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
@@ -47,13 +49,6 @@ class NotifyIconData(c.Structure):
     ]
 
 
-def bind(library, name, result, *arguments):
-    function = getattr(library, name)
-    function.argtypes = arguments
-    function.restype = result
-    return function
-
-
 class TrayIcon:
     def __init__(self, title, on_open, on_quit, *, language):
         self.title = title
@@ -68,6 +63,8 @@ class TrayIcon:
         self._version4 = False
         self._context_active = False
         self._confirming = False
+        self._owned_icon = None
+        self._icon_dimensions = None
 
     def start(self):
         self._thread.start()
@@ -95,6 +92,7 @@ class TrayIcon:
 
     def _run(self):
         user = c.WinDLL("user32", use_last_error=True)
+        self._user = user
         shell = c.WinDLL("shell32", use_last_error=True)
         kernel = c.WinDLL("kernel32", use_last_error=True)
         if hasattr(user, "SetThreadDpiAwarenessContext"):
@@ -103,6 +101,8 @@ class TrayIcon:
         self.default_proc = bind(user, "DefWindowProcW", w.LPARAM, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
         self.notify_icon = bind(shell, "Shell_NotifyIconW", w.BOOL, w.DWORD, c.POINTER(NotifyIconData))
         self.destroy_window = bind(user, "DestroyWindow", w.BOOL, w.HWND)
+        self._destroy_icon = bind(user, "DestroyIcon", w.BOOL, w.HICON)
+        self._find_window = bind(user, "FindWindowW", w.HWND, w.LPCWSTR, w.LPCWSTR)
         self.post_quit = bind(user, "PostQuitMessage", None, c.c_int)
         self.taskbar_created = bind(user, "RegisterWindowMessageW", w.UINT, w.LPCWSTR)("TaskbarCreated")
         timer = bind(user, "SetTimer", w.WPARAM, w.HWND, w.WPARAM, w.UINT, c.c_void_p)
@@ -113,7 +113,6 @@ class TrayIcon:
         register = bind(user, "RegisterClassW", w.ATOM, c.POINTER(WindowClass))
         unregister = bind(user, "UnregisterClassW", w.BOOL, w.LPCWSTR, w.HINSTANCE)
         atom = 0
-        owned_icon = None
         try:
             atom = register(c.byref(definition))
             if not atom:
@@ -123,17 +122,16 @@ class TrayIcon:
             self.hwnd = create(0, class_name, self.title, 0x80000000, 0, 0, 0, 0, None, None, instance, None)
             if not self.hwnd:
                 raise c.WinError(c.get_last_error())
-            owned_icon = self._application_icon(user, shell)
-            icon = owned_icon or bind(user, "LoadIconW", w.HICON, w.HINSTANCE, c.c_void_p)(None, 32512)
             self.data = NotifyIconData()
             self.data.cbSize = c.sizeof(NotifyIconData)
             self.data.hWnd = self.hwnd
             self.data.uID = TRAY_ICON_ID
             self.data.uFlags = 0x87  # NIF_MESSAGE | NIF_ICON | NIF_TIP | NIF_SHOWTIP
             self.data.uCallbackMessage = TRAY_CALLBACK
-            self.data.hIcon = icon
+            self.data.hIcon = bind(user, "LoadIconW", w.HICON, w.HINSTANCE, c.c_void_p)(None, 32512)
             self.data.uVersion = 4
             self._update_tooltip()
+            self._refresh_icon()
             self._add_icon()
             timer(self.hwnd, 1, 2000, None)
             self._ready.set()
@@ -151,26 +149,31 @@ class TrayIcon:
         finally:
             if self.hwnd:
                 self.destroy_window(self.hwnd)
-            if owned_icon:
-                bind(user, "DestroyIcon", w.BOOL, w.HICON)(owned_icon)
+            if self._owned_icon:
+                self._destroy_icon(self._owned_icon)
             if atom:
                 unregister(class_name, instance)
             self._ready.set()
 
-    @staticmethod
-    def _application_icon(user, shell):
-        if getattr(sys, "frozen", False):
-            small = w.HICON()
-            extract = bind(shell, "ExtractIconExW", w.UINT, w.LPCWSTR, c.c_int,
-                           c.POINTER(w.HICON), c.POINTER(w.HICON), w.UINT)
-            if extract(sys.executable, 0, None, c.byref(small), 1) > 0:
-                return small
-        icon_path = Path(__file__).resolve().parents[2] / "build" / "GaoYanJiu.ico"
-        load_image = bind(user, "LoadImageW", w.HANDLE, w.HINSTANCE, w.LPCWSTR, w.UINT, c.c_int, c.c_int, w.UINT)
-        return load_image(None, str(icon_path), 1, 0, 0, 0x0050) if icon_path.is_file() else None
+    def _refresh_icon(self):
+        # The callback HWND is hidden. Measure the shell's taskbar instead.
+        taskbar = self._find_window("Shell_TrayWnd", None)
+        dimensions = icon_dimensions(self._user, window_dpi(self._user, taskbar), small=True)
+        if dimensions == self._icon_dimensions:
+            return
+        icon = load_application_icon(self._user, dimensions)
+        if not icon:
+            return
+        old_icon = self._owned_icon
+        self._owned_icon = self.data.hIcon = icon
+        self._icon_dimensions = dimensions
+        if self.registered.is_set() and not self._notify(NIM_MODIFY, self.data):
+            self.registered.clear()
+        if old_icon:
+            self._destroy_icon(old_icon)
 
     def _add_icon(self):
-        if self._notify(NIM_ADD, self.data):
+        if self._notify(NIM_ADD, self.data) or self._notify(NIM_MODIFY, self.data):
             self._version4 = self._notify(NIM_SETVERSION, self.data)
             self.registered.set()
         else:
@@ -196,8 +199,10 @@ class TrayIcon:
                 return 0
             if self._closing.is_set():
                 return self.default_proc(hwnd, message, wparam, lparam)
-            if message == self.taskbar_created or (message == WM_TIMER and not self.registered.is_set()):
-                self._add_icon()
+            if hasattr(self, "data") and message in (self.taskbar_created, WM_TIMER, WM_DPICHANGED, WM_DISPLAYCHANGE):
+                self._refresh_icon()
+                if message == self.taskbar_created or not self.registered.is_set():
+                    self._add_icon()
                 return 0
             if message == TRAY_UPDATE:
                 self._update_tooltip()

@@ -14,7 +14,9 @@ from ctypes import wintypes as w
 from pathlib import Path
 
 from gaoyanjiu.session import edge_executable
-from gaoyanjiu.tray import WM_CLOSE, bind
+from gaoyanjiu.tray import WM_CLOSE
+from gaoyanjiu.win_icons import bind
+from gaoyanjiu.workbench_shell import WorkbenchShell
 
 ENUM_WINDOWS = c.WINFUNCTYPE(w.BOOL, w.HWND, w.LPARAM)
 
@@ -68,6 +70,9 @@ class WorkbenchBrowser:
         self._user = c.WinDLL("user32", use_last_error=True)
         self._close_handle = bind(self._kernel, "CloseHandle", w.BOOL, w.HANDLE)
         self._wait = bind(self._kernel, "WaitForSingleObject", w.DWORD, w.HANDLE, w.DWORD)
+        self._shell = WorkbenchShell(self._user)
+        self._shell_stop = threading.Event()
+        self._shell_thread = None
 
     def open(self, url, *, restore=True):
         """Return true when an existing or starting window can consume a pending route."""
@@ -142,6 +147,26 @@ class WorkbenchBrowser:
         finally:
             self._close_handle(child.thread)
 
+        if self._shell_thread is None:
+            self._shell_thread = threading.Thread(target=self._update_shell_windows, name="GaoYanJiuShell", daemon=True)
+            self._shell_thread.start()
+
+    def _update_shell_windows(self):
+        ole = c.WinDLL("ole32", use_last_error=True)
+        initialized = bind(ole, "CoInitializeEx", c.c_long, c.c_void_p, w.DWORD)(None, 2) >= 0
+        try:
+            while not self._shell_stop.is_set():
+                with self._lock:
+                    if self._shell_stop.is_set():
+                        return
+                    active = self._active()
+                    self._shell.update(self._windows() if active else ())
+                    delay = 0.20 if active and time.monotonic() - self._started < 4 else 1.0
+                self._shell_stop.wait(delay)
+        finally:
+            if initialized:
+                bind(ole, "CoUninitialize", None)()
+
     def _windows(self):
         windows = []
         if not self._job:
@@ -187,10 +212,12 @@ class WorkbenchBrowser:
             time.sleep(.05)
 
     def close(self):
+        self._shell_stop.set()
         with self._lock:
             if self._job:
                 post = bind(self._user, "PostMessageW", w.BOOL, w.HWND, w.UINT, w.WPARAM, w.LPARAM)
                 for window in self._windows():
+                    self._shell.clear_window_identity(window)
                     post(window, WM_CLOSE, 0, 0)
                 self._wait_for_job(1.2)
                 if self._active():
@@ -198,6 +225,7 @@ class WorkbenchBrowser:
                     self._wait_for_job(1.2)
                 self._close_handle(self._job)
                 self._job = None
+            self._shell.close()
             if self._process:
                 self._wait(self._process, 1200)
                 self._close_handle(self._process)

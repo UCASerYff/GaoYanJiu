@@ -21,6 +21,7 @@ from gaoyanjiu.notifications import reminder_paper
 from gaoyanjiu.portal import PortalBrowser
 from gaoyanjiu.publishers import PUBLISHERS
 from gaoyanjiu.store import ResearchStore, inspect_summary
+from gaoyanjiu.win_icons import APP_ICON_FILE, application_icon_path
 from gaoyanjiu.workspace import documents_workspace, merge_portal_capture, original_ocr_pdf, tag_counts, workspace_overview
 
 UPLOAD_CAP = 256 * 1024 * 1024
@@ -682,11 +683,11 @@ class ResearchHandler(BaseHTTPRequestHandler):
             mime = "text/html; charset=utf-8"
         else:
             name = path.removeprefix("/assets/")
-            if name not in {"app.js", "submissions.js", "records.js", "library-ui.js", "style.css", "submissions.css", "collections.css",
+            if name not in {APP_ICON_FILE, "app.js", "submissions.js", "records.js", "library-ui.js", "style.css", "submissions.css", "collections.css",
                             "exchange.js", "city.js", "city-scene.js", "city.css"} and name not in REUSED_ASSETS:
                 self._json(404, {"error": "not_found", "message": "not found"})
                 return
-            target = root / name
+            target = application_icon_path() if name == APP_ICON_FILE else root / name
             if not target.is_file() and name in REUSED_ASSETS:
                 target = root.parents[3] / "Resources" / REUSED_ASSETS[name]
             if not target.is_file():
